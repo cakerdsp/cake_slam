@@ -1,0 +1,15 @@
+# 编译产物
+build/
+devel/
+install/
+bin/
+lib/
+
+# 配置文件与日志
+*.log
+.vscode/
+.idea/
+
+# 临时文件
+*~
+*.swp

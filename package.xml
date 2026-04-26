@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>cake_slam</name>
+  <version>0.0.1</version>
+  <description>LiDAR-IMU-Visual SLAM framework scaffold.</description>
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>GPL-3.0-or-later</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>message_filters</depend>
+  <depend>pcl_conversions</depend>
+  <depend>pcl_ros</depend>
+  <depend>eigen3_cmake_module</depend>
+  <depend>opencv</depend>
+  <depend>cv_bridge</depend>
+  <depend>image_transport</depend>
+  <depend>camera_models</depend>
+  <depend>ceres</depend>
+  <depend>sophus</depend>
+  <depend>livox_ros_driver2</depend>
+
+  <exec_depend>ros2launch</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

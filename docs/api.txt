@@ -1,0 +1,36 @@
+cake_slam API (modules only)
+
+IMU
+- ImuHub
+  - Push(imu_msg)
+  - GetRange(t0, t1) -> vector<imu_msg>
+  - Clear()
+
+LIO
+- LioCore
+  - Configure(config)
+  - ProcessMeasurement(lidar_measure_group)
+  - GetState() -> StatesGroup
+  - GetUndistortedCloud() -> PointCloudXYZI::Ptr
+  - GetDownsampledCloud() -> PointCloudXYZI::Ptr
+
+Vision
+- readParameters(config_path)
+  - uses unified config.yaml keys under vision.*, imu.*, extrinsic.*, frame.*, time_offset.*
+
+Config keys (summary)
+- imu.enable, imu.topic, imu.acc_n, imu.acc_w, imu.gyr_n, imu.gyr_w, imu.g_norm
+- imu.gyr_cov, imu.acc_cov, imu.imu_int_frame, imu.gravity_est, imu.bias_est
+- lidar.topic, lidar.type, lidar.scan_line, lidar.scan_rate, lidar.point_filter_num
+- lidar.blind, lidar.feature_extract, lidar.filter_size_surf
+- map.voxel_size, map.max_layer, map.min_eigen_value, map.sigma_num, map.beam_err, map.dept_err
+- map.layer_init_num, map.max_points_num, map.min_iterations
+- map.sliding_enable, map.half_map_size, map.sliding_thresh
+- vision.image_topic, vision.max_cnt, vision.min_dist, vision.f_threshold
+- vision.show_track, vision.flow_back, vision.multiple_thread
+- vision.max_solver_time, vision.max_num_iterations, vision.keyframe_parallax
+- vision.estimate_extrinsic, vision.cam0_calib, vision.image_height, vision.image_width
+- extrinsic.lidar_T (3), extrinsic.lidar_R (9), extrinsic.body_T_cam0 (4x4)
+- frame.world, frame.body, frame.camera
+- output.path
+- time_offset.td, time_offset.estimate_td
