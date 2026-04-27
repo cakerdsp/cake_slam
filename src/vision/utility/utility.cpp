@@ -9,6 +9,7 @@
 
 #include "utility.h"
 
+// 根据重力向量构造“世界 z 轴与重力对齐”的旋转矩阵。
 Eigen::Matrix3d Utility::g2R(const Eigen::Vector3d &g)
 {
     Eigen::Matrix3d R0;

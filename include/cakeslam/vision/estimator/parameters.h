@@ -24,11 +24,15 @@ using namespace std;
 #define ROS_WARN RCUTILS_LOG_WARN
 #define ROS_ERROR RCUTILS_LOG_ERROR
 
+// 用于把归一化坐标误差近似换算到像素量级的参考焦距。
 const double FOCAL_LENGTH = 460.0;
+// 滑动窗口大小，实际窗口帧数为 WINDOW_SIZE + 1。
 const int WINDOW_SIZE = 10;
+// 允许同时维护的最大特征数量。
 const int NUM_OF_F = 1000;
 //#define UNIT_SPHERE_ERROR
 
+// 以下变量由 readParameters 从配置文件中统一加载。
 extern double INIT_DEPTH;
 extern double MIN_PARALLAX;
 extern int ESTIMATE_EXTRINSIC;
@@ -75,17 +79,23 @@ extern std::string WORLD_FRAME_ID;
 extern std::string BODY_FRAME_ID;
 extern std::string CAMERA_FRAME_ID;
 
+// 加载视觉模块相关参数，并同步写入上述全局变量。
+// 输入要求：config_file 应指向统一格式的 YAML / OpenCV 配置文件。
 void readParameters(std::string config_file);
 
 enum SIZE_PARAMETERIZATION
 {
+    // 位姿参数块：平移 3 + 四元数 4。
     SIZE_POSE = 7,
+    // 速度与偏置参数块：速度 3 + 加计偏置 3 + 陀螺偏置 3。
     SIZE_SPEEDBIAS = 9,
+    // 路标参数块：单目场景下通常使用 1 维逆深度。
     SIZE_FEATURE = 1
 };
 
 enum StateOrder
 {
+    // 各误差状态在 15 维 IMU 误差状态向量中的排列顺序。
     O_P = 0,
     O_R = 3,
     O_V = 6,
@@ -95,6 +105,7 @@ enum StateOrder
 
 enum NoiseOrder
 {
+    // 各噪声块在连续/离散噪声向量中的排列顺序。
     O_AN = 0,
     O_GN = 3,
     O_AW = 6,

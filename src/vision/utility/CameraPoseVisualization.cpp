@@ -18,12 +18,14 @@ const Eigen::Vector3d CameraPoseVisualization::lt1 = Eigen::Vector3d(-0.7, -0.2,
 const Eigen::Vector3d CameraPoseVisualization::lt2 = Eigen::Vector3d(-1.0, -0.2, 1.0);
 const Eigen::Vector3d CameraPoseVisualization::oc = Eigen::Vector3d(0.0, 0.0, 0.0);
 
+// Eigen 向量到 ROS Point 的简单转换。
 void Eigen2Point(const Eigen::Vector3d& v, geometry_msgs::msg::Point& p) {
     p.x = v.x();
     p.y = v.y();
     p.z = v.z();
 }
 
+// 相机位姿可视化器：把相机画成一个金字塔框线。
 CameraPoseVisualization::CameraPoseVisualization(float r, float g, float b, float a)
     : m_marker_ns("CameraPoseVisualization"), m_scale(0.2), m_line_width(0.01) {
     m_image_boundary_color.r = r;
@@ -36,6 +38,7 @@ CameraPoseVisualization::CameraPoseVisualization(float r, float g, float b, floa
     m_optical_center_connector_color.a = a;
 }
 
+// 设置图像平面的颜色。
 void CameraPoseVisualization::setImageBoundaryColor(float r, float g, float b, float a) {
     m_image_boundary_color.r = r;
     m_image_boundary_color.g = g;
@@ -43,6 +46,7 @@ void CameraPoseVisualization::setImageBoundaryColor(float r, float g, float b, f
     m_image_boundary_color.a = a;
 }
 
+// 设置光心到图像平面连线的颜色。
 void CameraPoseVisualization::setOpticalCenterConnectorColor(float r, float g, float b, float a) {
     m_optical_center_connector_color.r = r;
     m_optical_center_connector_color.g = g;
@@ -50,12 +54,15 @@ void CameraPoseVisualization::setOpticalCenterConnectorColor(float r, float g, f
     m_optical_center_connector_color.a = a;
 }
 
+// 设置金字塔尺寸缩放。
 void CameraPoseVisualization::setScale(double s) {
     m_scale = s;
 }
+// 设置线宽。
 void CameraPoseVisualization::setLineWidth(double width) {
     m_line_width = width;
 }
+// 添加一条轨迹/连边线段。
 void CameraPoseVisualization::add_edge(const Eigen::Vector3d& p0, const Eigen::Vector3d& p1){
     visualization_msgs::msg::Marker marker;
 
@@ -79,6 +86,7 @@ void CameraPoseVisualization::add_edge(const Eigen::Vector3d& p0, const Eigen::V
     m_markers.push_back(marker);
 }
 
+// 添加一条回环边。
 void CameraPoseVisualization::add_loopedge(const Eigen::Vector3d& p0, const Eigen::Vector3d& p1){
     visualization_msgs::msg::Marker marker;
 
@@ -105,6 +113,7 @@ void CameraPoseVisualization::add_loopedge(const Eigen::Vector3d& p0, const Eige
 }
 
 
+// 把一个相机位姿转换成若干 Marker 线段。
 void CameraPoseVisualization::add_pose(const Eigen::Vector3d& p, const Eigen::Quaterniond& q) {
     visualization_msgs::msg::Marker marker;
 
@@ -191,10 +200,12 @@ void CameraPoseVisualization::add_pose(const Eigen::Vector3d& p, const Eigen::Qu
     m_markers.push_back(marker);
 }
 
+// 清空已缓存的可视化元素。
 void CameraPoseVisualization::reset() {
 	m_markers.clear();
 }
 
+// 发布当前累计的全部 Marker。
 void CameraPoseVisualization::publish_by( rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub, const std_msgs::msg::Header &header ) {
 	visualization_msgs::msg::MarkerArray markerArray_msg;
 	

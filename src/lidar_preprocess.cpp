@@ -15,6 +15,8 @@ which is included as part of this source code package.
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
 
+// 预处理器构造阶段设置各种经验阈值。
+// 这些阈值主要用于几何特征分类，不会直接改变原始点云坐标。
 Preprocess::Preprocess() : feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
 {
   inf_bound = 10;
@@ -46,6 +48,7 @@ Preprocess::~Preprocess() {}
 
 void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
 {
+  // 由上层配置统一设置当前点云预处理模式。
   feature_enabled = feat_en;
   lidar_type = lid_type;
   blind = bld;
@@ -55,12 +58,14 @@ void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
 
 void Preprocess::process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
+  // Livox 走专用消息解析路径。
   avia_handler(msg);
   *pcl_out = pl_surf;
 }
 
 void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
+  // 根据雷达型号分派到不同的解析逻辑。
   switch (lidar_type)
   {
   case OUST64:
@@ -91,6 +96,9 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &ms
 
 void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg)
 {
+  // Livox 点云处理分为两条路径：
+  // 1. feature_enabled=true：提取平面/边缘特征；
+  // 2. 否则只做基础过滤和时间整理。
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
@@ -103,6 +111,7 @@ void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
   pl_surf.reserve(plsize);
   pl_full.resize(plsize);
 
+  // 为每条 scan line 准备缓存。
   for (int i = 0; i < N_SCANS; i++)
   {
     pl_buff[i].clear();
@@ -112,6 +121,7 @@ void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
 
   if (feature_enabled)
   {
+    // 第一步：过滤盲区点和重复点，并按线束分桶。
     for (uint i = 1; i < plsize; i++)
     {
       if ((msg->points[i].line < N_SCANS) && ((msg->points[i].tag & 0x30) == 0x10))
@@ -136,6 +146,7 @@ void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
     static double time = 0.0;
     count++;
     double t0 = omp_get_wtime();
+    // 第二步：对每条线独立做邻域几何分析。
     for (int j = 0; j < N_SCANS; j++)
     {
       if (pl_buff[j].size() <= 5) continue;
@@ -162,6 +173,7 @@ void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
   }
   else
   {
+    // 非特征模式下只做抽样、盲区剔除和时间修正。
     for (uint i = 0; i < plsize; i++)
     {
       if ((msg->points[i].line < N_SCANS)) // && ((msg->points[i].tag & 0x30) == 0x10))
@@ -201,6 +213,7 @@ void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
 
 void Preprocess::l515_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 {
+  // 深度相机型点云没有扫描线和逐点时间，直接做过滤与字段搬运。
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
@@ -241,6 +254,7 @@ void Preprocess::l515_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPt
 
 void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 {
+  // Ouster 解析逻辑：先转原始点类型，再根据是否启用特征提取选择不同路径。
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
@@ -341,6 +355,7 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::ConstShared
 
 void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 {
+  // Velodyne 解析逻辑与 Ouster 类似，但逐点时间和 ring 字段格式不同。
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
@@ -509,6 +524,7 @@ void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstShar
 
 void Preprocess::Pandar128_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 {
+  // Pandar128 驱动的字段组织方式和前两者不同，因此单独适配。
   pl_surf.clear();
 
   pcl::PointCloud<Pandar128_ros::Point> pl_orig;
@@ -560,6 +576,7 @@ void Preprocess::Pandar128_handler(const sensor_msgs::msg::PointCloud2::ConstSha
 
 void Preprocess::xt32_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 {
+  // XT32 处理流程：解析 -> 线束分桶 -> 视情况做特征提取或直接输出。
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
@@ -704,6 +721,10 @@ void Preprocess::xt32_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPt
 
 void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &types)
 {
+  // 单条 scan line 的几何分类主流程：
+  // 1. 先找连续平面段；
+  // 2. 再在剩余点中找跳变边缘；
+  // 3. 最后对邻近点做一致性修正。
   int plsize = pl.size();
   int plsize2;
   if (plsize == 0)
@@ -940,6 +961,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
 
 void Preprocess::pub_func(PointCloudXYZI &pl, const rclcpp::Time &ct)
 {
+  // 调试发布函数：把内部点云转换为 ROS 消息后发出。
   pl.height = 1;
   pl.width = pl.size();
   sensor_msgs::msg::PointCloud2 output;
@@ -950,6 +972,8 @@ void Preprocess::pub_func(PointCloudXYZI &pl, const rclcpp::Time &ct)
 
 int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i_cur, uint &i_nex, Eigen::Vector3d &curr_direct)
 {
+  // 从 i_cur 开始向后搜索，判断一段邻域是否足以支持“平面片”假设。
+  // 返回值用于区分平面有效、无效或需要继续扩展。
   double group_dis = disA * types[i_cur].range + disB;
   group_dis = group_dis * group_dis;
   // i_nex = i_cur;
@@ -1057,6 +1081,7 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
 
 bool Preprocess::edge_jump_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i, Surround nor_dir)
 {
+  // 根据相邻点距离突变、夹角和遮挡关系判断当前点是否为跳变边缘。
   if (nor_dir == 0)
   {
     if (types[i - 1].range < blind_sqr || types[i - 2].range < blind_sqr) { return false; }

@@ -45,13 +45,21 @@ enum E_jump
   Nr_blind
 };
 
+// 用于特征提取时保存原始点的几何上下文信息。
+// 这些字段不是最终输出，而是帮助判断“当前点属于平面/边缘/无效点”的中间量。
 struct orgtype
 {
+  // 当前点距离传感器原点的量测距离。
   double range;
+  // 与邻域点之间的距离度量。
   double dista;
+  // 与前后邻域方向相关的角度信息。
   double angle[2];
+  // 邻域线段/平面相交性指标。
   double intersect;
+  // 前向与后向跳变类型。
   E_jump edj[2];
+  // 当前点最终判定出来的特征类别。
   LiDARFeature ftype;
   orgtype()
   {
@@ -138,36 +146,58 @@ public:
   Preprocess();
   ~Preprocess();
 
+  // 处理 Livox 自定义点云消息并输出项目统一点云格式。
+  // 输入要求：消息中必须带有逐点时间和线束/标签信息。
   void process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
+  // 处理标准 PointCloud2 消息，适用于 Velodyne/Ouster/Hesai 等驱动。
   void process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
+  // 设置预处理参数。
+  // feat_en：是否提取特征；
+  // lid_type：雷达型号；
+  // bld：盲区阈值；
+  // pfilt_num：点过滤步长。
   void set(bool feat_en, int lid_type, double bld, int pfilt_num);
 
-  // sensor_msgs::msg::PointCloud2::ConstSharedPtr pointcloud;
+  // 完整点云、角点、平面点输出缓存。
   PointCloudXYZI pl_full, pl_corn, pl_surf;
-  PointCloudXYZI pl_buff[128]; // maximum 128 line lidar
-  vector<orgtype> typess[128]; // maximum 128 line lidar
+  // 各线束点云缓存，最多支持 128 线雷达。
+  PointCloudXYZI pl_buff[128];
+  // 各线束点的几何属性缓存，和 pl_buff 按索引一一对应。
+  vector<orgtype> typess[128];
+  // 当前雷达类型、滤波步长、线数和扫描频率。
   int lidar_type, point_filter_num, N_SCANS, SCAN_RATE;
   
+  // 盲区阈值及其平方，用于快速距离判定。
   double blind, blind_sqr;
+  // 是否启用特征提取；消息中是否已自带偏移时间。
   bool feature_enabled, given_offset_time;
+  // 调试用发布器，可发布完整/平面/角点云。
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pub_full;
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pub_surf;
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pub_corn;
 
 private:
+  // 按不同雷达驱动格式解析原始消息。
   void avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg);
   void oust64_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void xt32_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void Pandar128_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void l515_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+  // 针对单条 scan line 做几何特征分类。
   void give_feature(PointCloudXYZI &pl, vector<orgtype> &types);
+  // 发布调试点云。
   void pub_func(PointCloudXYZI &pl, const rclcpp::Time &ct);
+  // 判断从当前点开始的一段邻域是否构成平面。
   int plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i, uint &i_nex, Eigen::Vector3d &curr_direct);
+  // 判断是否为小平面片。
   bool small_plane(const PointCloudXYZI &pl, vector<orgtype> &types, uint i_cur, uint &i_nex, Eigen::Vector3d &curr_direct);
+  // 判断当前点是否属于跳边缘。
   bool edge_jump_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i, Surround nor_dir);
 
+  // 每组候选点的处理窗口大小。
   int group_size;
+  // 若干几何阈值，控制平面/边缘判别逻辑。
   double disA, disB, inf_bound;
   double limit_maxmid, limit_midmin, limit_maxmin;
   double p2l_ratio;
@@ -175,6 +205,7 @@ private:
   double cos160;
   double edgea, edgeb;
   double smallp_intersect, smallp_ratio;
+  // 临时分量缓存，避免循环内重复分配。
   double vx, vy, vz;
 };
 typedef std::shared_ptr<Preprocess> PreprocessPtr;

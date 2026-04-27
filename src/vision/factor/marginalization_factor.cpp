@@ -9,6 +9,7 @@
 
 #include "marginalization_factor.h"
 
+// 对一个残差块求值，并缓存残差和雅可比。
 void ResidualBlockInfo::Evaluate()
 {
     residuals.resize(cost_function->num_residuals());
@@ -77,6 +78,7 @@ void ResidualBlockInfo::Evaluate()
     }
 }
 
+// 释放边缘化过程中分配的缓存。
 MarginalizationInfo::~MarginalizationInfo()
 {
     //ROS_WARN("release marginlizationinfo");
@@ -100,6 +102,7 @@ MarginalizationInfo::~MarginalizationInfo()
     }
 }
 
+// 注册一个准备参与边缘化的残差块。
 void MarginalizationInfo::addResidualBlockInfo(ResidualBlockInfo *residual_block_info)
 {
     factors.emplace_back(residual_block_info);
@@ -121,6 +124,7 @@ void MarginalizationInfo::addResidualBlockInfo(ResidualBlockInfo *residual_block
     }
 }
 
+// 先对全部残差块求值，为后续 Schur 消元做准备。
 void MarginalizationInfo::preMarginalize()
 {
     for (auto it : factors)
@@ -142,11 +146,13 @@ void MarginalizationInfo::preMarginalize()
     }
 }
 
+// 把全局参数块维度映射到局部最小维度。
 int MarginalizationInfo::localSize(int size) const
 {
     return size == 7 ? 6 : size;
 }
 
+// 把局部维度映射回全局参数块维度。
 int MarginalizationInfo::globalSize(int size) const
 {
     return size == 6 ? 7 : size;
@@ -185,6 +191,7 @@ void* ThreadsConstructA(void* threadsstruct)
     return threadsstruct;
 }
 
+// 核心边缘化流程：构造正规方程并做 Schur 补，生成新的先验。
 void MarginalizationInfo::marginalize()
 {
     int pos = 0;
@@ -315,6 +322,7 @@ void MarginalizationInfo::marginalize()
     //      (linearized_jacobians.transpose() * linearized_residuals - b).sum());
 }
 
+// 根据参数地址映射生成新的参数块列表。
 std::vector<double *> MarginalizationInfo::getParameterBlocks(std::unordered_map<long, double *> &addr_shift)
 {
     std::vector<double *> keep_block_addr;
@@ -337,6 +345,7 @@ std::vector<double *> MarginalizationInfo::getParameterBlocks(std::unordered_map
     return keep_block_addr;
 }
 
+// 把边缘化结果包装成可再次加入 ceres 的先验因子。
 MarginalizationFactor::MarginalizationFactor(MarginalizationInfo* _marginalization_info):marginalization_info(_marginalization_info)
 {
     int cnt = 0;
@@ -349,6 +358,7 @@ MarginalizationFactor::MarginalizationFactor(MarginalizationInfo* _marginalizati
     set_num_residuals(marginalization_info->n);
 };
 
+// 评估边缘化先验残差与雅可比。
 bool MarginalizationFactor::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
 {
     //printf("internal addr,%d, %d\n", (int)parameter_block_sizes().size(), num_residuals());

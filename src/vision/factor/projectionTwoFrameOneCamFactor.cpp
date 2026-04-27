@@ -14,6 +14,7 @@
 Eigen::Matrix2d ProjectionTwoFrameOneCamFactor::sqrt_info;
 double ProjectionTwoFrameOneCamFactor::sum_t;
 
+// 双帧单目重投影因子。
 ProjectionTwoFrameOneCamFactor::ProjectionTwoFrameOneCamFactor(const Eigen::Vector3d &_pts_i, const Eigen::Vector3d &_pts_j, 
                                        const Eigen::Vector2d &_velocity_i, const Eigen::Vector2d &_velocity_j,
                                        const double _td_i, const double _td_j) : 
@@ -40,6 +41,7 @@ ProjectionTwoFrameOneCamFactor::ProjectionTwoFrameOneCamFactor(const Eigen::Vect
 #endif
 };
 
+// 计算残差与雅可比。
 bool ProjectionTwoFrameOneCamFactor::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
 {
     TicToc tic_toc;
@@ -149,6 +151,7 @@ bool ProjectionTwoFrameOneCamFactor::Evaluate(double const *const *parameters, d
     return true;
 }
 
+// 调试接口：打印并核对当前残差与参数。
 void ProjectionTwoFrameOneCamFactor::check(double **parameters)
 {
     double *res = new double[2];

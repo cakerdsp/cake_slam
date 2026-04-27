@@ -12,13 +12,18 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 
+// 安全地把 int64 向量转换为 int 向量。
+// 输入要求：所有元素都必须落在 int 可表示范围内，否则抛出异常。
 std::vector<int> convertToIntVectorSafe(const std::vector<int64_t>& int64_vector);
 
+// 将 ROS 时间戳转换为 double 秒。
 inline double stamp2Sec(const builtin_interfaces::msg::Time& stamp)
 {
     return rclcpp::Time(stamp).seconds();
 }
 
+// 将 double 秒转换为 ROS 时间戳。
+// 注意这里直接截取整数秒和纳秒部分，因此要求 timestamp 为非 NaN 且单位为秒。
 inline rclcpp::Time sec2Stamp(double timestamp)
 {
   int32_t sec = std::floor(timestamp);

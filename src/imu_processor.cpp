@@ -13,8 +13,11 @@ which is included as part of this source code package.
 #include "cake_slam/imu_processor.h"
 #include <rcpputils/asserts.hpp>
 
+// 比较逐点时间，保证去畸变前能够按扫描内时间顺序处理点云。
 const bool time_list(PointType &x, PointType &y) { return (x.curvature < y.curvature); }
 
+// 初始化 IMU 处理器默认参数。
+// 这里给出的协方差和均值只是启动初值，真正运行时通常会被配置覆盖。
 ImuProcess::ImuProcess() : Eye3d(M3D::Identity()),
                            Zero3d(0, 0, 0), b_first_frame(true), imu_need_init(true)
 {
@@ -38,6 +41,7 @@ ImuProcess::~ImuProcess() {}
 
 void ImuProcess::Reset()
 {
+  // 回到“等待重新初始化”的状态。
   RCLCPP_WARN(rclcpp::get_logger(""), "Reset ImuProcess");
   mean_acc = V3D(0, 0, -1.0);
   mean_gyr = V3D(0, 0, 0);
@@ -108,6 +112,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, StatesGroup &state_inout, in
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
    ** 2. normalize the acceleration measurenments to unit gravity **/
+  // 初始化阶段假设传感器整体静止或缓慢运动，通过平均加速度估计重力方向。
   RCLCPP_INFO(rclcpp::get_logger(""),"IMU Initializing: %.1f %%", double(N) / MAX_INI_COUNT * 100);
   V3D cur_acc, cur_gyr;
 
@@ -122,6 +127,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, StatesGroup &state_inout, in
     // cout<<"init acc norm: "<<mean_acc.norm()<<endl;
   }
 
+  // 增量式统计平均加速度和平均角速度。
   for (const auto &imu : meas.imu)
   {
     cur_acc = imu.acc;
@@ -139,6 +145,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, StatesGroup &state_inout, in
 
     N++;
   }
+  // 重力方向取平均加速度的反方向，模长固定为标准重力。
   IMU_mean_acc_norm = mean_acc.norm();
   state_inout.gravity = -mean_acc / mean_acc.norm() * G_m_s2;
   state_inout.rot_end = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
@@ -149,8 +156,9 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, StatesGroup &state_inout, in
 
 void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out)
 {
+  // 当 IMU 被禁用时，系统退化为“匀速 + 恒定角速度”的简化传播模型。
   pcl_out = *(meas.lidar);
-  /*** sort point clouds by offset time ***/
+  /*** 1. 按逐点偏移时间排序点云，便于后面从扫描尾部往前做补偿。 ***/
   const double &pcl_beg_time = meas.lidar_frame_beg_time;
   sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
   const double &pcl_end_time = pcl_beg_time + pcl_out.points.back().curvature / double(1000);
@@ -177,7 +185,7 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
   // std::cout << "dt:" << dt << std::endl;
   // double dt = pcl_out->points.back().curvature / double(1000);
 
-  /* covariance propagation */
+  /* 2. 传播误差状态协方差。这里使用的是极简模型，仅保留对姿态/速度相关项的更新。 */
   // M3D acc_avr_skew;
   M3D Exp_f = Exp(state_inout.bias_g, dt);
 
@@ -209,6 +217,7 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
   state_inout.rot_end = state_inout.rot_end * Exp_f;
   state_inout.pos_end = state_inout.pos_end + state_inout.vel_end * dt;
 
+  /* 3. 依据当前匀速模型把所有点补偿到扫描结束时刻。 */
   if (lidar_type != L515)
   {
     auto it_pcl = pcl_out.points.end() - 1;
@@ -235,9 +244,15 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
 
 void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out)
 {
+  // 该函数是完整去畸变主流程：
+  // 1. 拼接上一帧尾部 IMU；
+  // 2. 前向传播得到扫描期间若干离散姿态；
+  // 3. 从扫描尾到头逐点反向补偿；
+  // 4. 把输出点云统一到扫描结束时刻。
   double t0 = omp_get_wtime();
   pcl_out.clear();
   /*** add the imu of the last frame-tail to the of current frame-head ***/
+  // 为了覆盖当前扫描起点之前的一个很短区间，把上一帧末尾 IMU 也接到队首。
   MeasureGroup &meas = lidar_meas.measures.back();
   // cout<<"meas.imu.size: "<<meas.imu.size()<<endl;
   auto v_imu = meas.imu;
@@ -251,8 +266,7 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
 
   const double prop_end_time = lidar_meas.lio_vio_flg == LIO ? meas.lio_time : meas.vio_time;
 
-  /*** cut lidar point based on the propagation-start time and required
-   * propagation-end time ***/
+  /*** 根据传播起止时间裁剪需要参与去畸变的点云时间范围。 ***/
   // const double pcl_offset_time = (prop_end_time -
   // lidar_meas.lidar_frame_beg_time) * 1000.; // the offset time w.r.t scan
   // start time auto pcl_it = lidar_meas.pcl_proc_cur->points.begin() +
@@ -538,6 +552,11 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
 
 void ImuProcess::Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, PointCloudXYZI::Ptr cur_pcl_un_)
 {
+  // 对外总入口：
+  // 1. 根据配置决定是否初始化/是否走无 IMU 流程；
+  // 2. 做当前扫描的 IMU 传播；
+  // 3. 调用去畸变；
+  // 4. 把结果写回调用者提供的状态与点云。
   double t1, t2, t3;
   t1 = omp_get_wtime();
   rcpputils::assert_true(lidar_meas.lidar != nullptr);

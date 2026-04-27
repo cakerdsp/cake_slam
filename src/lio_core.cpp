@@ -4,6 +4,7 @@
 
 namespace cake_slam {
 
+// 构造函数只做对象与缓存分配，避免把配置依赖硬编码在构造阶段。
 LioCore::LioCore()
 {
   preprocess_.reset(new Preprocess());
@@ -15,12 +16,14 @@ LioCore::LioCore()
 
 void LioCore::Configure(const Config &config)
 {
+  // 1. 初始化点云预处理参数。
   preprocess_->set(config.lidar.feature_extract, config.lidar.type, config.lidar.blind, config.lidar.point_filter_num);
   preprocess_->N_SCANS = config.lidar.scan_line;
   preprocess_->SCAN_RATE = config.lidar.scan_rate;
   preprocess_->blind = config.lidar.blind;
   preprocess_->blind_sqr = config.lidar.blind * config.lidar.blind;
 
+  // 2. 读取 body(IMU) 到 LiDAR 的外参。
   if (!config.extrinsic.lidar_T.empty()) {
     extT_ << config.extrinsic.lidar_T[0], config.extrinsic.lidar_T[1], config.extrinsic.lidar_T[2];
   }
@@ -30,6 +33,7 @@ void LioCore::Configure(const Config &config)
              config.extrinsic.lidar_R[6], config.extrinsic.lidar_R[7], config.extrinsic.lidar_R[8];
   }
 
+  // 3. 配置 IMU 传播与初始化策略。
   imu_proc_->set_extrinsic(extT_, extR_);
   imu_proc_->set_gyr_cov_scale(V3D(config.imu.gyr_cov, config.imu.gyr_cov, config.imu.gyr_cov));
   imu_proc_->set_acc_cov_scale(V3D(config.imu.acc_cov, config.imu.acc_cov, config.imu.acc_cov));
@@ -44,6 +48,7 @@ void LioCore::Configure(const Config &config)
     imu_proc_->disable_bias_est();
   }
 
+  // 4. 组织体素地图配置，并创建地图管理器。
   VoxelMapConfig map_cfg;
   map_cfg.max_layer_ = config.map.max_layer;
   map_cfg.max_voxel_size_ = config.map.voxel_size;
@@ -64,11 +69,16 @@ void LioCore::Configure(const Config &config)
   voxel_manager_->extT_ = extT_;
   voxel_manager_->extR_ = extR_;
 
+  // 5. 配置点云下采样分辨率。
   downsample_filter_.setLeafSize(config.lidar.filter_size_surf, config.lidar.filter_size_surf, config.lidar.filter_size_surf);
 }
 
 void LioCore::ProcessMeasurement(LidarMeasureGroup &meas)
 {
+  // 当前函数是 LIO 的主入口：
+  // 1. 缓存测量；
+  // 2. 标记为 LIO 更新；
+  // 3. 先做 IMU 去畸变，再做地图匹配。
   meas_ = meas;
   meas_.lio_vio_flg = LIO;
   if (meas_.measures.empty()) {
@@ -80,6 +90,7 @@ void LioCore::ProcessMeasurement(LidarMeasureGroup &meas)
 
 void LioCore::ProcessImu(LidarMeasureGroup &meas)
 {
+  // Process2 会原位更新 state_，并把去畸变后的点云写入 feats_undistort_。
   imu_proc_->Process2(meas, state_, feats_undistort_);
   state_propagat_ = state_;
   voxel_manager_->state_ = state_;
@@ -88,10 +99,12 @@ void LioCore::ProcessImu(LidarMeasureGroup &meas)
 
 void LioCore::Downsample()
 {
+  // 1. 先在 LiDAR/body 系下做体素下采样。
   downsample_filter_.setInputCloud(feats_undistort_);
   downsample_filter_.filter(*feats_down_body_);
   voxel_manager_->feats_down_body_ = feats_down_body_;
 
+  // 2. 再把下采样结果变换到世界系，供地图匹配与更新使用。
   voxel_manager_->TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, feats_down_world_);
   voxel_manager_->feats_down_world_ = feats_down_world_;
   voxel_manager_->feats_down_size_ = feats_down_body_->points.size();
@@ -99,17 +112,20 @@ void LioCore::Downsample()
 
 void LioCore::ProcessLio()
 {
+  // 没有点云就直接返回，避免后续匹配器处理空输入。
   if (!feats_undistort_ || feats_undistort_->empty()) {
     return;
   }
 
   Downsample();
 
+  // 第一帧只负责建图，不进行常规匹配更新。
   if (!map_inited_) {
     map_inited_ = true;
     voxel_manager_->BuildVoxelMap();
   }
 
+  // 常规流程：状态估计 -> 回写状态 -> 地图更新 -> 视需要滑动地图。
   voxel_manager_->StateEstimation(state_propagat_);
   state_ = voxel_manager_->state_;
   voxel_manager_->UpdateVoxelMap(voxel_manager_->pv_list_);
@@ -126,6 +142,7 @@ const StatesGroup &LioCore::GetState() const
 
 SlamState LioCore::GetSlamState(double stamp) const
 {
+  // 将内部的 StatesGroup 转成对外统一的 SlamState，方便上层模块复用。
   SlamState out;
   out.stamp = stamp;
   out.R = state_.rot_end;

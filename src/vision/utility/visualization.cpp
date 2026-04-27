@@ -31,6 +31,7 @@ static Vector3d last_path(0.0, 0.0, 0.0);
 
 size_t pub_counter = 0;
 
+// 注册视觉模块常用的全部 ROS 发布器。
 void registerPub(rclcpp::Node::SharedPtr n)
 {
     pub_latest_odometry = n->create_publisher<nav_msgs::msg::Odometry>("imu_propagate", 10);
@@ -50,6 +51,7 @@ void registerPub(rclcpp::Node::SharedPtr n)
     cameraposevisual.setLineWidth(0.01);
 }
 
+// 发布高频传播得到的最新里程计结果。
 void pubLatestOdometry(const Eigen::Vector3d &P, const Eigen::Quaterniond &Q, const Eigen::Vector3d &V, double t)
 {
     nav_msgs::msg::Odometry odometry;
@@ -73,6 +75,7 @@ void pubLatestOdometry(const Eigen::Vector3d &P, const Eigen::Quaterniond &Q, co
     pub_latest_odometry->publish(odometry);
 }
 
+// 发布前端跟踪可视化图像。
 void pubTrackImage(const cv::Mat &imgTrack, const double t)
 {
     std_msgs::msg::Header header;
@@ -132,6 +135,7 @@ void printStatistics(const Estimator &estimator, double t)
         ROS_INFO("td %f", estimator.td);
 }
 
+// 发布当前优化后的主里程计与轨迹。
 void pubOdometry(const Estimator &estimator, const std_msgs::msg::Header &header)
 {
     if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
@@ -187,6 +191,7 @@ void pubOdometry(const Estimator &estimator, const std_msgs::msg::Header &header
     }
 }
 
+// 发布历史关键帧位置。
 void pubKeyPoses(const Estimator &estimator, const std_msgs::msg::Header &header)
 {
     if (estimator.key_poses.size() == 0)
@@ -221,6 +226,7 @@ void pubKeyPoses(const Estimator &estimator, const std_msgs::msg::Header &header
     pub_key_poses->publish(key_poses);
 }
 
+// 发布当前相机位姿与相机金字塔可视化。
 void pubCameraPose(const Estimator &estimator, const std_msgs::msg::Header &header)
 {
     int idx2 = WINDOW_SIZE - 1;
@@ -257,6 +263,7 @@ void pubCameraPose(const Estimator &estimator, const std_msgs::msg::Header &head
 }
 
 
+// 发布当前滑窗恢复的稀疏点云以及边缘化点云。
 void pubPointCloud(const Estimator &estimator, const std_msgs::msg::Header &header)
 {
     sensor_msgs::msg::PointCloud point_cloud, loop_point_cloud;
@@ -317,6 +324,7 @@ void pubPointCloud(const Estimator &estimator, const std_msgs::msg::Header &head
 
 
 
+// 发布世界系到 body/camera 的 TF。
 void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
 {
     return; // tmp.

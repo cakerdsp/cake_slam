@@ -10,6 +10,8 @@
 #include "estimator.h"
 #include "cake_slam/vision/utility/visualization.h"
 
+// 视觉-惯导估计器构造函数。
+// 这里只初始化容器和默认状态，不进行参数读取。
 Estimator::Estimator(): f_manager{Rs}
 {
     ROS_INFO("init begins");
@@ -17,6 +19,7 @@ Estimator::Estimator(): f_manager{Rs}
     clearState();
 }
 
+// 析构时释放预积分和边缘化先验等动态内存。
 Estimator::~Estimator()
 {
     if (MULTIPLE_THREAD)
@@ -26,6 +29,7 @@ Estimator::~Estimator()
     }
 }
 
+// 清空整个估计器状态机，回到系统尚未初始化的状态。
 void Estimator::clearState()
 {
     mProcess.lock();
@@ -97,6 +101,7 @@ void Estimator::clearState()
     mProcess.unlock();
 }
 
+// 把 parameters.cpp 中加载好的全局参数写入当前估计器实例。
 void Estimator::setParameter()
 {
     mProcess.lock();
@@ -124,6 +129,7 @@ void Estimator::setParameter()
     mProcess.unlock();
 }
 
+// 运行时切换是否使用 IMU、是否使用双目。
 void Estimator::changeSensorType(int use_imu, int use_stereo)
 {
     bool restart = false;
@@ -162,6 +168,7 @@ void Estimator::changeSensorType(int use_imu, int use_stereo)
     }
 }
 
+// 输入原始图像，并由前端先做跟踪，再把结果送入后端缓存。
 void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
 {
     inputImageCnt++;
@@ -201,6 +208,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
     
 }
 
+// 输入一条 IMU 测量到缓存队列。
 void Estimator::inputIMU(double t, const Vector3d &linearAcceleration, const Vector3d &angularVelocity)
 {
     ImuSample sample;
@@ -210,6 +218,7 @@ void Estimator::inputIMU(double t, const Vector3d &linearAcceleration, const Vec
     inputImuSample(sample);
 }
 
+// inputIMU 的统一数据结构版本。
 void Estimator::inputImuSample(const ImuSample &sample)
 {
     mBuf.lock();
@@ -226,6 +235,7 @@ void Estimator::inputImuSample(const ImuSample &sample)
     }
 }
 
+// 输入一帧已经整理好的特征观测。
 void Estimator::inputFeature(double t, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &featureFrame)
 {
     ROS_ERROR("deprecated at VINS-Fusion");
@@ -239,6 +249,7 @@ void Estimator::inputFeature(double t, const map<int, vector<pair<int, Eigen::Ma
 }
 
 
+// 从 imuBuf 中取出覆盖 [t0, t1] 的 IMU 子序列。
 bool Estimator::getIMUInterval(double t0, double t1, std::vector<ImuSample> &imuVector)
 {
     if(imuBuf.empty())
@@ -269,6 +280,7 @@ bool Estimator::getIMUInterval(double t0, double t1, std::vector<ImuSample> &imu
     return true;
 }
 
+// 判断缓冲区里的 IMU 是否已经覆盖到时间 t。
 bool Estimator::IMUAvailable(double t)
 {
     if(!imuBuf.empty() && t <= imuBuf.back().stamp)
@@ -277,6 +289,8 @@ bool Estimator::IMUAvailable(double t)
         return false;
 }
 
+// 后端主循环：
+// 反复从图像/特征缓存和 IMU 缓存中取出一组完整测量并执行传播、初始化或优化。
 void Estimator::processMeasurements()
 {
     while (1)
@@ -381,6 +395,7 @@ void Estimator::processMeasurements()
 }
 
 
+// 利用系统启动阶段的 IMU 平均值估计初始重力方向和姿态。
 void Estimator::initFirstIMUPose(const std::vector<ImuSample> &imuVector)
 {
     printf("init first imu pose\n");
@@ -402,6 +417,7 @@ void Estimator::initFirstIMUPose(const std::vector<ImuSample> &imuVector)
     //Vs[0] = Vector3d(5, 0, 0);
 }
 
+// 设置外部给定的初始位姿。
 void Estimator::initFirstPose(Eigen::Vector3d p, Eigen::Matrix3d r)
 {
     Ps[0] = p;
@@ -411,6 +427,7 @@ void Estimator::initFirstPose(Eigen::Vector3d p, Eigen::Matrix3d r)
 }
 
 
+// 对单条 IMU 测量做预积分与名义状态传播。
 void Estimator::processIMU(double t, double dt, const Vector3d &linear_acceleration, const Vector3d &angular_velocity)
 {
     if (!first_imu)
@@ -447,6 +464,8 @@ void Estimator::processIMU(double t, double dt, const Vector3d &linear_accelerat
     gyr_0 = angular_velocity; 
 }
 
+// 处理一帧图像观测。
+// 根据当前阶段不同，它可能触发视觉初始化，也可能直接进入滑窗优化。
 void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const double header)
 {
 
@@ -624,6 +643,7 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
     }  
 }
 
+// 视觉初始化第一阶段：估计相对位姿并执行多视图 SFM。
 bool Estimator::initialStructure()
 {
     TicToc t_sfm;
@@ -770,6 +790,7 @@ bool Estimator::initialStructure()
 
 }
 
+// 视觉初始化第二阶段：把纯视觉结果和 IMU 预积分对齐，恢复尺度/重力/速度。
 bool Estimator::visualInitialAlign()
 {
     TicToc t_g;
@@ -831,6 +852,7 @@ bool Estimator::visualInitialAlign()
     return true;
 }
 
+// 在滑窗内搜索一对拥有足够视差的帧，用作初始化基线。
 bool Estimator::relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l)
 {
     // find previous frame which contians enough correspondance and parallex with newest frame
@@ -862,6 +884,7 @@ bool Estimator::relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l)
     return false;
 }
 
+// 把当前 Eigen 状态拷贝到 ceres 使用的裸数组参数块中。
 void Estimator::vector2double()
 {
     for (int i = 0; i <= WINDOW_SIZE; i++)
@@ -914,6 +937,7 @@ void Estimator::vector2double()
     para_Td[0][0] = td;
 }
 
+// 把优化后的参数块写回 Eigen 状态表示。
 void Estimator::double2vector()
 {
     Vector3d origin_R0 = Utility::R2ypr(Rs[0]);
@@ -1002,6 +1026,7 @@ void Estimator::double2vector()
 
 }
 
+// 对偏置、位姿跳变等指标做启发式发散检测。
 bool Estimator::failureDetection()
 {
     return false;
@@ -1051,6 +1076,7 @@ bool Estimator::failureDetection()
     return false;
 }
 
+// 组装所有视觉、IMU 和先验残差，然后执行一次滑窗非线性优化。
 void Estimator::optimization()
 {
     TicToc t_whole, t_prepare;
@@ -1390,6 +1416,7 @@ void Estimator::optimization()
     //printf("whole time for ceres: %f \n", t_whole.toc());
 }
 
+// 根据 marginalization_flag 选择边缘化策略。
 void Estimator::slideWindow()
 {
     TicToc t_margin;
@@ -1488,12 +1515,14 @@ void Estimator::slideWindow()
     }
 }
 
+// 边缘化最新次新帧的相关观测。
 void Estimator::slideWindowNew()
 {
     sum_of_front++;
     f_manager.removeFront(frame_count);
 }
 
+// 边缘化最老帧，并同步维护特征管理器和预积分缓存。
 void Estimator::slideWindowOld()
 {
     sum_of_back++;
@@ -1514,6 +1543,7 @@ void Estimator::slideWindowOld()
 }
 
 
+// 导出当前帧位姿。
 void Estimator::getPoseInWorldFrame(Eigen::Matrix4d &T)
 {
     T = Eigen::Matrix4d::Identity();
@@ -1521,6 +1551,7 @@ void Estimator::getPoseInWorldFrame(Eigen::Matrix4d &T)
     T.block<3, 1>(0, 3) = Ps[frame_count];
 }
 
+// 导出滑窗中指定索引帧的位姿。
 void Estimator::getPoseInWorldFrame(int index, Eigen::Matrix4d &T)
 {
     T = Eigen::Matrix4d::Identity();
@@ -1528,6 +1559,7 @@ void Estimator::getPoseInWorldFrame(int index, Eigen::Matrix4d &T)
     T.block<3, 1>(0, 3) = Ps[index];
 }
 
+// 基于当前滑窗中的运动趋势，为前端预测下一帧特征位置。
 void Estimator::predictPtsInNextFrame()
 {
     //printf("predict pts in next frame\n");
@@ -1563,6 +1595,7 @@ void Estimator::predictPtsInNextFrame()
     //printf("estimator output %d predict pts\n",(int)predictPts.size());
 }
 
+// 计算一个双视图观测的重投影误差大小。
 double Estimator::reprojectionError(Matrix3d &Ri, Vector3d &Pi, Matrix3d &rici, Vector3d &tici,
                                  Matrix3d &Rj, Vector3d &Pj, Matrix3d &ricj, Vector3d &ticj, 
                                  double depth, Vector3d &uvi, Vector3d &uvj)
@@ -1575,6 +1608,7 @@ double Estimator::reprojectionError(Matrix3d &Ri, Vector3d &Pi, Matrix3d &rici, 
     return sqrt(rx * rx + ry * ry);
 }
 
+// 根据重投影误差从特征集合中筛出外点。
 void Estimator::outliersRejection(set<int> &removeIndex)
 {
     //return;
@@ -1635,6 +1669,7 @@ void Estimator::outliersRejection(set<int> &removeIndex)
     }
 }
 
+// 使用最新 IMU 做高频前向预测，主要服务于实时输出而不是滑窗优化。
 void Estimator::fastPredictIMU(double t, Eigen::Vector3d linear_acceleration, Eigen::Vector3d angular_velocity)
 {
     double dt = t - latest_time;
@@ -1650,6 +1685,7 @@ void Estimator::fastPredictIMU(double t, Eigen::Vector3d linear_acceleration, Ei
     latest_gyr_0 = angular_velocity;
 }
 
+// 把当前滑窗尾部状态同步到 latest_* 高频传播缓存。
 void Estimator::updateLatestStates()
 {
     mPropagate.lock();
@@ -1675,6 +1711,7 @@ void Estimator::updateLatestStates()
     mPropagate.unlock();
 }
 
+// 输出统一格式的轻量级 SLAM 状态。
 SlamState Estimator::getSlamState() const
 {
     SlamState out;

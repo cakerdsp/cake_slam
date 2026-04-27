@@ -62,11 +62,17 @@ enum EKF_STATE
   LO = 3
 };
 
+// 一组对齐到同一视觉时间的输入数据。
+// 在视觉部分中通常表示“一张图像 + 覆盖该时间段的 IMU 序列”。
 struct MeasureGroup
 {
+  // 当前视觉测量对应的时间戳。
   double vio_time;
+  // 如果同一组数据还关联了 LIO 更新时间，则记录该时间戳。
   double lio_time;
+  // 覆盖该时间区间的 IMU 数据，要求按时间升序排列。
   deque<ImuSample> imu;
+  // 当前图像帧。
   cv::Mat img;
   MeasureGroup()
   {
@@ -75,16 +81,27 @@ struct MeasureGroup
   };
 };
 
+// 一组 LiDAR 扫描及其配套缓存。
+// 该结构是 LIO 主循环的核心输入/中间载体。
 struct LidarMeasureGroup
 {
+  // 当前点云帧起始时间。
   double lidar_frame_beg_time;
+  // 当前点云帧结束时间。
   double lidar_frame_end_time;
+  // 最近一次 LIO 成功更新时间。
   double last_lio_update_time;
+  // 原始 LiDAR 点云。
   PointCloudXYZI::Ptr lidar;
+  // 当前处理中的点云缓存。
   PointCloudXYZI::Ptr pcl_proc_cur;
+  // 下一帧预取/处理中点云缓存。
   PointCloudXYZI::Ptr pcl_proc_next;
+  // 与该 LiDAR 时间段对应的 IMU/图像测量序列。
   deque<struct MeasureGroup> measures;
+  // 当前测量由哪种模式驱动更新。
   EKF_STATE lio_vio_flg;
+  // 当前扫描编号或序列号。
   int lidar_scan_index_now;
 
   LidarMeasureGroup()
@@ -102,16 +119,18 @@ struct LidarMeasureGroup
   };
 };
 
+// 带有协方差信息的点结构。
+// 主要用于体素地图配准时，统一保存点在不同坐标系中的位置及其误差传播结果。
 typedef struct pointWithVar
 {
-  Eigen::Vector3d point_b;     // point in the lidar body frame
-  Eigen::Vector3d point_i;     // point in the imu body frame
-  Eigen::Vector3d point_w;     // point in the world frame
-  Eigen::Matrix3d var_nostate; // the var removed the state covarience
-  Eigen::Matrix3d body_var;
-  Eigen::Matrix3d var;
-  Eigen::Matrix3d point_crossmat;
-  Eigen::Vector3d normal;
+  Eigen::Vector3d point_b;     // 点在 LiDAR 本体坐标系下的位置。
+  Eigen::Vector3d point_i;     // 点在 IMU/body 坐标系下的位置。
+  Eigen::Vector3d point_w;     // 点在世界坐标系下的位置。
+  Eigen::Matrix3d var_nostate; // 不考虑状态不确定性时，仅由量测噪声传播得到的协方差。
+  Eigen::Matrix3d body_var;    // 点在机体系下的协方差。
+  Eigen::Matrix3d var;         // 完整点协方差，通常包含状态传播影响。
+  Eigen::Matrix3d point_crossmat; // 点坐标的叉乘矩阵，用于线性化旋转扰动项。
+  Eigen::Vector3d normal;      // 关联局部平面的法向量。
   pointWithVar()
   {
     var_nostate = Eigen::Matrix3d::Zero();
@@ -126,6 +145,8 @@ typedef struct pointWithVar
 } pointWithVar;
 
 
+// LIO 内部的完整状态向量。
+// 该状态既保存名义值，也保存 19 维误差状态协方差。
 struct StatesGroup
 {
   StatesGroup()
@@ -215,16 +236,18 @@ struct StatesGroup
     this->vel_end = V3D::Zero();
   }
 
-  M3D rot_end;                              // the estimated attitude (rotation matrix) at the end lidar point
-  V3D pos_end;                              // the estimated position at the end lidar point (world frame)
-  V3D vel_end;                              // the estimated velocity at the end lidar point (world frame)
-  double inv_expo_time;                     // the estimated inverse exposure time (no scale)
-  V3D bias_g;                               // gyroscope bias
-  V3D bias_a;                               // accelerator bias
-  V3D gravity;                              // the estimated gravity acceleration
-  Matrix<double, DIM_STATE, DIM_STATE> cov; // states covariance
+  M3D rot_end;                              // 当前扫描结束时刻的姿态估计。
+  V3D pos_end;                              // 当前扫描结束时刻的位置估计，世界系。
+  V3D vel_end;                              // 当前扫描结束时刻的速度估计，世界系。
+  double inv_expo_time;                     // 曝光时间倒数的估计值，主要为视觉/时延模型预留。
+  V3D bias_g;                               // 陀螺仪零偏估计。
+  V3D bias_a;                               // 加速度计零偏估计。
+  V3D gravity;                              // 重力向量估计。
+  Matrix<double, DIM_STATE, DIM_STATE> cov; // 19 维误差状态协方差矩阵。
 };
 
+// 组装一条 Pose6D 记录。
+// 主要用于保存 IMU 传播轨迹，便于点云去畸变时对逐点姿态进行插值。
 template <typename T>
 auto set_pose6d(const double t, const Matrix<T, 3, 1> &a, const Matrix<T, 3, 1> &g, const Matrix<T, 3, 1> &v, const Matrix<T, 3, 1> &p,
                 const Matrix<T, 3, 3> &R)

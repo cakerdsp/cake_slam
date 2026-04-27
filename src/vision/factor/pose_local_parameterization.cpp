@@ -9,6 +9,7 @@
 
 #include "pose_local_parameterization.h"
 
+// 在位姿流形上执行 x (+) delta。
 bool PoseLocalParameterization::Plus(const double *x, const double *delta, double *x_plus_delta) const
 {
     Eigen::Map<const Eigen::Vector3d> _p(x);
@@ -27,6 +28,7 @@ bool PoseLocalParameterization::Plus(const double *x, const double *delta, doubl
     return true;
 }
 
+// Plus 操作的雅可比。
 bool PoseLocalParameterization::PlusJacobian(const double *x, double *jacobian) const
 {
     Eigen::Map<Eigen::Matrix<double, 7, 6, Eigen::RowMajor>> j(jacobian);
@@ -36,6 +38,7 @@ bool PoseLocalParameterization::PlusJacobian(const double *x, double *jacobian) 
     return true;
 }
 
+// 在位姿流形上执行 y (-) x。
 bool PoseLocalParameterization::Minus(const double *y, const double *x, double *y_minus_x) const
 {
     Eigen::Map<const Eigen::Vector3d> p_y(y);
@@ -55,6 +58,7 @@ bool PoseLocalParameterization::Minus(const double *y, const double *x, double *
     return true;
 }
 
+// Minus 操作的雅可比。
 bool PoseLocalParameterization::MinusJacobian(const double *x, double *jacobian) const
 {
     Eigen::Map<Eigen::Matrix<double, 6, 7, Eigen::RowMajor>> j(jacobian);

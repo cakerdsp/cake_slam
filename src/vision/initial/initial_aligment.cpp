@@ -215,3 +215,4 @@ bool VisualIMUAlignment(map<double, ImageFrame> &all_image_frame, Vector3d* Bgs,
     else 
         return false;
 }
+// 该文件负责视觉结果与 IMU 预积分结果的尺度、重力、速度对齐。

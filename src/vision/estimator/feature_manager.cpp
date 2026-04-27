@@ -9,11 +9,13 @@
 
 #include "feature_manager.h"
 
+// 特征的结束帧号 = 起始帧号 + 观测长度 - 1。
 int FeaturePerId::endFrame()
 {
     return start_frame + feature_per_frame.size() - 1;
 }
 
+// 构造时持有外部姿态数组指针，便于后续三角化/视差计算直接访问滑窗状态。
 FeatureManager::FeatureManager(Matrix3d _Rs[])
     : Rs(_Rs)
 {
@@ -21,6 +23,7 @@ FeatureManager::FeatureManager(Matrix3d _Rs[])
         ric[i].setIdentity();
 }
 
+// 更新 IMU 到相机的旋转外参缓存。
 void FeatureManager::setRic(Matrix3d _ric[])
 {
     for (int i = 0; i < NUM_OF_CAM; i++)
@@ -29,11 +32,14 @@ void FeatureManager::setRic(Matrix3d _ric[])
     }
 }
 
+// 清空所有特征轨迹。
 void FeatureManager::clearState()
 {
     feature.clear();
 }
 
+// 统计“可用于优化”的特征数。
+// 这里要求一个特征至少被 4 次观测到，才认为具有较稳定的几何约束。
 int FeatureManager::getFeatureCount()
 {
     int cnt = 0;
@@ -51,6 +57,9 @@ int FeatureManager::getFeatureCount()
 
 bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td)
 {
+    // 本函数承担两件事：
+    // 1. 把当前帧的特征观测并入历史轨迹；
+    // 2. 根据长轨迹数量和平均视差决定当前帧是否适合作为关键帧。
     ROS_DEBUG("input feature: %d", (int)image.size());
     ROS_DEBUG("num of feature: %d", getFeatureCount());
     double parallax_sum = 0;
@@ -61,6 +70,7 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
     long_track_num = 0;
     for (auto &id_pts : image)
     {
+        // 每个 feature_id 可能包含左目观测，双目模式下还可能附带右目观测。
         FeaturePerFrame f_per_fra(id_pts.second[0].second, td);
         assert(id_pts.second[0].first == 0);
         if(id_pts.second.size() == 2)
@@ -75,6 +85,7 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
             return it.feature_id == feature_id;
                           });
 
+        // 已存在的轨迹追加新观测；新出现的 id 则新建一条轨迹。
         if (it == feature.end())
         {
             feature.push_back(FeaturePerId(feature_id, frame_count));
@@ -92,9 +103,11 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
 
     //if (frame_count < 2 || last_track_num < 20)
     //if (frame_count < 2 || last_track_num < 20 || new_feature_num > 0.5 * last_track_num)
+    // 前几帧或跟踪过少时直接放宽关键帧判定，优先保证系统能够初始化。
     if (frame_count < 2 || last_track_num < 20 || long_track_num < 40 || new_feature_num > 0.5 * last_track_num)
         return true;
 
+    // 统计当前帧和前一帧之间共享特征的平均视差。
     for (auto &it_per_id : feature)
     {
         if (it_per_id.start_frame <= frame_count - 2 &&
@@ -114,10 +127,12 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
         ROS_DEBUG("parallax_sum: %lf, parallax_num: %d", parallax_sum, parallax_num);
         ROS_DEBUG("current parallax: %lf", parallax_sum / parallax_num * FOCAL_LENGTH);
         last_average_parallax = parallax_sum / parallax_num * FOCAL_LENGTH;
+        // 视差足够大才保留为关键帧，否则新图像提供的新几何信息不足。
         return parallax_sum / parallax_num >= MIN_PARALLAX;
     }
 }
 
+// 取出两帧都看见的特征，形成归一化坐标对应对。
 vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_count_l, int frame_count_r)
 {
     vector<pair<Vector3d, Vector3d>> corres;
@@ -139,6 +154,7 @@ vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_coun
     return corres;
 }
 
+// 把优化变量中的深度回写到特征轨迹中。
 void FeatureManager::setDepth(const VectorXd &x)
 {
     int feature_index = -1;
@@ -159,6 +175,7 @@ void FeatureManager::setDepth(const VectorXd &x)
     }
 }
 
+// 删除被标记为求解失败的特征。
 void FeatureManager::removeFailures()
 {
     for (auto it = feature.begin(), it_next = feature.begin();
@@ -170,12 +187,14 @@ void FeatureManager::removeFailures()
     }
 }
 
+// 清空深度估计，为重新初始化或调试做准备。
 void FeatureManager::clearDepth()
 {
     for (auto &it_per_id : feature)
         it_per_id.estimated_depth = -1;
 }
 
+// 导出当前全部可优化特征的深度参数向量。
 VectorXd FeatureManager::getDepthVector()
 {
     VectorXd dep_vec(getFeatureCount());
@@ -195,6 +214,7 @@ VectorXd FeatureManager::getDepthVector()
 }
 
 
+// 对单个特征做线性三角化。
 void FeatureManager::triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen::Matrix<double, 3, 4> &Pose1,
                         Eigen::Vector2d &point0, Eigen::Vector2d &point1, Eigen::Vector3d &point_3d)
 {
@@ -212,6 +232,7 @@ void FeatureManager::triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen:
 }
 
 
+// 使用 OpenCV PnP 从 2D-3D 对应关系恢复单帧位姿。
 bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P, 
                                       vector<cv::Point2f> &pts2D, vector<cv::Point3f> &pts3D)
 {
@@ -256,6 +277,7 @@ bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P,
     return true;
 }
 
+// 当某一帧还没有稳定位姿时，借助已有三维点通过 PnP 进行初始化。
 void FeatureManager::initFramePoseByPnP(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vector3d tic[], Matrix3d ric[])
 {
 
@@ -299,6 +321,7 @@ void FeatureManager::initFramePoseByPnP(int frameCnt, Vector3d Ps[], Matrix3d Rs
     }
 }
 
+// 对当前滑窗内所有满足条件的特征做批量三角化。
 void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vector3d tic[], Matrix3d ric[])
 {
     for (auto &it_per_id : feature)
@@ -430,6 +453,7 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
     }
 }
 
+// 根据外点 id 列表删除异常轨迹。
 void FeatureManager::removeOutlier(set<int> &outlierIndex)
 {
     std::set<int>::iterator itSet;
@@ -447,6 +471,7 @@ void FeatureManager::removeOutlier(set<int> &outlierIndex)
     }
 }
 
+// 滑窗左移时，最老帧被边缘化，因此需要把深度参考系同步换到新的首帧。
 void FeatureManager::removeBackShiftDepth(Eigen::Matrix3d marg_R, Eigen::Vector3d marg_P, Eigen::Matrix3d new_R, Eigen::Vector3d new_P)
 {
     for (auto it = feature.begin(), it_next = feature.begin();
@@ -487,6 +512,7 @@ void FeatureManager::removeBackShiftDepth(Eigen::Matrix3d marg_R, Eigen::Vector3
     }
 }
 
+// 删除最老帧的观测，不对深度做坐标变换。
 void FeatureManager::removeBack()
 {
     for (auto it = feature.begin(), it_next = feature.begin();
@@ -505,6 +531,7 @@ void FeatureManager::removeBack()
     }
 }
 
+// 删除窗口右侧以外的前部观测，保持轨迹和窗口对齐。
 void FeatureManager::removeFront(int frame_count)
 {
     for (auto it = feature.begin(), it_next = feature.begin(); it != feature.end(); it = it_next)
@@ -527,6 +554,8 @@ void FeatureManager::removeFront(int frame_count)
     }
 }
 
+// 计算特征在最近两帧之间的补偿视差。
+// 这里会考虑相机外参影响，因此比直接像素差更适合关键帧判定。
 double FeatureManager::compensatedParallax2(const FeaturePerId &it_per_id, int frame_count)
 {
     //check the second last frame is keyframe or not

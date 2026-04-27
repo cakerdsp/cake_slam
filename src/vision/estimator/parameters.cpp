@@ -55,6 +55,7 @@ std::string BODY_FRAME_ID;
 std::string CAMERA_FRAME_ID;
 
 template <typename T>
+// 从 ROS 参数服务器读取参数的辅助函数。
 T readParam(rclcpp::Node::SharedPtr n, std::string name)
 {
     T ans;
@@ -73,6 +74,9 @@ T readParam(rclcpp::Node::SharedPtr n, std::string name)
 
 void readParameters(std::string config_file)
 {
+    // 视觉模块统一参数加载入口。
+    // 该函数会把配置文件中的值写入 parameters.h 中声明的全局变量，
+    // 后续前端、初始化和后端都会直接读取这些全局量。
     FILE *fh = fopen(config_file.c_str(),"r");
     if(fh == NULL){
         ROS_WARN("config_file dosen't exist; wrong config_file path");
@@ -87,6 +91,7 @@ void readParameters(std::string config_file)
         std::cerr << "ERROR: Wrong path to settings" << std::endl;
     }
 
+    // -------------------- 前端跟踪参数 --------------------
     fsSettings["vision.image_topic"] >> IMAGE0_TOPIC;
     IMAGE1_TOPIC.clear();
     MAX_CNT = (int)fsSettings["vision.max_cnt"];
@@ -97,10 +102,12 @@ void readParameters(std::string config_file)
 
     MULTIPLE_THREAD = (int)fsSettings["vision.multiple_thread"];
 
+    // 当前实现默认关闭 GPU 路径。
     USE_GPU = 0;
     USE_GPU_ACC_FLOW = 0;
     USE_GPU_CERES = 0;
 
+    // -------------------- IMU 参数 --------------------
     USE_IMU = (int)fsSettings["imu.enable"];
     if(USE_IMU)
     {
@@ -112,17 +119,20 @@ void readParameters(std::string config_file)
         G.z() = (double)fsSettings["imu.g_norm"];
     }
 
+    // -------------------- 优化与关键帧参数 --------------------
     SOLVER_TIME = (double)fsSettings["vision.max_solver_time"];
     NUM_ITERATIONS = (int)fsSettings["vision.max_num_iterations"];
     MIN_PARALLAX = (double)fsSettings["vision.keyframe_parallax"];
     MIN_PARALLAX = MIN_PARALLAX / FOCAL_LENGTH;
 
+    // -------------------- 输出路径 --------------------
     fsSettings["output.path"] >> OUTPUT_FOLDER;
     VINS_RESULT_PATH = OUTPUT_FOLDER + "/vio.csv";
     std::cout << "result path " << VINS_RESULT_PATH << std::endl;
     std::ofstream fout(VINS_RESULT_PATH, std::ios::out);
     fout.close();
 
+    // -------------------- 外参处理策略 --------------------
     ESTIMATE_EXTRINSIC = (int)fsSettings["vision.estimate_extrinsic"];
     if (ESTIMATE_EXTRINSIC == 2)
     {
@@ -141,6 +151,7 @@ void readParameters(std::string config_file)
         if (ESTIMATE_EXTRINSIC == 0)
             ROS_WARN(" fix extrinsic param ");
 
+        // 已知初值时，直接从 body_T_cam0 中提取旋转和平移。
         cv::Mat cv_T;
         fsSettings["extrinsic.body_T_cam0"] >> cv_T;
         Eigen::Matrix4d T;
@@ -149,6 +160,7 @@ void readParameters(std::string config_file)
         TIC.push_back(T.block<3, 1>(0, 3));
     } 
 
+    // 当前配置默认单目。
     NUM_OF_CAM = 1;
     STEREO = 0;
 
@@ -160,6 +172,7 @@ void readParameters(std::string config_file)
     BIAS_ACC_THRESHOLD = 0.1;
     BIAS_GYR_THRESHOLD = 0.1;
 
+    // -------------------- 时间偏移与图像尺寸 --------------------
     TD = (double)fsSettings["time_offset.td"];
     ESTIMATE_TD = (int)fsSettings["time_offset.estimate_td"];
     if (ESTIMATE_TD)
@@ -171,6 +184,7 @@ void readParameters(std::string config_file)
     COL = (int)fsSettings["vision.image_width"];
     ROS_INFO("ROW: %d COL: %d ", ROW, COL);
 
+    // 没有 IMU 时，不允许再估计相机-IMU 外参和时间延迟。
     if(!USE_IMU)
     {
         ESTIMATE_EXTRINSIC = 0;
@@ -178,6 +192,7 @@ void readParameters(std::string config_file)
         printf("no imu, fix extrinsic param; no time offset calibration\n");
     }
 
+    // -------------------- 坐标系命名 --------------------
     fsSettings["frame.world"] >> WORLD_FRAME_ID;
     WORLD_FRAME_ID.empty()? WORLD_FRAME_ID = "world" : WORLD_FRAME_ID;
     fsSettings["frame.body"] >> BODY_FRAME_ID;   

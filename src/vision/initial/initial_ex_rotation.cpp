@@ -11,6 +11,7 @@
 
 #include "initial_ex_rotation.h"
 
+// 视觉-IMU 旋转外参初始化器。
 InitialEXRotation::InitialEXRotation(){
     frame_count = 0;
     Rc.push_back(Matrix3d::Identity());
@@ -19,6 +20,7 @@ InitialEXRotation::InitialEXRotation(){
     ric = Matrix3d::Identity();
 }
 
+// 根据视觉相对旋转与 IMU 相对旋转的一致性在线估计外参旋转。
 bool InitialEXRotation::CalibrationExRotation(vector<pair<Vector3d, Vector3d>> corres, Quaterniond delta_q_imu, Matrix3d &calib_ric_result)
 {
     frame_count++;
@@ -77,6 +79,7 @@ bool InitialEXRotation::CalibrationExRotation(vector<pair<Vector3d, Vector3d>> c
         return false;
 }
 
+// 用五点法/本质矩阵思路从视觉对应点估计相对旋转。
 Matrix3d InitialEXRotation::solveRelativeR(const vector<pair<Vector3d, Vector3d>> &corres)
 {
     if (corres.size() >= 9)
@@ -109,6 +112,7 @@ Matrix3d InitialEXRotation::solveRelativeR(const vector<pair<Vector3d, Vector3d>
     return Matrix3d::Identity();
 }
 
+// 用三角化正深度比例评估本质矩阵分解结果的合理性。
 double InitialEXRotation::testTriangulation(const vector<cv::Point2f> &l,
                                           const vector<cv::Point2f> &r,
                                           cv::Mat_<double> R, cv::Mat_<double> t)
@@ -135,6 +139,7 @@ double InitialEXRotation::testTriangulation(const vector<cv::Point2f> &l,
     return 1.0 * front_count / pointcloud.cols;
 }
 
+// 分解本质矩阵得到候选 R/T 组合。
 void InitialEXRotation::decomposeE(cv::Mat E,
                                  cv::Mat_<double> &R1, cv::Mat_<double> &R2,
                                  cv::Mat_<double> &t1, cv::Mat_<double> &t2)

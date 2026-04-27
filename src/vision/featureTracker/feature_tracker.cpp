@@ -11,6 +11,7 @@
 
 #include "feature_tracker.h"
 
+// 判断点是否落在图像有效区域内。
 bool FeatureTracker::inBorder(const cv::Point2f &pt)
 {
     const int BORDER_SIZE = 1;
@@ -19,6 +20,7 @@ bool FeatureTracker::inBorder(const cv::Point2f &pt)
     return BORDER_SIZE <= img_x && img_x < col - BORDER_SIZE && BORDER_SIZE <= img_y && img_y < row - BORDER_SIZE;
 }
 
+// 全局辅助函数：计算两像素点欧氏距离。
 double distance(cv::Point2f pt1, cv::Point2f pt2)
 {
     //printf("pt1: %f %f pt2: %f %f\n", pt1.x, pt1.y, pt2.x, pt2.y);
@@ -27,6 +29,7 @@ double distance(cv::Point2f pt1, cv::Point2f pt2)
     return sqrt(dx * dx + dy * dy);
 }
 
+// 按 status 原地压缩点向量。
 void reduceVector(vector<cv::Point2f> &v, vector<uchar> status)
 {
     int j = 0;
@@ -36,6 +39,7 @@ void reduceVector(vector<cv::Point2f> &v, vector<uchar> status)
     v.resize(j);
 }
 
+// 按 status 原地压缩整型向量。
 void reduceVector(vector<int> &v, vector<uchar> status)
 {
     int j = 0;
@@ -45,6 +49,7 @@ void reduceVector(vector<int> &v, vector<uchar> status)
     v.resize(j);
 }
 
+// 前端跟踪器初始状态。
 FeatureTracker::FeatureTracker()
 {
     stereo_cam = 0;
@@ -54,6 +59,8 @@ FeatureTracker::FeatureTracker()
 
 void FeatureTracker::setMask()
 {
+    // 用“长轨迹优先”策略构造新的检测掩膜：
+    // 连续跟踪时间更长的点优先保留，附近区域则不再重复检测新点。
     mask = cv::Mat(row, col, CV_8UC1, cv::Scalar(255));
 
     // prefer to keep features that are tracked for long time
@@ -83,6 +90,7 @@ void FeatureTracker::setMask()
     }
 }
 
+// 把新检测到的点加入当前特征集合，并分配新的全局 id。
 void FeatureTracker::addPoints()
 {
     for (auto &p : n_pts)
@@ -93,6 +101,7 @@ void FeatureTracker::addPoints()
     }
 }
 
+// 类内版本的距离函数，和上面的自由函数语义相同。
 double FeatureTracker::distance(cv::Point2f &pt1, cv::Point2f &pt2)
 {
     //printf("pt1: %f %f pt2: %f %f\n", pt1.x, pt1.y, pt2.x, pt2.y);
@@ -103,6 +112,11 @@ double FeatureTracker::distance(cv::Point2f &pt1, cv::Point2f &pt2)
 
 map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackImage(double _cur_time, const cv::Mat &_img, const cv::Mat &_img1)
 {
+    // 这是视觉前端的主流程：
+    // 1. 用 LK 光流跟踪上一帧特征；
+    // 2. 做边界检查、反向校验和极线约束剔除；
+    // 3. 补充新特征；
+    // 4. 输出统一的“id -> 观测”结构。
     TicToc t_r;
     cur_time = _cur_time;
     cur_img = _img;
@@ -119,6 +133,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
     */
     cur_pts.clear();
 
+    // 若存在上一帧，则尝试把上一帧特征跟踪到当前帧。
     if (prev_pts.size() > 0)
     {
         vector<uchar> status;
@@ -127,6 +142,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
             TicToc t_o;
             
             vector<float> err;
+            // 有预测时，把预测位置作为光流初值，可减少快速运动下的跟踪失败。
             if(hasPrediction)
             {
                 cur_pts = predict_pts;
@@ -498,6 +514,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
     return featureFrame;
 }
 
+// 利用基础矩阵一致性删除不满足双视图几何约束的匹配。
 void FeatureTracker::rejectWithF()
 {
     if (cur_pts.size() >= 8)
@@ -532,6 +549,7 @@ void FeatureTracker::rejectWithF()
     }
 }
 
+// 读取所有相机模型文件。
 void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
 {
     for (size_t i = 0; i < calib_file.size(); i++)
@@ -544,6 +562,7 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
         stereo_cam = 1;
 }
 
+// 把像素网格经相机模型反投影后再投影回来，用于观察去畸变效果。
 void FeatureTracker::showUndistortion(const string &name)
 {
     cv::Mat undistortedImg(row + 600, col + 600, CV_8UC1, cv::Scalar(0));
@@ -581,6 +600,7 @@ void FeatureTracker::showUndistortion(const string &name)
     // cv::waitKey(0);
 }
 
+// 对输入像素点逐个执行去畸变，并转换为归一化平面坐标。
 vector<cv::Point2f> FeatureTracker::undistortedPts(vector<cv::Point2f> &pts, camodocal::CameraPtr cam)
 {
     vector<cv::Point2f> un_pts;
@@ -594,6 +614,7 @@ vector<cv::Point2f> FeatureTracker::undistortedPts(vector<cv::Point2f> &pts, cam
     return un_pts;
 }
 
+// 计算特征的像素速度，用于时间延迟补偿与后端残差构建。
 vector<cv::Point2f> FeatureTracker::ptsVelocity(vector<int> &ids, vector<cv::Point2f> &pts, 
                                             map<int, cv::Point2f> &cur_id_pts, map<int, cv::Point2f> &prev_id_pts)
 {
@@ -634,6 +655,7 @@ vector<cv::Point2f> FeatureTracker::ptsVelocity(vector<int> &ids, vector<cv::Poi
     return pts_velocity;
 }
 
+// 绘制左右图跟踪结果，供调试可视化使用。
 void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight, 
                                vector<int> &curLeftIds,
                                vector<cv::Point2f> &curLeftPts, 
@@ -690,6 +712,7 @@ void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
 }
 
 
+// 接收来自后端的三维点预测，并投影成下一帧初值。
 void FeatureTracker::setPrediction(map<int, Eigen::Vector3d> &predictPts)
 {
     hasPrediction = true;
@@ -714,6 +737,7 @@ void FeatureTracker::setPrediction(map<int, Eigen::Vector3d> &predictPts)
 }
 
 
+// 根据外点 id 集合移除当前跟踪点。
 void FeatureTracker::removeOutliers(set<int> &removePtsIds)
 {
     std::set<int>::iterator itSet;
@@ -733,6 +757,7 @@ void FeatureTracker::removeOutliers(set<int> &removePtsIds)
 }
 
 
+// 返回最近一次绘制的跟踪图像。
 cv::Mat FeatureTracker::getTrackImage()
 {
     return imTrack;
