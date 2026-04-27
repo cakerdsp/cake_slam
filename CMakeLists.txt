@@ -56,7 +56,6 @@ file(GLOB_RECURSE VISION_SOURCES
 
 set(cake_slam_SOURCES
   src/config.cpp
-  src/imu_hub.cpp
   src/imu_processor.cpp
   src/lidar_preprocess.cpp
   src/lio_core.cpp

@@ -9,6 +9,7 @@
 #include "cake_slam/config.h"
 #include "cake_slam/imu_processor.h"
 #include "cake_slam/lidar_preprocess.h"
+#include "cake_slam/slam_state.h"
 #include "cake_slam/voxel_map.h"
 
 namespace cake_slam {
@@ -24,6 +25,7 @@ public:
   void ProcessMeasurement(LidarMeasureGroup &meas);
 
   const StatesGroup &GetState() const;
+  SlamState GetSlamState(double stamp) const;
   PointCloudXYZI::Ptr GetUndistortedCloud() const;
   PointCloudXYZI::Ptr GetDownsampledCloud() const;
 

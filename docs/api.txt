@@ -1,22 +1,28 @@
 cake_slam API (modules only)
 
 IMU
-- ImuHub
-  - Push(imu_msg)
-  - GetRange(t0, t1) -> vector<imu_msg>
-  - Clear()
+- Unified IMU sample type: ImuSample
+  - fields: stamp, acc, gyr
+  - used directly by both LIO (MeasureGroup.imu) and Vision (Estimator imuBuf)
 
 LIO
 - LioCore
   - Configure(config)
   - ProcessMeasurement(lidar_measure_group)
   - GetState() -> StatesGroup
+  - GetSlamState(stamp) -> SlamState
   - GetUndistortedCloud() -> PointCloudXYZI::Ptr
   - GetDownsampledCloud() -> PointCloudXYZI::Ptr
 
 Vision
 - readParameters(config_path)
   - uses unified config.yaml keys under vision.*, imu.*, extrinsic.*, frame.*, time_offset.*
+- Estimator
+  - inputImuSample(sample)
+  - getSlamState() -> SlamState
+
+Unified state
+- SlamState fields: stamp, R, p, v, ba, bg, g
 
 Config keys (summary)
 - imu.enable, imu.topic, imu.acc_n, imu.acc_w, imu.gyr_n, imu.gyr_w, imu.g_norm

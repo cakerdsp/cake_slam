@@ -124,6 +124,19 @@ const StatesGroup &LioCore::GetState() const
   return state_;
 }
 
+SlamState LioCore::GetSlamState(double stamp) const
+{
+  SlamState out;
+  out.stamp = stamp;
+  out.R = state_.rot_end;
+  out.p = state_.pos_end;
+  out.v = state_.vel_end;
+  out.ba = state_.bias_a;
+  out.bg = state_.bias_g;
+  out.g = state_.gravity;
+  return out;
+}
+
 PointCloudXYZI::Ptr LioCore::GetUndistortedCloud() const
 {
   return feats_undistort_;

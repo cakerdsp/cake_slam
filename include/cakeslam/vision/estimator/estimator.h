@@ -20,6 +20,9 @@
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
 
+#include <cake_slam/imu_sample.h>
+#include <cake_slam/slam_state.h>
+
 #include "parameters.h"
 #include "feature_manager.h"
 #include "../utility/utility.h"
@@ -51,6 +54,7 @@ class Estimator
     // interface
     void initFirstPose(Eigen::Vector3d p, Eigen::Matrix3d r);
     void inputIMU(double t, const Vector3d &linearAcceleration, const Vector3d &angularVelocity);
+    void inputImuSample(const ImuSample &sample);
     void inputFeature(double t, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &featureFrame);
     void inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
     void processIMU(double t, double dt, const Vector3d &linear_acceleration, const Vector3d &angular_velocity);
@@ -70,8 +74,7 @@ class Estimator
     void vector2double();
     void double2vector();
     bool failureDetection();
-    bool getIMUInterval(double t0, double t1, vector<pair<double, Eigen::Vector3d>> &accVector, 
-                                              vector<pair<double, Eigen::Vector3d>> &gyrVector);
+    bool getIMUInterval(double t0, double t1, std::vector<ImuSample> &imuVector);
     void getPoseInWorldFrame(Eigen::Matrix4d &T);
     void getPoseInWorldFrame(int index, Eigen::Matrix4d &T);
     void predictPtsInNextFrame();
@@ -82,7 +85,7 @@ class Estimator
     void updateLatestStates();
     void fastPredictIMU(double t, Eigen::Vector3d linear_acceleration, Eigen::Vector3d angular_velocity);
     bool IMUAvailable(double t);
-    void initFirstIMUPose(vector<pair<double, Eigen::Vector3d>> &accVector);
+    void initFirstIMUPose(const std::vector<ImuSample> &imuVector);
 
     enum SolverFlag
     {
@@ -99,8 +102,7 @@ class Estimator
     std::mutex mProcess;
     std::mutex mBuf;
     std::mutex mPropagate;
-    queue<pair<double, Eigen::Vector3d>> accBuf;
-    queue<pair<double, Eigen::Vector3d>> gyrBuf;
+    queue<ImuSample> imuBuf;
     queue<pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1> > > > > > featureBuf;
     double prevTime, curTime;
     bool openExEstimation;
@@ -178,4 +180,6 @@ class Estimator
 
     bool initFirstPoseFlag;
     bool initThreadFlag;
+
+    SlamState getSlamState() const;
 };

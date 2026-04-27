@@ -29,10 +29,8 @@ Estimator::~Estimator()
 void Estimator::clearState()
 {
     mProcess.lock();
-    while(!accBuf.empty())
-        accBuf.pop();
-    while(!gyrBuf.empty())
-        gyrBuf.pop();
+    while(!imuBuf.empty())
+        imuBuf.pop();
     while(!featureBuf.empty())
         featureBuf.pop();
 
@@ -205,17 +203,25 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
 
 void Estimator::inputIMU(double t, const Vector3d &linearAcceleration, const Vector3d &angularVelocity)
 {
+    ImuSample sample;
+    sample.stamp = t;
+    sample.acc = linearAcceleration;
+    sample.gyr = angularVelocity;
+    inputImuSample(sample);
+}
+
+void Estimator::inputImuSample(const ImuSample &sample)
+{
     mBuf.lock();
-    accBuf.push(make_pair(t, linearAcceleration));
-    gyrBuf.push(make_pair(t, angularVelocity));
-    //printf("input imu with time %f \n", t);
+    imuBuf.push(sample);
+    //printf("input imu with time %f \n", sample.stamp);
     mBuf.unlock();
 
     if (solver_flag == NON_LINEAR)
     {
         mPropagate.lock();
-        fastPredictIMU(t, linearAcceleration, angularVelocity);
-        pubLatestOdometry(latest_P, latest_Q, latest_V, t);
+        fastPredictIMU(sample.stamp, sample.acc, sample.gyr);
+        pubLatestOdometry(latest_P, latest_Q, latest_V, sample.stamp);
         mPropagate.unlock();
     }
 }
@@ -233,37 +239,27 @@ void Estimator::inputFeature(double t, const map<int, vector<pair<int, Eigen::Ma
 }
 
 
-bool Estimator::getIMUInterval(double t0, double t1, vector<pair<double, Eigen::Vector3d>> &accVector, 
-                                vector<pair<double, Eigen::Vector3d>> &gyrVector)
+bool Estimator::getIMUInterval(double t0, double t1, std::vector<ImuSample> &imuVector)
 {
-    if(accBuf.empty())
+    if(imuBuf.empty())
     {
         printf("not receive imu\n");
         return false;
     }
-    // printf("get imu from %f %f\n", t0, t1);
-    // printf("imu fornt time %f   imu end time %f\n", accBuf.front().first, accBuf.back().first);
-    if(t1 <= accBuf.back().first)
+    if(t1 <= imuBuf.back().stamp)
     {
-        while (accBuf.front().first <= t0)
+        while (!imuBuf.empty() && imuBuf.front().stamp <= t0)
         {
-            // std::cout << "t_imu: " << std::fixed << accBuf.front().first << "  t_0: " << std::fixed << t0 << "   gyr_buf size: " << gyrBuf.size() << std::endl;
-            // std::cout << "1) acc pop" << std::endl;
-            accBuf.pop();
-            // std::cout << "1) gyr pop" << std::endl;
-            gyrBuf.pop();
+            imuBuf.pop();
         }
-        while (accBuf.front().first < t1)
+        while (!imuBuf.empty() && imuBuf.front().stamp < t1)
         {
-            accVector.push_back(accBuf.front());
-            // std::cout << "2) acc pop" << std::endl;
-            accBuf.pop();
-            gyrVector.push_back(gyrBuf.front());
-            // std::cout << "2) gyr pop" << std::endl;
-            gyrBuf.pop();
+            imuVector.push_back(imuBuf.front());
+            imuBuf.pop();
         }
-        accVector.push_back(accBuf.front());
-        gyrVector.push_back(gyrBuf.front());
+        if (!imuBuf.empty()) {
+            imuVector.push_back(imuBuf.front());
+        }
     }
     else
     {
@@ -275,7 +271,7 @@ bool Estimator::getIMUInterval(double t0, double t1, vector<pair<double, Eigen::
 
 bool Estimator::IMUAvailable(double t)
 {
-    if(!accBuf.empty() && t <= accBuf.back().first)
+    if(!imuBuf.empty() && t <= imuBuf.back().stamp)
         return true;
     else
         return false;
@@ -288,7 +284,7 @@ void Estimator::processMeasurements()
         // cout << "[processMeasurements]  loop - start" << endl;
 
         pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1> > > > > feature;
-        vector<pair<double, Eigen::Vector3d>> accVector, gyrVector;
+        std::vector<ImuSample> imuVector;
         if(!featureBuf.empty())
         {
             // cout << "1" << endl;
@@ -313,7 +309,7 @@ void Estimator::processMeasurements()
             if(USE_IMU)
             {
                 // cout << "2-1)" << endl;
-                getIMUInterval(prevTime, curTime, accVector, gyrVector);
+                getIMUInterval(prevTime, curTime, imuVector);
                 // cout << "2-2)" << endl;
             }
 
@@ -324,17 +320,17 @@ void Estimator::processMeasurements()
             if(USE_IMU)
             {
                 if(!initFirstPoseFlag)
-                    initFirstIMUPose(accVector);
-                for(size_t i = 0; i < accVector.size(); i++)
+                    initFirstIMUPose(imuVector);
+                for(size_t i = 0; i < imuVector.size(); i++)
                 {
                     double dt;
                     if(i == 0)
-                        dt = accVector[i].first - prevTime;
-                    else if (i == accVector.size() - 1)
-                        dt = curTime - accVector[i - 1].first;
+                        dt = imuVector[i].stamp - prevTime;
+                    else if (i == imuVector.size() - 1)
+                        dt = curTime - imuVector[i - 1].stamp;
                     else
-                        dt = accVector[i].first - accVector[i - 1].first;
-                    processIMU(accVector[i].first, dt, accVector[i].second, gyrVector[i].second);
+                        dt = imuVector[i].stamp - imuVector[i - 1].stamp;
+                    processIMU(imuVector[i].stamp, dt, imuVector[i].acc, imuVector[i].gyr);
                 }
             }
             // cout << "4" << endl;
@@ -385,16 +381,16 @@ void Estimator::processMeasurements()
 }
 
 
-void Estimator::initFirstIMUPose(vector<pair<double, Eigen::Vector3d>> &accVector)
+void Estimator::initFirstIMUPose(const std::vector<ImuSample> &imuVector)
 {
     printf("init first imu pose\n");
     initFirstPoseFlag = true;
     //return;
     Eigen::Vector3d averAcc(0, 0, 0);
-    int n = (int)accVector.size();
-    for(size_t i = 0; i < accVector.size(); i++)
+    int n = (int)imuVector.size();
+    for(size_t i = 0; i < imuVector.size(); i++)
     {
-        averAcc = averAcc + accVector[i].second;
+        averAcc = averAcc + imuVector[i].acc;
     }
     averAcc = averAcc / n;
     printf("averge acc %f %f %f\n", averAcc.x(), averAcc.y(), averAcc.z());
@@ -1666,17 +1662,28 @@ void Estimator::updateLatestStates()
     latest_acc_0 = acc_0;
     latest_gyr_0 = gyr_0;
     mBuf.lock();
-    queue<pair<double, Eigen::Vector3d>> tmp_accBuf = accBuf;
-    queue<pair<double, Eigen::Vector3d>> tmp_gyrBuf = gyrBuf;
+    queue<ImuSample> tmp_imuBuf = imuBuf;
     mBuf.unlock();
-    while(!tmp_accBuf.empty())
+    while(!tmp_imuBuf.empty())
     {
-        double t = tmp_accBuf.front().first;
-        Eigen::Vector3d acc = tmp_accBuf.front().second;
-        Eigen::Vector3d gyr = tmp_gyrBuf.front().second;
+        double t = tmp_imuBuf.front().stamp;
+        Eigen::Vector3d acc = tmp_imuBuf.front().acc;
+        Eigen::Vector3d gyr = tmp_imuBuf.front().gyr;
         fastPredictIMU(t, acc, gyr);
-        tmp_accBuf.pop();
-        tmp_gyrBuf.pop();
+        tmp_imuBuf.pop();
     }
     mPropagate.unlock();
+}
+
+SlamState Estimator::getSlamState() const
+{
+    SlamState out;
+    out.stamp = Headers[frame_count];
+    out.R = Rs[frame_count];
+    out.p = Ps[frame_count];
+    out.v = Vs[frame_count];
+    out.ba = Bas[frame_count];
+    out.bg = Bgs[frame_count];
+    out.g = g;
+    return out;
 }

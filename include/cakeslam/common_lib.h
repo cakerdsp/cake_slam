@@ -19,6 +19,7 @@ which is included as part of this source code package.
 #include <cake_slam/utils/utils.h>
 #include <opencv2/opencv.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <cake_slam/imu_sample.h>
 #include <sophus/se3.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2/LinearMath/Transform.hpp>
@@ -65,7 +66,7 @@ struct MeasureGroup
 {
   double vio_time;
   double lio_time;
-  deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
+  deque<ImuSample> imu;
   cv::Mat img;
   MeasureGroup()
   {
