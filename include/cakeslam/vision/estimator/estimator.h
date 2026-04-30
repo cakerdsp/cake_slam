@@ -21,7 +21,6 @@
 #include <eigen3/Eigen/Geometry>
 
 #include <cake_slam/imu_sample.h>
-#include <cake_slam/slam_state.h>
 
 #include "parameters.h"
 #include "feature_manager.h"
@@ -54,13 +53,18 @@ class Estimator
     ~Estimator();
     // 根据全局参数初始化外参、噪声、求解器配置等内部状态。
     void setParameter();
+    // 暴露 VINS 已加载的相机模型，供主程序做投影、点云着色等外部几何计算。
+    camodocal::CameraConstPtr getCameraModel(int camera_id = 0) const;
+    // VINS 约定：P_imu = R_cam_to_imu * P_cam + t_cam_to_imu。
+    Eigen::Matrix3d getCameraToImuRotation(int camera_id = 0) const;
+    Eigen::Vector3d getCameraToImuTranslation(int camera_id = 0) const;
 
     // -------------------- 对外输入接口 --------------------
     // 指定一个显式的初始位姿。适用于外部已经给定系统初值的场景。
     void initFirstPose(Eigen::Vector3d p, Eigen::Matrix3d r);
-    // 输入一条 IMU 测量。
-    // 要求 t 单调递增，单位为秒。
-    void inputIMU(double t, const Vector3d &linearAcceleration, const Vector3d &angularVelocity);
+    // // 输入一条 IMU 测量。
+    // // 要求 t 单调递增，单位为秒。
+    // void inputIMU(double t, const Vector3d &linearAcceleration, const Vector3d &angularVelocity);
     // 与 inputIMU 等价的统一接口版本。
     void inputImuSample(const ImuSample &sample);
     // 输入已经整理好的特征观测帧。
@@ -101,6 +105,8 @@ class Estimator
     // 导出当前或指定滑窗帧位姿。
     void getPoseInWorldFrame(Eigen::Matrix4d &T);
     void getPoseInWorldFrame(int index, Eigen::Matrix4d &T);
+    // 导出当前视觉滑窗尾部状态，供主程序按需同步。
+    const StatesGroup &getLatestState() const;
     // 基于当前运动估计预测下一帧特征位置。
     void predictPtsInNextFrame();
     // 根据重投影误差筛除外点。
@@ -147,14 +153,8 @@ class Estimator
     MarginalizationFlag  marginalization_flag; // 本轮边缘化策略。
     Vector3d g; // 当前估计的重力向量。
 
-    Matrix3d ric[2]; // IMU 到相机的旋转外参。
-    Vector3d tic[2]; // IMU 到相机的平移外参。
-
-    // Vector3d        Ps[(WINDOW_SIZE + 1)];
-    // Vector3d        Vs[(WINDOW_SIZE + 1)];
-    // Matrix3d        Rs[(WINDOW_SIZE + 1)];
-    // Vector3d        Bas[(WINDOW_SIZE + 1)];
-    // Vector3d        Bgs[(WINDOW_SIZE + 1)];
+    Matrix3d ric[2]; // 相机到 IMU/body 的旋转外参。
+    Vector3d tic[2]; // 相机到 IMU/body 的平移外参。
 
     StatesGroup states_[(WINDOW_SIZE + 1)]; // 滑窗内每帧的统一状态。
     double td; // 当前时间延迟估计。
@@ -213,7 +213,4 @@ class Estimator
 
     bool initFirstPoseFlag; // 是否已显式设置初始位姿。
     bool initThreadFlag; // 线程是否已经初始化。
-
-    // 导出对外统一状态。
-    SlamState getSlamState() const;
 };

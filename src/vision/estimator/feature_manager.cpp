@@ -1,13 +1,14 @@
 /*******************************************************
  * Copyright (C) 2019, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *******************************************************/
 
 #include "feature_manager.h"
+#include "cake_slam/common_lib.h"
 
 // 特征的结束帧号 = 起始帧号 + 观测长度 - 1。
 int FeaturePerId::endFrame()
@@ -15,9 +16,8 @@ int FeaturePerId::endFrame()
     return start_frame + feature_per_frame.size() - 1;
 }
 
-// 构造时持有外部姿态数组指针，便于后续三角化/视差计算直接访问滑窗状态。
-FeatureManager::FeatureManager(Matrix3d _Rs[])
-    : Rs(_Rs)
+// 构造时只初始化相机外参缓存；滑窗状态通过函数参数显式传入。
+FeatureManager::FeatureManager()
 {
     for (int i = 0; i < NUM_OF_CAM; i++)
         ric[i].setIdentity();
@@ -147,7 +147,7 @@ vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_coun
             a = it.feature_per_frame[idx_l].point;
 
             b = it.feature_per_frame[idx_r].point;
-            
+
             corres.push_back(make_pair(a, b));
         }
     }
@@ -233,13 +233,13 @@ void FeatureManager::triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen:
 
 
 // 使用 OpenCV PnP 从 2D-3D 对应关系恢复单帧位姿。
-bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P, 
+bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P,
                                       vector<cv::Point2f> &pts2D, vector<cv::Point3f> &pts3D)
 {
     Eigen::Matrix3d R_initial;
     Eigen::Vector3d P_initial;
 
-    // w_T_cam ---> cam_T_w 
+    // w_T_cam ---> cam_T_w
     R_initial = R.inverse();
     P_initial = -(R_initial * P);
 
@@ -253,7 +253,7 @@ bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P,
     cv::eigen2cv(R_initial, tmp_r);
     cv::Rodrigues(tmp_r, rvec);
     cv::eigen2cv(P_initial, t);
-    cv::Mat K = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);  
+    cv::Mat K = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);
     bool pnp_succ;
     pnp_succ = cv::solvePnP(pts3D, pts2D, K, D, rvec, t, 1);
     //pnp_succ = solvePnPRansac(pts3D, pts2D, K, D, rvec, t, true, 100, 8.0 / focalLength, 0.99, inliers);
@@ -278,7 +278,7 @@ bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P,
 }
 
 // 当某一帧还没有稳定位姿时，借助已有三维点通过 PnP 进行初始化。
-void FeatureManager::initFramePoseByPnP(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vector3d tic[], Matrix3d ric[])
+void FeatureManager::initFramePoseByPnP(int frameCnt, StatesGroup states_[], Vector3d tic[], Matrix3d ric[])
 {
 
     if(frameCnt > 0)
@@ -293,36 +293,36 @@ void FeatureManager::initFramePoseByPnP(int frameCnt, Vector3d Ps[], Matrix3d Rs
                 if((int)it_per_id.feature_per_frame.size() >= index + 1)
                 {
                     Vector3d ptsInCam = ric[0] * (it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth) + tic[0];
-                    Vector3d ptsInWorld = Rs[it_per_id.start_frame] * ptsInCam + Ps[it_per_id.start_frame];
+                    Vector3d ptsInWorld = states_[it_per_id.start_frame].rot_end * ptsInCam + states_[it_per_id.start_frame].pos_end;
 
                     cv::Point3f point3d(ptsInWorld.x(), ptsInWorld.y(), ptsInWorld.z());
                     cv::Point2f point2d(it_per_id.feature_per_frame[index].point.x(), it_per_id.feature_per_frame[index].point.y());
                     pts3D.push_back(point3d);
-                    pts2D.push_back(point2d); 
+                    pts2D.push_back(point2d);
                 }
             }
         }
         Eigen::Matrix3d RCam;
         Eigen::Vector3d PCam;
         // trans to w_T_cam
-        RCam = Rs[frameCnt - 1] * ric[0];
-        PCam = Rs[frameCnt - 1] * tic[0] + Ps[frameCnt - 1];
+        RCam = states_[frameCnt - 1].rot_end * ric[0];
+        PCam = states_[frameCnt - 1].rot_end * tic[0] + states_[frameCnt - 1].pos_end;
 
         if(solvePoseByPnP(RCam, PCam, pts2D, pts3D))
         {
             // trans to w_T_imu
-            Rs[frameCnt] = RCam * ric[0].transpose(); 
-            Ps[frameCnt] = -RCam * ric[0].transpose() * tic[0] + PCam;
+            states_[frameCnt].rot_end = RCam * ric[0].transpose();
+            states_[frameCnt].pos_end = -RCam * ric[0].transpose() * tic[0] + PCam;
 
-            Eigen::Quaterniond Q(Rs[frameCnt]);
+            Eigen::Quaterniond Q(states_[frameCnt].rot_end);
             //cout << "frameCnt: " << frameCnt <<  " pnp Q " << Q.w() << " " << Q.vec().transpose() << endl;
-            //cout << "frameCnt: " << frameCnt << " pnp P " << Ps[frameCnt].transpose() << endl;
+            //cout << "frameCnt: " << frameCnt << " pnp P " << states_[frameCnt].pos_end.transpose() << endl;
         }
     }
 }
 
 // 对当前滑窗内所有满足条件的特征做批量三角化。
-void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vector3d tic[], Matrix3d ric[])
+void FeatureManager::triangulate(int frameCnt, StatesGroup states_[], Vector3d tic[], Matrix3d ric[])
 {
     for (auto &it_per_id : feature)
     {
@@ -333,15 +333,15 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
         {
             int imu_i = it_per_id.start_frame;
             Eigen::Matrix<double, 3, 4> leftPose;
-            Eigen::Vector3d t0 = Ps[imu_i] + Rs[imu_i] * tic[0];
-            Eigen::Matrix3d R0 = Rs[imu_i] * ric[0];
+            Eigen::Vector3d t0 = states_[imu_i].pos_end + states_[imu_i].rot_end * tic[0];
+            Eigen::Matrix3d R0 = states_[imu_i].rot_end * ric[0];
             leftPose.leftCols<3>() = R0.transpose();
             leftPose.rightCols<1>() = -R0.transpose() * t0;
             //cout << "left pose " << leftPose << endl;
 
             Eigen::Matrix<double, 3, 4> rightPose;
-            Eigen::Vector3d t1 = Ps[imu_i] + Rs[imu_i] * tic[1];
-            Eigen::Matrix3d R1 = Rs[imu_i] * ric[1];
+            Eigen::Vector3d t1 = states_[imu_i].pos_end + states_[imu_i].rot_end * tic[1];
+            Eigen::Matrix3d R1 = states_[imu_i].rot_end * ric[1];
             rightPose.leftCols<3>() = R1.transpose();
             rightPose.rightCols<1>() = -R1.transpose() * t1;
             //cout << "right pose " << rightPose << endl;
@@ -372,15 +372,15 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
         {
             int imu_i = it_per_id.start_frame;
             Eigen::Matrix<double, 3, 4> leftPose;
-            Eigen::Vector3d t0 = Ps[imu_i] + Rs[imu_i] * tic[0];
-            Eigen::Matrix3d R0 = Rs[imu_i] * ric[0];
+            Eigen::Vector3d t0 = states_[imu_i].pos_end + states_[imu_i].rot_end * tic[0];
+            Eigen::Matrix3d R0 = states_[imu_i].rot_end * ric[0];
             leftPose.leftCols<3>() = R0.transpose();
             leftPose.rightCols<1>() = -R0.transpose() * t0;
 
             imu_i++;
             Eigen::Matrix<double, 3, 4> rightPose;
-            Eigen::Vector3d t1 = Ps[imu_i] + Rs[imu_i] * tic[0];
-            Eigen::Matrix3d R1 = Rs[imu_i] * ric[0];
+            Eigen::Vector3d t1 = states_[imu_i].pos_end + states_[imu_i].rot_end * tic[0];
+            Eigen::Matrix3d R1 = states_[imu_i].rot_end * ric[0];
             rightPose.leftCols<3>() = R1.transpose();
             rightPose.rightCols<1>() = -R1.transpose() * t1;
 
@@ -413,8 +413,8 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
         int svd_idx = 0;
 
         Eigen::Matrix<double, 3, 4> P0;
-        Eigen::Vector3d t0 = Ps[imu_i] + Rs[imu_i] * tic[0];
-        Eigen::Matrix3d R0 = Rs[imu_i] * ric[0];
+        Eigen::Vector3d t0 = states_[imu_i].pos_end + states_[imu_i].rot_end * tic[0];
+        Eigen::Matrix3d R0 = states_[imu_i].rot_end * ric[0];
         P0.leftCols<3>() = Eigen::Matrix3d::Identity();
         P0.rightCols<1>() = Eigen::Vector3d::Zero();
 
@@ -422,8 +422,8 @@ void FeatureManager::triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vec
         {
             imu_j++;
 
-            Eigen::Vector3d t1 = Ps[imu_j] + Rs[imu_j] * tic[0];
-            Eigen::Matrix3d R1 = Rs[imu_j] * ric[0];
+            Eigen::Vector3d t1 = states_[imu_j].pos_end + states_[imu_j].rot_end * tic[0];
+            Eigen::Matrix3d R1 = states_[imu_j].rot_end * ric[0];
             Eigen::Vector3d t = R0.transpose() * (t1 - t0);
             Eigen::Matrix3d R = R0.transpose() * R1;
             Eigen::Matrix<double, 3, 4> P;
@@ -483,7 +483,7 @@ void FeatureManager::removeBackShiftDepth(Eigen::Matrix3d marg_R, Eigen::Vector3
             it->start_frame--;
         else
         {
-            Eigen::Vector3d uv_i = it->feature_per_frame[0].point;  
+            Eigen::Vector3d uv_i = it->feature_per_frame[0].point;
             it->feature_per_frame.erase(it->feature_per_frame.begin());
             if (it->feature_per_frame.size() < 2)
             {
@@ -572,9 +572,6 @@ double FeatureManager::compensatedParallax2(const FeaturePerId &it_per_id, int f
     Vector3d p_i = frame_i.point;
     Vector3d p_i_comp;
 
-    //int r_i = frame_count - 2;
-    //int r_j = frame_count - 1;
-    //p_i_comp = ric[camera_id_j].transpose() * Rs[r_j].transpose() * Rs[r_i] * ric[camera_id_i] * p_i;
     p_i_comp = p_i;
     double dep_i = p_i(2);
     double u_i = p_i(0) / dep_i;

@@ -89,8 +89,17 @@ ament_target_dependencies(cake_slam_core
 )
 target_link_libraries(cake_slam_core ${PCL_LIBRARIES} ${CERES_LIBRARIES})
 
-add_executable(cake_slam_node src/main.cpp)
-ament_target_dependencies(cake_slam_node rclcpp)
+add_executable(cake_slam_node src/slam.cpp)
+ament_target_dependencies(cake_slam_node
+  rclcpp
+  sensor_msgs
+  nav_msgs
+  geometry_msgs
+  tf2_ros
+  pcl_conversions
+  cv_bridge
+  livox_ros_driver2
+)
 target_link_libraries(cake_slam_node cake_slam_core)
 
 install(

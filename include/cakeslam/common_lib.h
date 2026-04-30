@@ -62,28 +62,28 @@ enum EKF_STATE
   LO = 3
 };
 
-// 一组对齐到同一视觉时间的输入数据。
-// 在视觉部分中通常表示“一张图像 + 覆盖该时间段的 IMU 序列”。
-struct MeasureGroup
+// 单次 LIO 或 VIO 更新对应的测量小包。
+// LIO 更新主要使用 lio_time + imu；VIO 更新主要使用 vio_time + imu + img。
+struct FusionMeasure
 {
   // 当前视觉测量对应的时间戳。
   double vio_time;
-  // 如果同一组数据还关联了 LIO 更新时间，则记录该时间戳。
+  // 当前 LIO 更新或最近一次 LIO 更新对应的时间戳。
   double lio_time;
   // 覆盖该时间区间的 IMU 数据，要求按时间升序排列。
   deque<ImuSample> imu;
   // 当前图像帧。
   cv::Mat img;
-  MeasureGroup()
+  FusionMeasure()
   {
     vio_time = 0.0;
     lio_time = 0.0;
   };
 };
 
-// 一组 LiDAR 扫描及其配套缓存。
-// 该结构是 LIO 主循环的核心输入/中间载体。
-struct LidarMeasureGroup
+// 融合主循环的同步上下文。
+// 外层保留 LiDAR 点云切割缓存，内层 measures 保存本次要执行的 LIO/VIO 测量包。
+struct FusionMeasureGroup
 {
   // 当前点云帧起始时间。
   double lidar_frame_beg_time;
@@ -97,14 +97,14 @@ struct LidarMeasureGroup
   PointCloudXYZI::Ptr pcl_proc_cur;
   // 下一帧预取/处理中点云缓存。
   PointCloudXYZI::Ptr pcl_proc_next;
-  // 与该 LiDAR 时间段对应的 IMU/图像测量序列。
-  deque<struct MeasureGroup> measures;
+  // 当前等待处理的 LIO/VIO 测量包。
+  deque<struct FusionMeasure> measures;
   // 当前测量由哪种模式驱动更新。
   EKF_STATE lio_vio_flg;
   // 当前扫描编号或序列号。
   int lidar_scan_index_now;
 
-  LidarMeasureGroup()
+  FusionMeasureGroup()
   {
     lidar_frame_beg_time = -0.0;
     lidar_frame_end_time = 0.0;

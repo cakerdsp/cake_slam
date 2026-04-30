@@ -23,6 +23,7 @@ using namespace Eigen;
 #include <rcpputils/asserts.hpp>
 
 #include "parameters.h"
+#include "cake_slam/common_lib.h"
 #include "../utility/tic_toc.h"
 
 
@@ -93,9 +94,9 @@ class FeaturePerId
 class FeatureManager
 {
   public:
-    FeatureManager(Matrix3d _Rs[]);
+    FeatureManager();
 
-    // 设置相机外参旋转。
+    // 设置相机到 IMU/body 的旋转外参。
     void setRic(Matrix3d _ric[]);
     // 清空所有跟踪特征和统计量。
     void clearState();
@@ -114,12 +115,12 @@ class FeatureManager
     // 导出当前所有待优化特征的深度向量。
     VectorXd getDepthVector();
     // 为滑窗中的特征执行三角化。
-    void triangulate(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vector3d tic[], Matrix3d ric[]);
+    void triangulate(int frameCnt, StatesGroup states_[], Vector3d tic[], Matrix3d ric[]);
     // 用两帧位姿和两个观测恢复单个三维点。
     void triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen::Matrix<double, 3, 4> &Pose1,
                             Eigen::Vector2d &point0, Eigen::Vector2d &point1, Eigen::Vector3d &point_3d);
     // 利用已知三维点，通过 PnP 初始化某一帧位姿。
-    void initFramePoseByPnP(int frameCnt, Vector3d Ps[], Matrix3d Rs[], Vector3d tic[], Matrix3d ric[]);
+    void initFramePoseByPnP(int frameCnt, StatesGroup states_[], Vector3d tic[], Matrix3d ric[]);
     // 求解一帧的位姿，输入 2D-3D 对应关系至少应满足 PnP 最低要求。
     bool solvePoseByPnP(Eigen::Matrix3d &R_initial, Eigen::Vector3d &P_initial, 
                             vector<cv::Point2f> &pts2D, vector<cv::Point3f> &pts3D);
@@ -140,8 +141,7 @@ class FeatureManager
   private:
     // 计算补偿了相机外参和时间延迟后的视差。
     double compensatedParallax2(const FeaturePerId &it_per_id, int frame_count);
-    const Matrix3d *Rs; // 外部维护的滑窗姿态数组指针。
-    Matrix3d ric[2]; // IMU 到相机的旋转外参。
+    Matrix3d ric[2]; // 相机到 IMU/body 的旋转外参。
 };
 
 #endif

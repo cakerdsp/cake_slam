@@ -3,26 +3,27 @@ cake_slam API (modules only)
 IMU
 - Unified IMU sample type: ImuSample
   - fields: stamp, acc, gyr
-  - used directly by both LIO (MeasureGroup.imu) and Vision (Estimator imuBuf)
+  - used directly by both LIO (FusionMeasure.imu) and Vision (Estimator imuBuf)
 
 LIO
 - LioCore
   - Configure(config)
   - ProcessMeasurement(lidar_measure_group)
   - GetState() -> StatesGroup
-  - GetSlamState(stamp) -> SlamState
+  - SetState(state)
   - GetUndistortedCloud() -> PointCloudXYZI::Ptr
   - GetDownsampledCloud() -> PointCloudXYZI::Ptr
+  - GetDownsampledWorldCloud() -> PointCloudXYZI::Ptr
 
 Vision
 - readParameters(config_path)
   - uses unified config.yaml keys under vision.*, imu.*, extrinsic.*, frame.*, time_offset.*
 - Estimator
   - inputImuSample(sample)
-  - getSlamState() -> SlamState
+  - getLatestState() -> StatesGroup
 
 Unified state
-- SlamState fields: stamp, R, p, v, ba, bg, g
+- StatesGroup is the only internal state carrier for LIO and VIO.
 
 Config keys (summary)
 - imu.enable, imu.topic, imu.acc_n, imu.acc_w, imu.gyr_n, imu.gyr_w, imu.g_norm
@@ -36,7 +37,7 @@ Config keys (summary)
 - vision.show_track, vision.flow_back, vision.multiple_thread
 - vision.max_solver_time, vision.max_num_iterations, vision.keyframe_parallax
 - vision.estimate_extrinsic, vision.cam0_calib, vision.image_height, vision.image_width
-- extrinsic.lidar_T (3), extrinsic.lidar_R (9), extrinsic.body_T_cam0 (4x4)
+- extrinsic.lidar_T (3), extrinsic.lidar_R (9), extrinsic.camera_T/Pcl (3), extrinsic.camera_R/Rcl (9)
 - frame.world, frame.body, frame.camera
 - output.path
 - time_offset.td, time_offset.estimate_td

@@ -108,7 +108,7 @@ void ImuProcess::set_acc_bias_cov(const V3D &b_a) { cov_bias_acc = b_a; }
 
 void ImuProcess::set_imu_init_frame_num(const int &num) { MAX_INI_COUNT = num; }
 
-void ImuProcess::IMU_init(const MeasureGroup &meas, StatesGroup &state_inout, int &N)
+void ImuProcess::IMU_init(const FusionMeasure &meas, StatesGroup &state_inout, int &N)
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
    ** 2. normalize the acceleration measurenments to unit gravity **/
@@ -154,7 +154,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, StatesGroup &state_inout, in
   last_imu = meas.imu.back();
 }
 
-void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out)
+void ImuProcess::Forward_without_imu(FusionMeasureGroup &meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out)
 {
   // 当 IMU 被禁用时，系统退化为“匀速 + 恒定角速度”的简化传播模型。
   pcl_out = *(meas.lidar);
@@ -242,7 +242,7 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
 }
 
 
-void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out)
+void ImuProcess::UndistortPcl(FusionMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out)
 {
   // 该函数是完整去畸变主流程：
   // 1. 拼接上一帧尾部 IMU；
@@ -253,7 +253,7 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
   pcl_out.clear();
   /*** add the imu of the last frame-tail to the of current frame-head ***/
   // 为了覆盖当前扫描起点之前的一个很短区间，把上一帧末尾 IMU 也接到队首。
-  MeasureGroup &meas = lidar_meas.measures.back();
+  FusionMeasure &meas = lidar_meas.measures.back();
   // cout<<"meas.imu.size: "<<meas.imu.size()<<endl;
   auto v_imu = meas.imu;
   v_imu.push_front(last_imu);
@@ -550,7 +550,7 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
   // printf("[ IMU ] time forward: %lf, backward: %lf.\n", t1 - t0, omp_get_wtime() - t1);
 }
 
-void ImuProcess::Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, PointCloudXYZI::Ptr cur_pcl_un_)
+void ImuProcess::Process2(FusionMeasureGroup &lidar_meas, StatesGroup &stat, PointCloudXYZI::Ptr cur_pcl_un_)
 {
   // 对外总入口：
   // 1. 根据配置决定是否初始化/是否走无 IMU 流程；
@@ -566,7 +566,7 @@ void ImuProcess::Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, Poin
     return;
   }
 
-  MeasureGroup meas = lidar_meas.measures.back();
+  FusionMeasure meas = lidar_meas.measures.back();
 
   if (imu_need_init)
   {

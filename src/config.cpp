@@ -6,13 +6,56 @@ namespace cake_slam {
 
 namespace {
 
+cv::FileNode nodeForKey(const cv::FileStorage &fs, const std::string &key)
+{
+  cv::FileNode direct = fs[key];
+  if (!direct.empty()) {
+    return direct;
+  }
+
+  cv::FileNode node = fs.root();
+  size_t begin = 0;
+  while (begin < key.size()) {
+    const size_t end = key.find('.', begin);
+    const std::string part = key.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+    node = node[part];
+    if (node.empty()) {
+      return node;
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    begin = end + 1;
+  }
+  return node;
+}
+
 template <typename T>
 // 如果配置文件中存在指定键，则把值读入 out；
 // 若键不存在，则保留调用者传入对象的默认值。
 void readIfPresent(const cv::FileStorage &fs, const std::string &key, T &out)
 {
-  if (!fs[key].empty()) {
-    fs[key] >> out;
+  cv::FileNode node = nodeForKey(fs, key);
+  if (!node.empty()) {
+    node >> out;
+  }
+}
+
+void readVectorIfPresent(const cv::FileStorage &fs, const std::string &key, std::vector<double> &out)
+{
+  cv::FileNode node = nodeForKey(fs, key);
+  if (node.empty()) {
+    return;
+  }
+  out.clear();
+  if (node.isSeq()) {
+    for (auto it = node.begin(); it != node.end(); ++it) {
+      out.push_back((double)*it);
+    }
+  } else if (node.isMap()) {
+    cv::Mat mat;
+    node >> mat;
+    out.assign((double *)mat.datastart, (double *)mat.dataend);
   }
 }
 
@@ -29,6 +72,22 @@ bool LoadConfig(const std::string &path, Config &config)
   if (!fs.isOpened()) {
     return false;
   }
+
+  // -------------------- 主程序参数 --------------------
+  readIfPresent(fs, "common.lidar_enable", config.common.lidar_enable);
+  readIfPresent(fs, "common.image_enable", config.common.image_enable);
+  readIfPresent(fs, "common.lidar_en", config.common.lidar_enable);
+  readIfPresent(fs, "common.img_en", config.common.image_enable);
+  readIfPresent(fs, "common.process_rate_hz", config.common.process_rate_hz);
+  readIfPresent(fs, "common.ros_driver_bug_fix", config.common.ros_driver_bug_fix);
+  readIfPresent(fs, "common.imu_time_offset", config.common.imu_time_offset);
+  readIfPresent(fs, "common.image_time_offset", config.common.image_time_offset);
+  readIfPresent(fs, "time_offset.img_time_offset", config.common.image_time_offset);
+  readIfPresent(fs, "common.max_buffer_size", config.common.max_buffer_size);
+  readIfPresent(fs, "common.gravity_align_enable", config.common.gravity_align_enable);
+  readIfPresent(fs, "uav.gravity_align_en", config.common.gravity_align_enable);
+  readIfPresent(fs, "common.imu_propagation_enable", config.common.imu_propagation_enable);
+  readIfPresent(fs, "uav.imu_rate_odom", config.common.imu_propagation_enable);
 
   // -------------------- IMU 参数 --------------------
   readIfPresent(fs, "imu.enable", config.imu.enable);
@@ -62,8 +121,8 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "map.beam_err", config.map.beam_err);
   readIfPresent(fs, "map.dept_err", config.map.dept_err);
   // layer_init_num 是数组，需要逐元素拷贝。
-  if (!fs["map.layer_init_num"].empty()) {
-    cv::FileNode node = fs["map.layer_init_num"];
+  if (!nodeForKey(fs, "map.layer_init_num").empty()) {
+    cv::FileNode node = nodeForKey(fs, "map.layer_init_num");
     config.map.layer_init_num.clear();
     for (auto it = node.begin(); it != node.end(); ++it) {
       config.map.layer_init_num.push_back((int)*it);
@@ -93,26 +152,18 @@ bool LoadConfig(const std::string &path, Config &config)
 
   // -------------------- 外参 --------------------
   // 这里把 OpenCV FileNode 序列平铺拷贝到 std::vector<double> 中。
-  if (!fs["extrinsic.lidar_T"].empty()) {
-    cv::FileNode node = fs["extrinsic.lidar_T"];
-    config.extrinsic.lidar_T.clear();
-    for (auto it = node.begin(); it != node.end(); ++it) {
-      config.extrinsic.lidar_T.push_back((double)*it);
-    }
-  }
-  if (!fs["extrinsic.lidar_R"].empty()) {
-    cv::FileNode node = fs["extrinsic.lidar_R"];
-    config.extrinsic.lidar_R.clear();
-    for (auto it = node.begin(); it != node.end(); ++it) {
-      config.extrinsic.lidar_R.push_back((double)*it);
-    }
-  }
+  readVectorIfPresent(fs, "extrinsic.lidar_T", config.extrinsic.lidar_T);
+  readVectorIfPresent(fs, "extrinsic.lidar_R", config.extrinsic.lidar_R);
+  readVectorIfPresent(fs, "extrin_calib.extrinsic_T", config.extrinsic.lidar_T);
+  readVectorIfPresent(fs, "extrin_calib.extrinsic_R", config.extrinsic.lidar_R);
+  readVectorIfPresent(fs, "extrinsic.camera_T", config.extrinsic.camera_T);
+  readVectorIfPresent(fs, "extrinsic.camera_R", config.extrinsic.camera_R);
+  readVectorIfPresent(fs, "extrinsic.Pcl", config.extrinsic.camera_T);
+  readVectorIfPresent(fs, "extrinsic.Rcl", config.extrinsic.camera_R);
+  readVectorIfPresent(fs, "extrin_calib.Pcl", config.extrinsic.camera_T);
+  readVectorIfPresent(fs, "extrin_calib.Rcl", config.extrinsic.camera_R);
   // body_T_cam0 在配置中按矩阵保存，这里按底层内存顺序拷贝为长度 16 的数组。
-  if (!fs["extrinsic.body_T_cam0"].empty()) {
-    cv::Mat mat;
-    fs["extrinsic.body_T_cam0"] >> mat;
-    config.extrinsic.body_T_cam0.assign((double *)mat.datastart, (double *)mat.dataend);
-  }
+  readVectorIfPresent(fs, "extrinsic.body_T_cam0", config.extrinsic.body_T_cam0);
 
   // -------------------- 坐标系、输出与时间偏移 --------------------
   readIfPresent(fs, "frame.world", config.frame.world);

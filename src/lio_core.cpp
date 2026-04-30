@@ -23,11 +23,11 @@ void LioCore::Configure(const Config &config)
   preprocess_->blind = config.lidar.blind;
   preprocess_->blind_sqr = config.lidar.blind * config.lidar.blind;
 
-  // 2. 读取 body(IMU) 到 LiDAR 的外参。
-  if (!config.extrinsic.lidar_T.empty()) {
+  // 2. 读取 LiDAR 到 body(IMU) 的外参，语义与 FAST-LIVO2 保持一致。
+  if (config.extrinsic.lidar_T.size() >= 3) {
     extT_ << config.extrinsic.lidar_T[0], config.extrinsic.lidar_T[1], config.extrinsic.lidar_T[2];
   }
-  if (!config.extrinsic.lidar_R.empty()) {
+  if (config.extrinsic.lidar_R.size() >= 9) {
     extR_ << config.extrinsic.lidar_R[0], config.extrinsic.lidar_R[1], config.extrinsic.lidar_R[2],
              config.extrinsic.lidar_R[3], config.extrinsic.lidar_R[4], config.extrinsic.lidar_R[5],
              config.extrinsic.lidar_R[6], config.extrinsic.lidar_R[7], config.extrinsic.lidar_R[8];
@@ -73,7 +73,7 @@ void LioCore::Configure(const Config &config)
   downsample_filter_.setLeafSize(config.lidar.filter_size_surf, config.lidar.filter_size_surf, config.lidar.filter_size_surf);
 }
 
-void LioCore::ProcessMeasurement(LidarMeasureGroup &meas)
+void LioCore::ProcessMeasurement(FusionMeasureGroup &meas)
 {
   // 当前函数是 LIO 的主入口：
   // 1. 缓存测量；
@@ -88,7 +88,7 @@ void LioCore::ProcessMeasurement(LidarMeasureGroup &meas)
   ProcessLio();
 }
 
-void LioCore::ProcessImu(LidarMeasureGroup &meas)
+void LioCore::ProcessImu(FusionMeasureGroup &meas)
 {
   // Process2 会原位更新 state_，并把去畸变后的点云写入 feats_undistort_。
   imu_proc_->Process2(meas, state_, feats_undistort_);
@@ -140,18 +140,13 @@ const StatesGroup &LioCore::GetState() const
   return state_;
 }
 
-SlamState LioCore::GetSlamState(double stamp) const
+void LioCore::SetState(const StatesGroup &state)
 {
-  // 将内部的 StatesGroup 转成对外统一的 SlamState，方便上层模块复用。
-  SlamState out;
-  out.stamp = stamp;
-  out.R = state_.rot_end;
-  out.p = state_.pos_end;
-  out.v = state_.vel_end;
-  out.ba = state_.bias_a;
-  out.bg = state_.bias_g;
-  out.g = state_.gravity;
-  return out;
+  state_ = state;
+  state_propagat_ = state;
+  if (voxel_manager_) {
+    voxel_manager_->state_ = state_;
+  }
 }
 
 PointCloudXYZI::Ptr LioCore::GetUndistortedCloud() const
@@ -162,6 +157,16 @@ PointCloudXYZI::Ptr LioCore::GetUndistortedCloud() const
 PointCloudXYZI::Ptr LioCore::GetDownsampledCloud() const
 {
   return feats_down_body_;
+}
+
+PointCloudXYZI::Ptr LioCore::GetDownsampledWorldCloud() const
+{
+  return feats_down_world_;
+}
+
+const std::vector<PointToPlane> &LioCore::GetEffectPoints() const
+{
+  return voxel_manager_->ptpl_list_;
 }
 
 } // namespace cake_slam

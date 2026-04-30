@@ -9,7 +9,6 @@
 #include "cake_slam/config.h"
 #include "cake_slam/imu_processor.h"
 #include "cake_slam/lidar_preprocess.h"
-#include "cake_slam/slam_state.h"
 #include "cake_slam/voxel_map.h"
 
 namespace cake_slam {
@@ -31,20 +30,24 @@ public:
   // 1. meas.measures 不能为空；
   // 2. 点云逐点时间应已在预处理环节保留下来，以便去畸变；
   // 3. IMU 队列必须按时间升序排列。
-  void ProcessMeasurement(LidarMeasureGroup &meas);
+  void ProcessMeasurement(FusionMeasureGroup &meas);
 
   // 返回 LIO 内部的完整状态。
   const StatesGroup &GetState() const;
-  // 返回对外统一的轻量级状态视图。
-  SlamState GetSlamState(double stamp) const;
+  // 用外部主状态覆盖 LIO 内部状态，供 LIO/VIO 顺序融合时同步初值。
+  void SetState(const StatesGroup &state);
   // 返回去畸变后的点云，坐标系为 LiDAR/body 系。
   PointCloudXYZI::Ptr GetUndistortedCloud() const;
   // 返回下采样后的点云，通常用于后续配准。
   PointCloudXYZI::Ptr GetDownsampledCloud() const;
+  // 返回下采样后的世界系点云。
+  PointCloudXYZI::Ptr GetDownsampledWorldCloud() const;
+  // 返回本次 LIO 中参与点面残差的有效点。
+  const std::vector<PointToPlane> &GetEffectPoints() const;
 
 private:
   // 使用 IMU 对当前点云进行传播和去畸变。
-  void ProcessImu(LidarMeasureGroup &meas);
+  void ProcessImu(FusionMeasureGroup &meas);
   // 执行基于体素地图的状态估计和地图更新。
   void ProcessLio();
   // 对去畸变点云做体素下采样，并同步生成世界系点云。
@@ -61,9 +64,9 @@ private:
   StatesGroup state_;
   // 当前帧仅通过传播得到的预测状态，用作迭代初值。
   StatesGroup state_propagat_;
-  // IMU/body 到 LiDAR 的平移外参。
+  // LiDAR 到 IMU/body 的平移外参。
   V3D extT_ = V3D::Zero();
-  // IMU/body 到 LiDAR 的旋转外参。
+  // LiDAR 到 IMU/body 的旋转外参。
   M3D extR_ = M3D::Identity();
 
   // 地图是否已用第一帧数据完成初始化。
@@ -73,7 +76,7 @@ private:
   pcl::VoxelGrid<PointType> downsample_filter_;
 
   // 当前缓存的测量组。
-  LidarMeasureGroup meas_;
+  FusionMeasureGroup meas_;
   // 去畸变后的原始点云。
   PointCloudXYZI::Ptr feats_undistort_;
   // 下采样后、仍位于机体系的点云。

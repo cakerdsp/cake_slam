@@ -54,6 +54,146 @@ std::string WORLD_FRAME_ID;
 std::string BODY_FRAME_ID;
 std::string CAMERA_FRAME_ID;
 
+namespace {
+
+cv::FileNode nodeForKey(const cv::FileStorage &fs, const std::string &key)
+{
+    cv::FileNode direct = fs[key];
+    if (!direct.empty())
+        return direct;
+
+    cv::FileNode node = fs.root();
+    size_t begin = 0;
+    while (begin < key.size())
+    {
+        const size_t end = key.find('.', begin);
+        const std::string part = key.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+        node = node[part];
+        if (node.empty())
+            return node;
+        if (end == std::string::npos)
+            break;
+        begin = end + 1;
+    }
+    return node;
+}
+
+template <typename T>
+void readIfPresent(const cv::FileStorage &fs, const std::string &key, T &out)
+{
+    cv::FileNode node = nodeForKey(fs, key);
+    if (!node.empty())
+        node >> out;
+}
+
+template <typename T>
+T readOrDefault(const cv::FileStorage &fs, const std::string &key, const T &fallback)
+{
+    T out = fallback;
+    readIfPresent(fs, key, out);
+    return out;
+}
+
+bool readVectorIfPresent(const cv::FileStorage &fs, const std::string &key, std::vector<double> &out)
+{
+    cv::FileNode node = nodeForKey(fs, key);
+    if (node.empty())
+        return false;
+
+    out.clear();
+    if (node.isSeq())
+    {
+        for (auto it = node.begin(); it != node.end(); ++it)
+            out.push_back((double)*it);
+        return true;
+    }
+
+    if (node.isMap())
+    {
+        cv::Mat mat;
+        node >> mat;
+        out.assign((double *)mat.datastart, (double *)mat.dataend);
+        return true;
+    }
+
+    return false;
+}
+
+bool readVectorFromAnyKey(const cv::FileStorage &fs, const std::vector<std::string> &keys, std::vector<double> &out)
+{
+    for (const auto &key : keys)
+    {
+        if (readVectorIfPresent(fs, key, out))
+            return true;
+    }
+    return false;
+}
+
+Eigen::Matrix3d matrix3dFromRowMajor(const std::vector<double> &data)
+{
+    Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
+    if (data.size() >= 9)
+    {
+        R << data[0], data[1], data[2],
+             data[3], data[4], data[5],
+             data[6], data[7], data[8];
+    }
+    return R;
+}
+
+Eigen::Vector3d vector3dFromArray(const std::vector<double> &data)
+{
+    if (data.size() >= 3)
+        return Eigen::Vector3d(data[0], data[1], data[2]);
+    return Eigen::Vector3d::Zero();
+}
+
+bool readBodyToCameraExtrinsic(const cv::FileStorage &fs, Eigen::Matrix3d &R_ic, Eigen::Vector3d &t_ic)
+{
+    cv::Mat cv_T;
+    nodeForKey(fs, "extrinsic.body_T_cam0") >> cv_T;
+    if (cv_T.empty())
+        return false;
+
+    Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+    cv::cv2eigen(cv_T, T);
+    R_ic = T.block<3, 3>(0, 0);
+    t_ic = T.block<3, 1>(0, 3);
+    return true;
+}
+
+bool readFastLivoExtrinsic(const cv::FileStorage &fs, Eigen::Matrix3d &R_ic, Eigen::Vector3d &t_ic)
+{
+    std::vector<double> lidar_R, lidar_T, camera_R, camera_T;
+    const bool has_lidar_R = readVectorFromAnyKey(fs, {"extrinsic.lidar_R", "extrin_calib.extrinsic_R"}, lidar_R);
+    const bool has_lidar_T = readVectorFromAnyKey(fs, {"extrinsic.lidar_T", "extrin_calib.extrinsic_T"}, lidar_T);
+    const bool has_camera_R = readVectorFromAnyKey(fs, {"extrinsic.camera_R", "extrinsic.Rcl", "extrin_calib.Rcl"}, camera_R);
+    const bool has_camera_T = readVectorFromAnyKey(fs, {"extrinsic.camera_T", "extrinsic.Pcl", "extrin_calib.Pcl"}, camera_T);
+    if (!has_lidar_R || !has_lidar_T || !has_camera_R || !has_camera_T)
+        return false;
+
+    // FAST-LIVO2 约定：
+    // P_imu = R_I_L * P_lidar + t_I_L
+    // P_cam = R_C_L * P_lidar + t_C_L
+    // VINS 约定：
+    // P_imu = R_I_C * P_cam + t_I_C
+    const Eigen::Matrix3d R_i_l = matrix3dFromRowMajor(lidar_R);
+    const Eigen::Vector3d t_i_l = vector3dFromArray(lidar_T);
+    const Eigen::Matrix3d R_c_l = matrix3dFromRowMajor(camera_R);
+    const Eigen::Vector3d t_c_l = vector3dFromArray(camera_T);
+
+    const Eigen::Matrix3d R_l_i = R_i_l.transpose();
+    const Eigen::Vector3d t_l_i = -R_l_i * t_i_l;
+    const Eigen::Matrix3d R_c_i = R_c_l * R_l_i;
+    const Eigen::Vector3d t_c_i = R_c_l * t_l_i + t_c_l;
+
+    R_ic = R_c_i.transpose();
+    t_ic = -R_ic * t_c_i;
+    return true;
+}
+
+} // namespace
+
 template <typename T>
 // 从 ROS 参数服务器读取参数的辅助函数。
 T readParam(rclcpp::Node::SharedPtr n, std::string name)
@@ -91,16 +231,20 @@ void readParameters(std::string config_file)
         std::cerr << "ERROR: Wrong path to settings" << std::endl;
     }
 
-    // -------------------- 前端跟踪参数 --------------------
-    fsSettings["vision.image_topic"] >> IMAGE0_TOPIC;
-    IMAGE1_TOPIC.clear();
-    MAX_CNT = (int)fsSettings["vision.max_cnt"];
-    MIN_DIST = (int)fsSettings["vision.min_dist"];
-    F_THRESHOLD = (double)fsSettings["vision.f_threshold"];
-    SHOW_TRACK = (int)fsSettings["vision.show_track"];
-    FLOW_BACK = (int)fsSettings["vision.flow_back"];
+    RIC.clear();
+    TIC.clear();
+    CAM_NAMES.clear();
 
-    MULTIPLE_THREAD = (int)fsSettings["vision.multiple_thread"];
+    // -------------------- 前端跟踪参数 --------------------
+    readIfPresent(fsSettings, "vision.image_topic", IMAGE0_TOPIC);
+    IMAGE1_TOPIC.clear();
+    MAX_CNT = readOrDefault<int>(fsSettings, "vision.max_cnt", 150);
+    MIN_DIST = readOrDefault<int>(fsSettings, "vision.min_dist", 30);
+    F_THRESHOLD = readOrDefault<double>(fsSettings, "vision.f_threshold", 1.0);
+    SHOW_TRACK = readOrDefault<int>(fsSettings, "vision.show_track", 0);
+    FLOW_BACK = readOrDefault<int>(fsSettings, "vision.flow_back", 0);
+
+    MULTIPLE_THREAD = readOrDefault<int>(fsSettings, "vision.multiple_thread", 0);
 
     // 当前实现默认关闭 GPU 路径。
     USE_GPU = 0;
@@ -108,32 +252,34 @@ void readParameters(std::string config_file)
     USE_GPU_CERES = 0;
 
     // -------------------- IMU 参数 --------------------
-    USE_IMU = (int)fsSettings["imu.enable"];
+    USE_IMU = readOrDefault<int>(fsSettings, "imu.enable", 1);
     if(USE_IMU)
     {
-        fsSettings["imu.topic"] >> IMU_TOPIC;
-        ACC_N = (double)fsSettings["imu.acc_n"];
-        ACC_W = (double)fsSettings["imu.acc_w"];
-        GYR_N = (double)fsSettings["imu.gyr_n"];
-        GYR_W = (double)fsSettings["imu.gyr_w"];
-        G.z() = (double)fsSettings["imu.g_norm"];
+        readIfPresent(fsSettings, "imu.topic", IMU_TOPIC);
+        ACC_N = readOrDefault<double>(fsSettings, "imu.acc_n", 0.02);
+        ACC_W = readOrDefault<double>(fsSettings, "imu.acc_w", 0.04);
+        GYR_N = readOrDefault<double>(fsSettings, "imu.gyr_n", 0.01);
+        GYR_W = readOrDefault<double>(fsSettings, "imu.gyr_w", 0.001);
+        G.z() = readOrDefault<double>(fsSettings, "imu.g_norm", 9.81);
     }
 
     // -------------------- 优化与关键帧参数 --------------------
-    SOLVER_TIME = (double)fsSettings["vision.max_solver_time"];
-    NUM_ITERATIONS = (int)fsSettings["vision.max_num_iterations"];
-    MIN_PARALLAX = (double)fsSettings["vision.keyframe_parallax"];
+    SOLVER_TIME = readOrDefault<double>(fsSettings, "vision.max_solver_time", 0.04);
+    NUM_ITERATIONS = readOrDefault<int>(fsSettings, "vision.max_num_iterations", 8);
+    MIN_PARALLAX = readOrDefault<double>(fsSettings, "vision.keyframe_parallax", 10.0);
     MIN_PARALLAX = MIN_PARALLAX / FOCAL_LENGTH;
 
     // -------------------- 输出路径 --------------------
-    fsSettings["output.path"] >> OUTPUT_FOLDER;
+    readIfPresent(fsSettings, "output.path", OUTPUT_FOLDER);
+    if (OUTPUT_FOLDER.empty())
+        OUTPUT_FOLDER = ".";
     VINS_RESULT_PATH = OUTPUT_FOLDER + "/vio.csv";
     std::cout << "result path " << VINS_RESULT_PATH << std::endl;
     std::ofstream fout(VINS_RESULT_PATH, std::ios::out);
     fout.close();
 
     // -------------------- 外参处理策略 --------------------
-    ESTIMATE_EXTRINSIC = (int)fsSettings["vision.estimate_extrinsic"];
+    ESTIMATE_EXTRINSIC = readOrDefault<int>(fsSettings, "vision.estimate_extrinsic", 0);
     if (ESTIMATE_EXTRINSIC == 2)
     {
         ROS_WARN("have no prior about extrinsic param, calibrate extrinsic param");
@@ -151,13 +297,22 @@ void readParameters(std::string config_file)
         if (ESTIMATE_EXTRINSIC == 0)
             ROS_WARN(" fix extrinsic param ");
 
-        // 已知初值时，直接从 body_T_cam0 中提取旋转和平移。
-        cv::Mat cv_T;
-        fsSettings["extrinsic.body_T_cam0"] >> cv_T;
-        Eigen::Matrix4d T;
-        cv::cv2eigen(cv_T, T);
-        RIC.push_back(T.block<3, 3>(0, 0));
-        TIC.push_back(T.block<3, 1>(0, 3));
+        Eigen::Matrix3d R_ic = Eigen::Matrix3d::Identity();
+        Eigen::Vector3d t_ic = Eigen::Vector3d::Zero();
+        if (readBodyToCameraExtrinsic(fsSettings, R_ic, t_ic))
+        {
+            ROS_INFO("load VINS camera-to-IMU extrinsic from extrinsic.body_T_cam0");
+        }
+        else if (readFastLivoExtrinsic(fsSettings, R_ic, t_ic))
+        {
+            ROS_INFO("compose VINS camera-to-IMU extrinsic from FAST-LIVO2 lidar/camera extrinsics");
+        }
+        else
+        {
+            ROS_WARN("camera extrinsic missing, use identity camera-to-IMU extrinsic");
+        }
+        RIC.push_back(R_ic);
+        TIC.push_back(t_ic);
     } 
 
     // 当前配置默认单目。
@@ -165,7 +320,7 @@ void readParameters(std::string config_file)
     STEREO = 0;
 
     std::string cam0Calib;
-    fsSettings["vision.cam0_calib"] >> cam0Calib;
+    readIfPresent(fsSettings, "vision.cam0_calib", cam0Calib);
     CAM_NAMES.push_back(cam0Calib);
 
     INIT_DEPTH = 5.0;
@@ -173,15 +328,15 @@ void readParameters(std::string config_file)
     BIAS_GYR_THRESHOLD = 0.1;
 
     // -------------------- 时间偏移与图像尺寸 --------------------
-    TD = (double)fsSettings["time_offset.td"];
-    ESTIMATE_TD = (int)fsSettings["time_offset.estimate_td"];
+    TD = readOrDefault<double>(fsSettings, "time_offset.td", 0.0);
+    ESTIMATE_TD = readOrDefault<int>(fsSettings, "time_offset.estimate_td", 0);
     if (ESTIMATE_TD)
         ROS_INFO("Unsynchronized sensors, online estimate time offset, initial td: %f", TD);
     else
         ROS_INFO("Synchronized sensors, fix time offset: %f", TD);
 
-    ROW = (int)fsSettings["vision.image_height"];
-    COL = (int)fsSettings["vision.image_width"];
+    ROW = readOrDefault<int>(fsSettings, "vision.image_height", 480);
+    COL = readOrDefault<int>(fsSettings, "vision.image_width", 640);
     ROS_INFO("ROW: %d COL: %d ", ROW, COL);
 
     // 没有 IMU 时，不允许再估计相机-IMU 外参和时间延迟。
@@ -193,11 +348,11 @@ void readParameters(std::string config_file)
     }
 
     // -------------------- 坐标系命名 --------------------
-    fsSettings["frame.world"] >> WORLD_FRAME_ID;
+    readIfPresent(fsSettings, "frame.world", WORLD_FRAME_ID);
     WORLD_FRAME_ID.empty()? WORLD_FRAME_ID = "world" : WORLD_FRAME_ID;
-    fsSettings["frame.body"] >> BODY_FRAME_ID;   
+    readIfPresent(fsSettings, "frame.body", BODY_FRAME_ID);
     BODY_FRAME_ID.empty()? BODY_FRAME_ID = "body" : BODY_FRAME_ID;
-    fsSettings["frame.camera"] >> CAMERA_FRAME_ID;
+    readIfPresent(fsSettings, "frame.camera", CAMERA_FRAME_ID);
     CAMERA_FRAME_ID.empty()? CAMERA_FRAME_ID = "camera" : CAMERA_FRAME_ID;
     
     ROS_INFO("frame_ids: world=%s body=%s camera=%s", WORLD_FRAME_ID.c_str(),

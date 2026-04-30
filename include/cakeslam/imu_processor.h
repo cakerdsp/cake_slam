@@ -40,7 +40,7 @@ public:
 
   // 重置内部状态，使对象回到“尚未初始化”的状态。
   void Reset();
-  // 设置 body(IMU) 到 LiDAR 的平移和旋转外参。
+  // 设置 LiDAR 到 body(IMU) 的平移和旋转外参。
   void set_extrinsic(const V3D &transl, const M3D &rot);
   // 仅设置平移外参，旋转保持已有值。
   void set_extrinsic(const V3D &transl);
@@ -71,9 +71,9 @@ public:
   // 1. lidar_meas 中必须包含与当前扫描对应的 IMU 数据；
   // 2. stat 为上一时刻状态，函数返回后将被原位更新；
   // 3. cur_pcl_un_ 指向的点云会被写入去畸变结果。
-  void Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, PointCloudXYZI::Ptr cur_pcl_un_);
+  void Process2(FusionMeasureGroup &lidar_meas, StatesGroup &stat, PointCloudXYZI::Ptr cur_pcl_un_);
   // 仅执行点云去畸变，不额外封装上层处理流程。
-  void UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
+  void UndistortPcl(FusionMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
 
   // IMU 调试输出文件流。
   ofstream fout_imu;
@@ -107,9 +107,9 @@ public:
 
 private:
   // 利用静止段或初始段数据估计重力方向、偏置等初值。
-  void IMU_init(const MeasureGroup &meas, StatesGroup &state, int &N);
+  void IMU_init(const FusionMeasure &meas, StatesGroup &state, int &N);
   // 在未启用 IMU 时，仅基于当前姿态假设做直通式点云输出。
-  void Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
+  void Forward_without_imu(FusionMeasureGroup &meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
   // 待处理点云缓存。
   PointCloudXYZI pcl_wait_proc;
   // 上一个 IMU 样本，用于积分。

@@ -5,6 +5,30 @@
 
 namespace cake_slam {
 
+// 主程序运行模式与同步相关配置。
+// 这些字段对应 FAST-LIVO2 主程序中的 common/time_offset 类参数，但统一由本项目 yaml 读取。
+struct CommonConfig
+{
+  // 是否接入 LiDAR。关闭后主程序不会订阅或处理点云。
+  bool lidar_enable = true;
+  // 是否接入单目图像。当前 cake_slam 主程序只支持单目入口。
+  bool image_enable = true;
+  // 主循环定时器频率，单位 Hz。
+  int process_rate_hz = 500;
+  // 兼容部分驱动 IMU 秒级跳变的修正开关，默认关闭。
+  bool ros_driver_bug_fix = false;
+  // IMU 时间戳修正量，订阅后先执行 stamp - imu_time_offset。
+  double imu_time_offset = 0.0;
+  // 图像时间戳修正量，订阅后执行 stamp + image_time_offset。
+  double image_time_offset = 0.0;
+  // 各输入缓存最大长度，避免长期不同步时内存无限增长。
+  int max_buffer_size = 200000;
+  // 是否在 IMU 初始化后把估计重力对齐到世界 z 轴方向。
+  bool gravity_align_enable = false;
+  // 是否发布 IMU 高频传播里程计。
+  bool imu_propagation_enable = true;
+};
+
 // IMU 相关配置。这里的字段同时服务于 LIO 和视觉惯导部分。
 struct ImuConfig
 {
@@ -121,11 +145,15 @@ struct VisionConfig
 // 数组长度由对应模块约定：例如 lidar_R 为 9 个元素的行优先旋转矩阵。
 struct ExtrinsicConfig
 {
-  // IMU/body 到 LiDAR 的平移外参，长度应为 3。
+  // LiDAR 到 IMU/body 的平移外参 t_I_L，长度应为 3。
   std::vector<double> lidar_T;
-  // IMU/body 到 LiDAR 的旋转外参，长度应为 9。
+  // LiDAR 到 IMU/body 的旋转外参 R_I_L，长度应为 9。
   std::vector<double> lidar_R;
-  // body 到 cam0 的 4x4 齐次变换矩阵，长度应为 16。
+  // LiDAR 到 cam0 的平移外参 t_C_L，长度应为 3。
+  std::vector<double> camera_T;
+  // LiDAR 到 cam0 的旋转外参 R_C_L，长度应为 9。
+  std::vector<double> camera_R;
+  // cam0 到 IMU/body 的 4x4 齐次变换矩阵 T_I_C，长度应为 16。
   std::vector<double> body_T_cam0;
 };
 
@@ -160,6 +188,7 @@ struct TimeOffsetConfig
 // LoadConfig 会按命名空间分别填充这些子结构。
 struct Config
 {
+  CommonConfig common;
   ImuConfig imu;
   LidarConfig lidar;
   MapConfig map;
