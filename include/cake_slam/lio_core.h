@@ -8,53 +8,57 @@
 #include "cake_slam/common_lib.h"
 #include "cake_slam/config.h"
 #include "cake_slam/imu_processor.h"
-#include "cake_slam/lidar_preprocess.h"
 #include "cake_slam/voxel_map.h"
 
 namespace cake_slam {
 
+/**
+ * @brief FAST-LIVO2-style LiDAR-inertial odometry core.
+ *
+ * Inputs are already synchronized LiDAR/IMU packets from SlamNode. The class
+ * owns IMU propagation/undistortion, voxel-map registration, downsampling, and
+ * the latest IESKF state/covariance. It intentionally does not subscribe to ROS
+ * topics or convert ROS messages.
+ */
 class LioCore
 {
 public:
-  // 构造函数：只完成对象分配，不读取配置，也不启动处理流程。
+  /** @brief Allocate processing modules and point-cloud buffers. */
   LioCore();
 
-  // 根据统一配置初始化 LiDAR 预处理、IMU 处理器和体素地图管理器。
-  // 输入要求：
-  // 1. config 中的外参长度需与约定匹配；
-  // 2. lidar / imu / map 字段应已由上层正确加载。
+  /**
+   * @brief Configure IMU propagation, LiDAR-body extrinsics, voxel map, and filters.
+   * @param config Unified YAML configuration. Translations are [m].
+   */
   void Configure(const Config &config);
 
-  // 处理一组已经完成时间同步的 LiDAR + IMU 测量。
-  // 输入要求：
-  // 1. meas.measures 不能为空；
-  // 2. 点云逐点时间应已在预处理环节保留下来，以便去畸变；
-  // 3. IMU 队列必须按时间升序排列。
+  /**
+   * @brief Run one LIO update on a synchronized LiDAR/IMU packet.
+   * @param meas Point cloud in LiDAR/body frame [m] plus IMU samples [m/s^2, rad/s].
+   */
   void ProcessMeasurement(FusionMeasureGroup &meas);
 
-  // 返回 LIO 内部的完整状态。
+  /** @brief Return the latest IESKF state and 19x19 covariance. */
   const StatesGroup &GetState() const;
-  // 用外部主状态覆盖 LIO 内部状态，供 LIO/VIO 顺序融合时同步初值。
+  /** @brief Synchronize the LIO state from the fused main state. */
   void SetState(const StatesGroup &state);
-  // 返回去畸变后的点云，坐标系为 LiDAR/body 系。
+  /** @brief Return the undistorted point cloud [m], LiDAR/body frame. */
   PointCloudXYZI::Ptr GetUndistortedCloud() const;
-  // 返回下采样后的点云，通常用于后续配准。
+  /** @brief Return the downsampled point cloud [m], LiDAR/body frame. */
   PointCloudXYZI::Ptr GetDownsampledCloud() const;
-  // 返回下采样后的世界系点云。
+  /** @brief Return the downsampled point cloud [m], world frame. */
   PointCloudXYZI::Ptr GetDownsampledWorldCloud() const;
-  // 返回本次 LIO 中参与点面残差的有效点。
+  /** @brief Return point-to-plane residual inputs used by the latest LIO solve. */
   const std::vector<PointToPlane> &GetEffectPoints() const;
 
 private:
-  // 使用 IMU 对当前点云进行传播和去畸变。
+  /** @brief Propagate IMU and undistort the current LiDAR scan. */
   void ProcessImu(FusionMeasureGroup &meas);
-  // 执行基于体素地图的状态估计和地图更新。
+  /** @brief Run voxel-map registration and map update. */
   void ProcessLio();
-  // 对去畸变点云做体素下采样，并同步生成世界系点云。
+  /** @brief Downsample undistorted points and transform them to world frame. */
   void Downsample();
 
-  // LiDAR 原始点云预处理器。
-  PreprocessPtr preprocess_;
   // IMU 初始化、传播和去畸变模块。
   ImuProcessPtr imu_proc_;
   // 体素地图构建、配准和滑窗管理模块。

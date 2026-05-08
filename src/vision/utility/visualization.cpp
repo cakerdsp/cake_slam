@@ -98,7 +98,7 @@ void pubTrackImage(const cv::Mat &imgTrack, const double t)
 
 void printStatistics(const Estimator &estimator, double t)
 {
-    if (estimator.solver_flag != Estimator::SolverFlag::NON_LINEAR)
+    if (estimator.solver_flag != Estimator::NON_LINEAR)
         return;
     //printf("position: %f, %f, %f\r", estimator.states_[WINDOW_SIZE].pos_end.x(), estimator.states_[WINDOW_SIZE].pos_end.y(), estimator.states_[WINDOW_SIZE].pos_end.z());
     // ROS_DEBUG_STREAM("position: " << estimator.states_[WINDOW_SIZE].pos_end.transpose());
@@ -144,7 +144,7 @@ void pubOdometry(const Estimator &estimator, const std_msgs::msg::Header &header
 {
     if (!pub_odometry || !pub_path)
         return;
-    if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
+    if (estimator.solver_flag == Estimator::NON_LINEAR)
     {
         nav_msgs::msg::Odometry odometry;
         odometry.header = header;
@@ -241,7 +241,7 @@ void pubCameraPose(const Estimator &estimator, const std_msgs::msg::Header &head
         return;
     int idx2 = WINDOW_SIZE - 1;
 
-    if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
+    if (estimator.solver_flag == Estimator::NON_LINEAR)
     {
         int i = idx2;
         Vector3d P = estimator.states_[i].pos_end + estimator.states_[i].rot_end * estimator.tic[0];
@@ -343,7 +343,7 @@ void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
 
 
     cout << "tf 1" << endl;
-    if( estimator.solver_flag != Estimator::SolverFlag::NON_LINEAR)
+    if( estimator.solver_flag != Estimator::NON_LINEAR)
         return;
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> br;
@@ -441,7 +441,7 @@ void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
 
 // void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
 // {
-//     if( estimator.solver_flag != Estimator::SolverFlag::NON_LINEAR)
+//     if( estimator.solver_flag != Estimator::NON_LINEAR)
 //         return;
 //     std::shared_ptr<tf2_ros::TransformBroadcaster> br;
 //     tf2::Transform transform;
@@ -496,7 +496,7 @@ void pubKeyframe(const Estimator &estimator)
     if (!pub_keyframe_pose || !pub_keyframe_point)
         return;
     // pub camera pose, 2D-3D points of keyframe
-    if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR && estimator.marginalization_flag == 0)
+    if (estimator.solver_flag == Estimator::NON_LINEAR && estimator.marginalization_flag == 0)
     {
         int i = WINDOW_SIZE - 2;
         //Vector3d P = estimator.states_[i].pos_end + estimator.states_[i].rot_end * estimator.tic[0];

@@ -78,7 +78,6 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "common.image_enable", config.common.image_enable);
   readIfPresent(fs, "common.lidar_en", config.common.lidar_enable);
   readIfPresent(fs, "common.img_en", config.common.image_enable);
-  readIfPresent(fs, "common.process_rate_hz", config.common.process_rate_hz);
   readIfPresent(fs, "common.ros_driver_bug_fix", config.common.ros_driver_bug_fix);
   readIfPresent(fs, "common.imu_time_offset", config.common.imu_time_offset);
   readIfPresent(fs, "common.image_time_offset", config.common.image_time_offset);
@@ -138,7 +137,6 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.image_topic", config.vision.image_topic);
   readIfPresent(fs, "vision.max_cnt", config.vision.max_cnt);
   readIfPresent(fs, "vision.min_dist", config.vision.min_dist);
-  readIfPresent(fs, "vision.f_threshold", config.vision.f_threshold);
   readIfPresent(fs, "vision.show_track", config.vision.show_track);
   readIfPresent(fs, "vision.flow_back", config.vision.flow_back);
   readIfPresent(fs, "vision.multiple_thread", config.vision.multiple_thread);
@@ -147,8 +145,22 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.keyframe_parallax", config.vision.keyframe_parallax);
   readIfPresent(fs, "vision.estimate_extrinsic", config.vision.estimate_extrinsic);
   readIfPresent(fs, "vision.cam0_calib", config.vision.cam0_calib);
+  readIfPresent(fs, "vision.fisheye_mask", config.vision.fisheye_mask);
   readIfPresent(fs, "vision.image_height", config.vision.image_height);
   readIfPresent(fs, "vision.image_width", config.vision.image_width);
+  readIfPresent(fs, "vision.lidar_depth_enable", config.vision.lidar_depth_enable);
+  readIfPresent(fs, "vision.optimize_lidar_inv_depth", config.vision.optimize_lidar_inv_depth);
+  readIfPresent(fs, "vision.max_lidar_features", config.vision.max_lidar_features);
+  readIfPresent(fs, "vision.min_lidar_depth", config.vision.min_lidar_depth);
+  readIfPresent(fs, "vision.max_lidar_depth", config.vision.max_lidar_depth);
+  readIfPresent(fs, "vision.z_buffer_cell_size", config.vision.z_buffer_cell_size);
+  readIfPresent(fs, "vision.z_buffer_depth_tolerance", config.vision.z_buffer_depth_tolerance);
+  readIfPresent(fs, "vision.shi_tomasi_min_score", config.vision.shi_tomasi_min_score);
+  readIfPresent(fs, "vision.lidar_mask_radius", config.vision.lidar_mask_radius);
+  readIfPresent(fs, "vision.lio_prior_reproj_threshold", config.vision.lio_prior_reproj_threshold);
+  readIfPresent(fs, "vision.lidar_depth_std", config.vision.lidar_depth_std);
+  readIfPresent(fs, "vision.min_inv_depth_var", config.vision.min_inv_depth_var);
+  readIfPresent(fs, "vision.min_lio_pose_prior_var", config.vision.min_lio_pose_prior_var);
 
   // -------------------- 外参 --------------------
   // 这里把 OpenCV FileNode 序列平铺拷贝到 std::vector<double> 中。
@@ -168,6 +180,7 @@ bool LoadConfig(const std::string &path, Config &config)
   // -------------------- 坐标系、输出与时间偏移 --------------------
   readIfPresent(fs, "frame.world", config.frame.world);
   readIfPresent(fs, "frame.body", config.frame.body);
+  readIfPresent(fs, "frame.lidar", config.frame.lidar);
   readIfPresent(fs, "frame.camera", config.frame.camera);
 
   readIfPresent(fs, "output.path", config.output.path);

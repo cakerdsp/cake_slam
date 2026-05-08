@@ -1,9 +1,13 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include <cv_bridge/cv_bridge.h>
@@ -23,45 +27,58 @@
 #include "cake_slam/config.h"
 #include "cake_slam/imu_sample.h"
 #include "cake_slam/lidar_preprocess.h"
+#include "cake_slam/lidar_visual_selector.h"
+#include "cake_slam/lidar_visual_types.h"
 #include "cake_slam/lio_core.h"
 #include "cake_slam/vision/estimator/estimator.h"
 
 namespace cake_slam {
 
-// 主节点负责 ROS 输入、传感器同步和 LIO/VIO 顺序调度。
-// 设计参考 FAST-LIVO2 的 LIVMapper，但视觉更新改为 VINS-Fusion 风格：
-// 1. 图像只缓存单目原始图；
-// 2. VIO 更新时把同一时间段 IMU 队列送给 Estimator 做预积分；
-// 3. 特征提取留在 Estimator::inputImage 内部完成。
+/**
+ * @brief ROS2 main fusion node for Cake-SLAM.
+ *
+ * SlamNode owns ROS I/O, FAST-LIVO2-style time slicing, LIO/VIO scheduling,
+ * and public outputs. Sensor callbacks are deliberately light: they only push
+ * raw messages into buffers. Decoding, synchronization, LIO, VIO, and coloring
+ * run in sync_process_thread_.
+ */
 class SlamNode : public rclcpp::Node
 {
 public:
   explicit SlamNode(const rclcpp::NodeOptions &options = rclcpp::NodeOptions());
+  ~SlamNode() override;
 
 private:
+  /**
+   * @brief Decoded mono/color image packet consumed by the sync thread.
+   */
   struct ImagePacket
   {
-    double stamp = 0.0;
-    cv::Mat mono;
-    cv::Mat color;
+    double stamp = 0.0; ///< Image timestamp after configured offset [s].
+    cv::Mat mono;       ///< Mono image for FeatureTracker.
+    cv::Mat color;      ///< BGR image for LiDAR point coloring.
   };
 
-  // -------------------- 初始化流程 --------------------
+  // Initialization.
   void initialize();
   void loadConfiguration();
   void configureModules();
   void createSubscriptions();
   void createPublishers();
-  void createProcessingTimer();
+  void startSyncProcessThread();
+  void stopSyncProcessThread();
 
-  // -------------------- ROS 回调 --------------------
+  // ROS callbacks. These callbacks must stay non-blocking and buffer only.
   void livoxPointCloudCallback(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr msg);
   void standardPointCloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
   void imuCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg);
   void imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg);
 
-  // -------------------- 主循环与同步 --------------------
-  void processingLoop();
+  // Synchronization and scheduling.
+  void syncProcessLoop();
+  void drainRawInputBuffers();
+  void enqueueProcessedCloud(double stamp, const PointCloudXYZI::Ptr &cloud);
+  void enqueueImagePacket(ImagePacket &&packet);
   bool syncPackages(FusionMeasureGroup &meas);
   bool syncLioOnly(FusionMeasureGroup &meas);
   bool syncLoOnly(FusionMeasureGroup &meas);
@@ -69,13 +86,13 @@ private:
   bool buildLioMeasureToTime(FusionMeasureGroup &meas, double update_time);
   bool buildVioMeasure(FusionMeasureGroup &meas);
 
-  // -------------------- 模块更新 --------------------
+  // Backend updates.
   void handleLIO();
   void handleVIO();
   void handleFirstFrame();
   void gravityAlignment();
 
-  // -------------------- 缓存与时间工具 --------------------
+  // Buffer and time helpers.
   void clearAllBuffersLocked();
   void trimBuffersLocked();
   void resetSyncStateLocked();
@@ -86,7 +103,12 @@ private:
   cv::Mat monoImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &msg) const;
   cv::Mat colorImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &msg) const;
   void loadExtrinsicsForMain();
+  LioPosePrior makeLioPosePrior(double stamp) const;
+  void buildLidarVisualCandidates(double stamp);
   Eigen::Vector3d lidarToWorld(const Eigen::Vector3d &point_lidar) const;
+
+  // Publishers.
+  void publishRawCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar);
   void publishOdometry(double stamp);
   void publishPath(double stamp);
   void publishMavrosPose(double stamp);
@@ -95,7 +117,8 @@ private:
   void publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar);
   void publishVisualSubmap(double stamp);
   void imuPropagationTimer();
-  void propagateImuOnce(StatesGroup &state, double dt, const Eigen::Vector3d &acc, const Eigen::Vector3d &gyr) const;
+  void propagateImuOnce(StatesGroup &state, double dt, const Eigen::Vector3d &acc,
+                        const Eigen::Vector3d &gyr) const;
 
   Config config_;
   std::string config_file_;
@@ -105,14 +128,14 @@ private:
   bool use_imu_ = true;
   SLAM_MODE slam_mode_ = LIVO;
 
-  // LiDAR 预处理和两个后端模块。
+  // Owned processing modules.
   PreprocessPtr preprocess_;
   LioCore lio_;
+  LidarVisualSelector lidar_visual_selector_;
   std::unique_ptr<Estimator> vio_;
 
-  // 主状态是主程序对外发布的唯一状态来源。
+  // State exposed by ROS publishers. Units: position [m], velocity [m/s].
   StatesGroup state_;
-  StatesGroup state_propagat_;
   StatesGroup latest_ekf_state_;
   StatesGroup imu_propagate_state_;
   bool ekf_finish_once_ = false;
@@ -123,31 +146,40 @@ private:
   double latest_ekf_time_ = -1.0;
   double last_imu_prop_time_ = -1.0;
 
-  Eigen::Matrix3d lidar_to_imu_R_ = Eigen::Matrix3d::Identity();
-  Eigen::Vector3d lidar_to_imu_t_ = Eigen::Vector3d::Zero();
-  Eigen::Matrix3d lidar_to_camera_R_ = Eigen::Matrix3d::Identity();
-  Eigen::Vector3d lidar_to_camera_t_ = Eigen::Vector3d::Zero();
+  // Extrinsics used by the main node.
+  Eigen::Matrix3d lidar_to_imu_R_ = Eigen::Matrix3d::Identity();     ///< R_I_L.
+  Eigen::Vector3d lidar_to_imu_t_ = Eigen::Vector3d::Zero();         ///< t_I_L [m].
+  Eigen::Matrix3d lidar_to_camera_R_ = Eigen::Matrix3d::Identity();  ///< R_C_L.
+  Eigen::Vector3d lidar_to_camera_t_ = Eigen::Vector3d::Zero();      ///< t_C_L [m].
 
-  // 输入缓存。IMU 使用两个队列，让 LIO 和 VIO 分别消费同一批原始测量。
+  // Raw input buffers and decoded buffers.
   std::mutex buffer_mutex_;
   std::deque<PointCloudXYZI::Ptr> lidar_buffer_;
   std::deque<double> lidar_time_buffer_;
+  std::deque<livox_ros_driver2::msg::CustomMsg::ConstSharedPtr> raw_livox_buffer_;
+  std::deque<sensor_msgs::msg::PointCloud2::ConstSharedPtr> raw_cloud_buffer_;
+  std::deque<sensor_msgs::msg::Image::ConstSharedPtr> raw_image_buffer_;
   std::deque<ImuSample> imu_lio_buffer_;
   std::deque<ImuSample> imu_vio_buffer_;
   std::deque<ImuSample> imu_prop_buffer_;
   std::deque<ImagePacket> image_buffer_;
   ImuSample newest_imu_;
   bool new_imu_ = false;
+  std::condition_variable buffer_cv_;
+  std::atomic_bool sync_thread_running_{false};
+  std::thread sync_process_thread_;
 
-  // 当前同步上下文，保留点云切割缓存和最近一次更新状态。
+  // Synchronizer state and latest data bound to the current image.
   FusionMeasureGroup measures_;
   bool lidar_pushed_ = false;
   double last_lidar_time_ = -1.0;
   double last_imu_time_ = -1.0;
   double last_image_time_ = -1.0;
   double last_vio_update_time_ = -1.0;
+  cv::Mat latest_sync_mono_image_;
   cv::Mat latest_sync_color_image_;
-  double latest_sync_image_time_ = -1.0;
+  std::vector<LidarVisualCandidate> pending_lidar_visual_candidates_;
+  LioPosePrior pending_lio_pose_prior_;
 
   nav_msgs::msg::Path path_msg_;
 
@@ -159,13 +191,13 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pub_mavros_pose_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_imu_prop_odom_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_raw_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_registered_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_map_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_colored_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_visual_submap_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_effect_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-  rclcpp::TimerBase::SharedPtr processing_timer_;
   rclcpp::TimerBase::SharedPtr imu_prop_timer_;
 };
 

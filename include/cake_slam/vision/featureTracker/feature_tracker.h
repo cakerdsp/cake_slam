@@ -1,0 +1,166 @@
+/*******************************************************
+ * Copyright (C) 2019, Aerial Robotics Group, Hong Kong University of Science and Technology
+ *
+ * This file is part of VINS and has been adapted for Cake-SLAM.
+ *
+ * Licensed under the GNU General Public License v3.0.
+ *******************************************************/
+
+#pragma once
+
+// #define GPU_MODE 1
+
+#include <cstdio>
+#include <iostream>
+#include <map>
+#include <queue>
+#include <set>
+#include <stdexcept>
+#include <unordered_map>
+#include <vector>
+
+#include <eigen3/Eigen/Dense>
+#include <opencv2/opencv.hpp>
+
+#ifdef GPU_MODE
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudaimgproc.hpp>
+#include <opencv2/cudaoptflow.hpp>
+#endif
+
+#include "camodocal/camera_models/CameraFactory.h"
+#include "camodocal/camera_models/CataCamera.h"
+#include "camodocal/camera_models/PinholeCamera.h"
+#include "../estimator/parameters.h"
+#include "../utility/tic_toc.h"
+#include "cake_slam/lidar_visual_types.h"
+
+using namespace std;
+using namespace camodocal;
+using namespace Eigen;
+
+#define ROS_INFO RCUTILS_LOG_INFO
+#define ROS_WARN RCUTILS_LOG_WARN
+#define ROS_DEBUG RCUTILS_LOG_DEBUG
+#define ROS_ERROR RCUTILS_LOG_ERROR
+
+/** @brief Compact a point vector in place according to a status mask. */
+void reduceVector(vector<cv::Point2f> &v, vector<uchar> status);
+
+/** @brief Compact an integer vector in place according to a status mask. */
+void reduceVector(vector<int> &v, vector<uchar> status);
+
+/**
+ * @brief VINS-style sparse optical-flow tracker with LiDAR seed injection.
+ *
+ * The tracker owns only image-domain operations: LK tracking, forward-backward
+ * checks, valid-domain masking, LiDAR-projected seed insertion, and LIO-prior
+ * reprojection gating. It does not run backend optimization.
+ */
+class FeatureTracker
+{
+public:
+    FeatureTracker();
+
+    /**
+     * @brief Track one image and output VINS feature observations.
+     * @param _cur_time Image timestamp [s], monotonic.
+     * @param _img Mono left/cam0 image.
+     * @param _img1 Optional right image for legacy stereo mode.
+     * @return feature id -> camera id -> [x,y,z,u,v,du,dv].
+     */
+    map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImage(
+        double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
+
+    /** @brief Set LiDAR-projected candidates [pixel, depth m] for this frame. */
+    void setLidarDepthCandidates(const vector<cake_slam::LidarVisualCandidate> &candidates);
+
+    /** @brief Set current LIO pose prior gate, replacing legacy F-matrix gating. */
+    void setLioPriorGate(const cake_slam::LioPosePrior &prior,
+                         const Eigen::Matrix3d &R_I_C,
+                         const Eigen::Vector3d &t_I_C);
+
+    /** @brief Take inverse-depth priors generated for newly inserted tracks. */
+    std::unordered_map<int, cake_slam::LidarDepthPrior> takeLidarDepthPriors();
+
+    /** @brief Build a VINS-style spatial mask; long tracks reserve space first. */
+    void setMask();
+
+    /** @brief Add image-only corner features into free mask regions. */
+    void addPoints();
+
+    /** @brief Load camodocal camera models and optional valid-domain mask. */
+    void readIntrinsicParameter(const vector<string> &calib_file);
+
+    /** @brief Render undistortion diagnostics. */
+    void showUndistortion(const string &name);
+
+    /** @brief Gate LiDAR-seeded tracks by LIO-prior reprojection error [pixel]. */
+    void rejectWithLioPrior(vector<uchar> &status);
+
+    /** @brief Convert current pixel tracks to normalized camera coordinates. */
+    void undistortedPoints();
+
+    /** @brief Undistort arbitrary pixel points with the selected camera model. */
+    vector<cv::Point2f> undistortedPts(vector<cv::Point2f> &pts, camodocal::CameraPtr cam);
+
+    /** @brief Estimate per-feature pixel velocity [pixel/s]. */
+    vector<cv::Point2f> ptsVelocity(vector<int> &ids, vector<cv::Point2f> &pts,
+                                    map<int, cv::Point2f> &cur_id_pts,
+                                    map<int, cv::Point2f> &prev_id_pts);
+
+    void showTwoImage(const cv::Mat &img1, const cv::Mat &img2,
+                      vector<cv::Point2f> pts1, vector<cv::Point2f> pts2);
+    void drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
+                   vector<int> &curLeftIds,
+                   vector<cv::Point2f> &curLeftPts,
+                   vector<cv::Point2f> &curRightPts,
+                   map<int, cv::Point2f> &prevLeftPtsMap);
+    void setPrediction(map<int, Eigen::Vector3d> &predictPts);
+    double distance(cv::Point2f &pt1, cv::Point2f &pt2);
+    void removeOutliers(set<int> &removePtsIds);
+    cv::Mat getTrackImage();
+
+    /** @brief Check image border and valid-domain mask membership. */
+    bool inBorder(const cv::Point2f &pt);
+
+    /** @brief Return the valid-domain mask used by setMask(), CV_8UC1. */
+    const cv::Mat &validMask() const;
+
+    /** @brief Insert LiDAR-projected candidates as new tracks. */
+    int addLidarCandidatePoints(int max_num);
+
+    /** @brief Remove LiDAR prior metadata for tracks that disappeared. */
+    void pruneLidarTracks();
+
+    int row = 0;
+    int col = 0;
+    cv::Mat imTrack;
+    cv::Mat mask;
+    cv::Mat fisheye_mask;
+    cv::Mat prev_img, cur_img;
+    vector<cv::Point2f> n_pts;
+    vector<cv::Point2f> predict_pts;
+    vector<cv::Point2f> predict_pts_debug;
+    vector<cv::Point2f> prev_pts, cur_pts, cur_right_pts;
+    vector<cv::Point2f> prev_un_pts, cur_un_pts, cur_un_right_pts;
+    vector<cv::Point2f> pts_velocity, right_pts_velocity;
+    vector<int> ids, ids_right;
+    vector<int> track_cnt;
+    map<int, cv::Point2f> cur_un_pts_map, prev_un_pts_map;
+    map<int, cv::Point2f> cur_un_right_pts_map, prev_un_right_pts_map;
+    map<int, cv::Point2f> prevLeftPtsMap;
+    vector<camodocal::CameraPtr> m_camera;
+    double cur_time = 0.0;
+    double prev_time = 0.0;
+    bool stereo_cam = false;
+    int n_id = 0;
+    bool hasPrediction = false;
+
+    vector<cake_slam::LidarVisualCandidate> pending_lidar_candidates;
+    std::unordered_map<int, cake_slam::LidarDepthPrior> active_lidar_priors;
+    std::unordered_map<int, cake_slam::LidarDepthPrior> current_lidar_priors;
+    cake_slam::LioPosePrior lio_prior_gate;
+    Eigen::Matrix3d gate_R_I_C = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d gate_t_I_C = Eigen::Vector3d::Zero();
+};

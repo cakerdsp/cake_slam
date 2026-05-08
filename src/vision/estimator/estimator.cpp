@@ -9,6 +9,8 @@
 
 #include "estimator.h"
 #include "cake_slam/vision/utility/visualization.h"
+#include "cake_slam/vision/factor/inverse_depth_prior_factor.h"
+#include "cake_slam/vision/factor/lio_pose_prior_factor.h"
 
 // 视觉-惯导估计器构造函数。
 // 这里只初始化容器和默认状态，不进行参数读取。
@@ -26,8 +28,9 @@ Estimator::Estimator()
 // 析构时释放预积分和边缘化先验等动态内存。
 Estimator::~Estimator()
 {
-    if (MULTIPLE_THREAD)
+    if (processThread.joinable())
     {
+        MULTIPLE_THREAD = 0;
         processThread.join();
         printf("join thread \n");
     }
@@ -99,6 +102,8 @@ void Estimator::clearState()
     last_marginalization_parameter_blocks.clear();
 
     f_manager.clearState();
+    for (auto &prior : lio_pose_priors_)
+        prior = cake_slam::LioPosePrior();
 
     failure_occur = 0;
 
@@ -117,8 +122,9 @@ void Estimator::setParameter()
     }
     f_manager.setRic(ric);
     ProjectionTwoFrameOneCamFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
-    ProjectionTwoFrameTwoCamFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
-    ProjectionOneFrameTwoCamFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
+    // Cake-SLAM currently exposes the mono ROS2 visual chain. The historical
+    // VINS stereo residual classes are not built until the stereo frontend is
+    // ported as a first-class module.
     td = TD;
     g = G;
     cout << "set g " << g.transpose() << endl;
@@ -149,58 +155,26 @@ Eigen::Matrix3d Estimator::getCameraToImuRotation(int camera_id) const
 
 Eigen::Vector3d Estimator::getCameraToImuTranslation(int camera_id) const
 {
-    // TODO: 如果后续启用在线外参估计，需要把优化后的 ric/tic 同步给主状态和点云着色模块。
+    // Fixed-extrinsic path: SlamNode colors LiDAR points with the YAML T_C_L.
+    // If online extrinsic refinement is enabled later, the refined ric/tic
+    // should also be exported to the main node before coloring.
     if (camera_id < 0 || camera_id >= NUM_OF_CAM)
         return Eigen::Vector3d::Zero();
     return tic[camera_id];
 }
 
-// 运行时切换是否使用 IMU、是否使用双目。
-void Estimator::changeSensorType(int use_imu, int use_stereo)
-{
-    bool restart = false;
-    mProcess.lock();
-    if(!use_imu && !use_stereo)
-        printf("at least use two sensors! \n");
-    else
-    {
-        if(USE_IMU != use_imu)
-        {
-            USE_IMU = use_imu;
-            if(USE_IMU)
-            {
-                // reuse imu; restart system
-                restart = true;
-            }
-            else
-            {
-                if (last_marginalization_info != nullptr)
-                    delete last_marginalization_info;
-
-                tmp_pre_integration = nullptr;
-                last_marginalization_info = nullptr;
-                last_marginalization_parameter_blocks.clear();
-            }
-        }
-
-        STEREO = use_stereo;
-        printf("use imu %d use stereo %d\n", USE_IMU, STEREO);
-    }
-    mProcess.unlock();
-    if(restart)
-    {
-        clearState();
-        setParameter();
-    }
-}
-
 // 输入原始图像，并由前端先做跟踪，再把结果送入后端缓存。
-void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
+void Estimator::inputImage(double t, const cv::Mat &_img,
+                           const std::vector<cake_slam::LidarVisualCandidate> &lidar_candidates,
+                           const cake_slam::LioPosePrior &lio_pose_prior,
+                           const cv::Mat &_img1)
 {
     inputImageCnt++;
     map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
     TicToc featureTrackerTime;
 
+    featureTracker.setLidarDepthCandidates(lidar_candidates);
+    featureTracker.setLioPriorGate(lio_pose_prior, ric[0], tic[0]);
     if(_img1.empty())
         featureFrame = featureTracker.trackImage(t, _img);
     else
@@ -215,34 +189,30 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
 
     if(MULTIPLE_THREAD)
     {
-        if(inputImageCnt % 2 == 0)
-        {
-            mBuf.lock();
-            featureBuf.push(make_pair(t, featureFrame));
-            mBuf.unlock();
-        }
+        VisionFeaturePacket packet;
+        packet.timestamp = t;
+        packet.features = featureFrame;
+        packet.lidar_depth_priors = featureTracker.takeLidarDepthPriors();
+        packet.lio_pose_prior = lio_pose_prior;
+        mBuf.lock();
+        featureBuf.push(packet);
+        mBuf.unlock();
     }
     else
     {
+        VisionFeaturePacket packet;
+        packet.timestamp = t;
+        packet.features = featureFrame;
+        packet.lidar_depth_priors = featureTracker.takeLidarDepthPriors();
+        packet.lio_pose_prior = lio_pose_prior;
         mBuf.lock();
-        featureBuf.push(make_pair(t, featureFrame));
+        featureBuf.push(packet);
         mBuf.unlock();
         TicToc processTime;
         processMeasurements();
         printf("process time: %f\n", processTime.toc());
     }
-
 }
-
-// // 输入一条 IMU 测量到缓存队列。
-// void Estimator::inputIMU(double t, const Vector3d &linearAcceleration, const Vector3d &angularVelocity)
-// {
-//     ImuSample sample;
-//     sample.stamp = t;
-//     sample.acc = linearAcceleration;
-//     sample.gyr = angularVelocity;
-//     inputImuSample(sample);
-// }
 
 // inputIMU 的统一数据结构版本。
 void Estimator::inputImuSample(const ImuSample &sample)
@@ -260,20 +230,6 @@ void Estimator::inputImuSample(const ImuSample &sample)
         mPropagate.unlock();
     }
 }
-
-// 输入一帧已经整理好的特征观测。
-void Estimator::inputFeature(double t, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &featureFrame)
-{
-    ROS_ERROR("deprecated at VINS-Fusion");
-    assert(0);
-    mBuf.lock();
-    featureBuf.push(make_pair(t, featureFrame));
-    mBuf.unlock();
-
-    if(!MULTIPLE_THREAD)
-        processMeasurements();
-}
-
 
 // 从 imuBuf 中取出覆盖 [t0, t1] 的 IMU 子序列。
 bool Estimator::getIMUInterval(double t0, double t1, std::vector<ImuSample> &imuVector)
@@ -323,17 +279,17 @@ void Estimator::processMeasurements()
     {
         // cout << "[processMeasurements]  loop - start" << endl;
 
-        pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1> > > > > feature;
+        VisionFeaturePacket feature;
         std::vector<ImuSample> imuVector;
         if(!featureBuf.empty())
         {
             // cout << "1" << endl;
             feature = featureBuf.front();
-            curTime = feature.first + td;
+            curTime = feature.timestamp + td;
             // std::cout << "t0: " << std::fixed << curTime << std::endl;
             while(1)
             {
-                if ((!USE_IMU  || IMUAvailable(feature.first + td)))
+                if ((!USE_IMU  || IMUAvailable(feature.timestamp + td)))
                     break;
                 else
                 {
@@ -376,7 +332,7 @@ void Estimator::processMeasurements()
             // cout << "4" << endl;
 
             mProcess.lock();
-            processImage(feature.second, feature.first);
+            processImage(feature);
             prevTime = curTime;
 
             // cout << "5" << endl;
@@ -386,8 +342,8 @@ void Estimator::processMeasurements()
             std_msgs::msg::Header header;
             header.frame_id = WORLD_FRAME_ID;
 
-            int sec_ts = (int)feature.first;
-            uint nsec_ts = (uint)((feature.first - sec_ts) * 1e9);
+            int sec_ts = (int)feature.timestamp;
+            uint nsec_ts = (uint)((feature.timestamp - sec_ts) * 1e9);
             header.stamp.sec = sec_ts;
             header.stamp.nanosec = nsec_ts;
 
@@ -407,8 +363,6 @@ void Estimator::processMeasurements()
 
 
             // cout << "6" << endl;
-
-            // assert(0);
         }
         // cout << "[processMeasurements]  loop - end" << endl;
 
@@ -494,9 +448,12 @@ void Estimator::processIMU(double t, double dt, const Vector3d &linear_accelerat
 
 // 处理一帧图像观测。
 // 根据当前阶段不同，它可能触发视觉初始化，也可能直接进入滑窗优化。
-void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const double header)
+void Estimator::processImage(const VisionFeaturePacket &packet)
 {
+    const auto &image = packet.features;
+    const double header = packet.timestamp;
 
+    f_manager.setPendingLidarDepthPriors(packet.lidar_depth_priors);
 
     cout << std::fixed << header << endl;
 
@@ -517,6 +474,14 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
     ROS_DEBUG("Solving %d", frame_count);
     ROS_DEBUG("number of feature: %d", f_manager.getFeatureCount());
     Headers[frame_count] = header;
+    lio_pose_priors_[frame_count] = packet.lio_pose_prior;
+    if (lio_pose_priors_[frame_count].valid && lio_pose_priors_[frame_count].timestamp <= 0.0)
+        lio_pose_priors_[frame_count].timestamp = header;
+    if (lio_pose_priors_[frame_count].valid)
+    {
+        states_[frame_count].rot_end = lio_pose_priors_[frame_count].R_WB;
+        states_[frame_count].pos_end = lio_pose_priors_[frame_count].p_WB;
+    }
 
     ImageFrame imageframe(image, header);
     imageframe.pre_integration = tmp_pre_integration;
@@ -544,6 +509,17 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
 
     if (solver_flag == INITIAL)
     {
+        if (frame_count == WINDOW_SIZE && lio_pose_priors_[frame_count].valid)
+        {
+            f_manager.triangulate(frame_count, states_, tic, ric);
+            optimization();
+            updateLatestStates();
+            solver_flag = NON_LINEAR;
+            slideWindow();
+            ROS_INFO("LIO-prior initialization finish!");
+            return;
+        }
+
         // monocular + IMU initilization
         if (!STEREO && USE_IMU)
         {
@@ -985,7 +961,7 @@ void Estimator::double2vector()
                                                           para_Pose[0][4],
                                                           para_Pose[0][5]).toRotationMatrix());
         double y_diff = origin_R0.x() - origin_R00.x();
-        //TODO
+        // Keep the original VINS yaw-gauge handling after optimization.
         Matrix3d rot_diff = Utility::ypr2R(Vector3d(y_diff, 0, 0));
         if (abs(abs(origin_R0.y()) - 90) < 1.0 || abs(abs(origin_R00.y()) - 90) < 1.0)
         {
@@ -1164,16 +1140,35 @@ void Estimator::optimization()
             problem.AddResidualBlock(imu_factor, NULL, para_Pose[i], para_SpeedBias[i], para_Pose[j], para_SpeedBias[j]);
         }
     }
+    for (int i = 0; i < frame_count + 1; i++)
+    {
+        if (lio_pose_priors_[i].valid)
+        {
+            problem.AddResidualBlock(cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[i]), NULL, para_Pose[i]);
+        }
+    }
 
     int f_m_cnt = 0;
     int feature_index = -1;
     for (auto &it_per_id : f_manager.feature)
     {
         it_per_id.used_num = it_per_id.feature_per_frame.size();
-        if (it_per_id.used_num < 4)
+        if (!it_per_id.isUsableForOptimization())
             continue;
 
         ++feature_index;
+        problem.AddParameterBlock(para_Feature[feature_index], SIZE_FEATURE);
+        if (it_per_id.has_lidar_depth_prior && !LIDAR_INV_DEPTH_OPTIMIZE)
+        {
+            problem.SetParameterBlockConstant(para_Feature[feature_index]);
+        }
+        if (it_per_id.has_lidar_depth_prior && it_per_id.lidar_depth_prior.valid)
+        {
+            auto *prior_factor = new cake_slam::InverseDepthPriorFactor(
+                it_per_id.lidar_depth_prior.inv_depth,
+                it_per_id.lidar_depth_prior.inv_depth_var);
+            problem.AddResidualBlock(prior_factor, NULL, para_Feature[feature_index]);
+        }
 
         int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
 
@@ -1190,23 +1185,9 @@ void Estimator::optimization()
                 problem.AddResidualBlock(f_td, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index], para_Td[0]);
             }
 
-            if(STEREO && it_per_frame.is_stereo)
-            {
-                Vector3d pts_j_right = it_per_frame.pointRight;
-                if(imu_i != imu_j)
-                {
-                    ProjectionTwoFrameTwoCamFactor *f = new ProjectionTwoFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
-                                                                 it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
-                    problem.AddResidualBlock(f, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Ex_Pose[1], para_Feature[feature_index], para_Td[0]);
-                }
-                else
-                {
-                    ProjectionOneFrameTwoCamFactor *f = new ProjectionOneFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
-                                                                 it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
-                    problem.AddResidualBlock(f, loss_function, para_Ex_Pose[0], para_Ex_Pose[1], para_Feature[feature_index], para_Td[0]);
-                }
-
-            }
+            // Stereo residuals are intentionally omitted in this ROS2 mono
+            // implementation; STEREO must remain false unless the missing
+            // two-camera factors are ported and registered in CMake.
             f_m_cnt++;
         }
     }
@@ -1282,13 +1263,21 @@ void Estimator::optimization()
                 marginalization_info->addResidualBlockInfo(residual_block_info);
             }
         }
+        if (lio_pose_priors_[0].valid)
+        {
+            ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
+                cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[0]), NULL,
+                vector<double *>{para_Pose[0]},
+                vector<int>{0});
+            marginalization_info->addResidualBlockInfo(residual_block_info);
+        }
 
         {
             int feature_index = -1;
             for (auto &it_per_id : f_manager.feature)
             {
                 it_per_id.used_num = it_per_id.feature_per_frame.size();
-                if (it_per_id.used_num < 4)
+                if (!it_per_id.isUsableForOptimization())
                     continue;
 
                 ++feature_index;
@@ -1298,6 +1287,17 @@ void Estimator::optimization()
                     continue;
 
                 Vector3d pts_i = it_per_id.feature_per_frame[0].point;
+                if (it_per_id.has_lidar_depth_prior && it_per_id.lidar_depth_prior.valid)
+                {
+                    auto *prior_factor = new cake_slam::InverseDepthPriorFactor(
+                        it_per_id.lidar_depth_prior.inv_depth,
+                        it_per_id.lidar_depth_prior.inv_depth_var);
+                    ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
+                        prior_factor, NULL,
+                        vector<double *>{para_Feature[feature_index]},
+                        vector<int>{0});
+                    marginalization_info->addResidualBlockInfo(residual_block_info);
+                }
 
                 for (auto &it_per_frame : it_per_id.feature_per_frame)
                 {
@@ -1312,28 +1312,9 @@ void Estimator::optimization()
                                                                                         vector<int>{0, 3});
                         marginalization_info->addResidualBlockInfo(residual_block_info);
                     }
-                    if(STEREO && it_per_frame.is_stereo)
-                    {
-                        Vector3d pts_j_right = it_per_frame.pointRight;
-                        if(imu_i != imu_j)
-                        {
-                            ProjectionTwoFrameTwoCamFactor *f = new ProjectionTwoFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
-                                                                          it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
-                            ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f, loss_function,
-                                                                                           vector<double *>{para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Ex_Pose[1], para_Feature[feature_index], para_Td[0]},
-                                                                                           vector<int>{0, 4});
-                            marginalization_info->addResidualBlockInfo(residual_block_info);
-                        }
-                        else
-                        {
-                            ProjectionOneFrameTwoCamFactor *f = new ProjectionOneFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
-                                                                          it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
-                            ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f, loss_function,
-                                                                                           vector<double *>{para_Ex_Pose[0], para_Ex_Pose[1], para_Feature[feature_index], para_Td[0]},
-                                                                                           vector<int>{2});
-                            marginalization_info->addResidualBlockInfo(residual_block_info);
-                        }
-                    }
+                    // Stereo marginalization follows the same policy as the
+                    // active solve path: disabled until the two-camera factor
+                    // port exists in this ROS2 codebase.
                 }
             }
         }
@@ -1392,6 +1373,14 @@ void Estimator::optimization()
                                                                                last_marginalization_parameter_blocks,
                                                                                drop_set);
 
+                marginalization_info->addResidualBlockInfo(residual_block_info);
+            }
+            if (lio_pose_priors_[WINDOW_SIZE - 1].valid)
+            {
+                ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
+                    cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[WINDOW_SIZE - 1]), NULL,
+                    vector<double *>{para_Pose[WINDOW_SIZE - 1]},
+                    vector<int>{0});
                 marginalization_info->addResidualBlockInfo(residual_block_info);
             }
 
@@ -1458,6 +1447,7 @@ void Estimator::slideWindow()
             for (int i = 0; i < WINDOW_SIZE; i++)
             {
                 Headers[i] = Headers[i + 1];
+                lio_pose_priors_[i] = lio_pose_priors_[i + 1];
                 states_[i].rot_end.swap(states_[i + 1].rot_end);
                 states_[i].pos_end.swap(states_[i + 1].pos_end);
                 if(USE_IMU)
@@ -1474,6 +1464,7 @@ void Estimator::slideWindow()
                 }
             }
             Headers[WINDOW_SIZE] = Headers[WINDOW_SIZE - 1];
+            lio_pose_priors_[WINDOW_SIZE] = lio_pose_priors_[WINDOW_SIZE - 1];
             states_[WINDOW_SIZE].pos_end = states_[WINDOW_SIZE - 1].pos_end;
             states_[WINDOW_SIZE].rot_end = states_[WINDOW_SIZE - 1].rot_end;
 
@@ -1508,6 +1499,7 @@ void Estimator::slideWindow()
         if (frame_count == WINDOW_SIZE)
         {
             Headers[frame_count - 1] = Headers[frame_count];
+            lio_pose_priors_[frame_count - 1] = lio_pose_priors_[frame_count];
             states_[frame_count - 1].pos_end = states_[frame_count].pos_end;
             states_[frame_count - 1].rot_end = states_[frame_count].rot_end;
 
@@ -1592,6 +1584,11 @@ const StatesGroup &Estimator::getLatestState() const
     return states_[frame_count];
 }
 
+const cv::Mat &Estimator::getUndistortedValidMask() const
+{
+    return featureTracker.validMask();
+}
+
 // 基于当前滑窗中的运动趋势，为前端预测下一帧特征位置。
 void Estimator::predictPtsInNextFrame()
 {
@@ -1651,7 +1648,7 @@ void Estimator::outliersRejection(set<int> &removeIndex)
         double err = 0;
         int errCnt = 0;
         it_per_id.used_num = it_per_id.feature_per_frame.size();
-        if (it_per_id.used_num < 4)
+        if (!it_per_id.isUsableForOptimization())
             continue;
         feature_index ++;
         int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;

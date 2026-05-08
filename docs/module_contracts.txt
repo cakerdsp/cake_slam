@@ -26,20 +26,24 @@
 - 路标表示: 逆深度或欧式坐标
 - 初始化来源: 雷达深度或三角化
 - 深度有效性: 距离上下限、置信度或状态标记
+- 当前实现: LiDARVisualSelector 输出 LiDAR 初始化候选；FeatureTracker 分配 feature id；
+  FeatureManager 以宿主帧逆深度保存 LiDAR prior；默认优化 lambda，固定深度模式保留为配置开关。
 
 6) 优化契约（视觉后端）
 - 滑窗大小、边缘化规则
 - 残差类型: 重投影、IMU 预积分、先验
 - 权重: 噪声参数集中管理，并与 IMU/LiDAR 一致
+- 当前实现新增残差: LIO pose prior、LiDAR inverse-depth prior、LiDAR 初始化点的普通 VINS 重投影残差。
 
 7) 数据流与所有权
-- 缓存归属: 前端跟踪器或融合核心
+- 缓存归属: ROS callback 只写 raw buffer；sync_process 线程负责解码、预处理、同步和 LIO/VIO 优化
 - 关键帧与关键点输出责任
-- 线程模型: 单线程或多线程（含锁）
+- 线程模型: SlamNode 独立 sync_process 线程 + Estimator 可选内部后端线程；callback 禁止执行优化阻塞
 
 8) 参数与配置
 - 统一参数文件命名与映射
 - 话题名与 frame id 在单一配置中固定
+- 当前示例配置: config/cake_slam.yaml + config/d435i_cam0.yaml；launch/cake_slam.launch.py 只传 config_file。
 
 
 模块对照表（按项目）

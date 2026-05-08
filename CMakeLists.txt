@@ -21,7 +21,7 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(message_filters REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common io)
+find_package(PCL REQUIRED COMPONENTS common io filters)
 find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -44,7 +44,11 @@ include_directories(
   include/cake_slam/vision/utility
   ${PCL_INCLUDE_DIRS}
   ${CERES_INCLUDE_DIRS}
+  ${EIGEN3_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
 )
+
+add_definitions(${PCL_DEFINITIONS})
 
 file(GLOB_RECURSE VISION_SOURCES
   src/vision/estimator/*.cpp
@@ -57,6 +61,7 @@ file(GLOB_RECURSE VISION_SOURCES
 set(cake_slam_SOURCES
   src/config.cpp
   src/imu_processor.cpp
+  src/lidar_visual_selector.cpp
   src/lidar_preprocess.cpp
   src/lio_core.cpp
   src/utils.cpp
@@ -87,9 +92,13 @@ ament_target_dependencies(cake_slam_core
   Sophus
   livox_ros_driver2
 )
-target_link_libraries(cake_slam_core ${PCL_LIBRARIES} ${CERES_LIBRARIES})
+target_link_libraries(cake_slam_core ${PCL_LIBRARIES} ${CERES_LIBRARIES} ${OpenCV_LIBS})
 
-add_executable(cake_slam_node src/slam.cpp)
+if(TARGET Sophus::Sophus)
+  target_link_libraries(cake_slam_core Sophus::Sophus)
+endif()
+
+add_executable(cake_slam_node src/slam_node.cpp)
 ament_target_dependencies(cake_slam_node
   rclcpp
   sensor_msgs

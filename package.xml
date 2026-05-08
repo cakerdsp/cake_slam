@@ -25,7 +25,7 @@
   <depend>cv_bridge</depend>
   <depend>image_transport</depend>
   <depend>camera_models</depend>
-  <depend>ceres</depend>
+  <depend>ceres-solver</depend>
   <depend>sophus</depend>
   <depend>livox_ros_driver2</depend>
 

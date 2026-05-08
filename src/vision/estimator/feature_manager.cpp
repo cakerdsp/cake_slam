@@ -16,6 +16,16 @@ int FeaturePerId::endFrame()
     return start_frame + feature_per_frame.size() - 1;
 }
 
+int FeaturePerId::minObservationCountForOptimization() const
+{
+    return has_lidar_depth_prior ? 2 : 4;
+}
+
+bool FeaturePerId::isUsableForOptimization() const
+{
+    return used_num >= minObservationCountForOptimization();
+}
+
 // 构造时只初始化相机外参缓存；滑窗状态通过函数参数显式传入。
 FeatureManager::FeatureManager()
 {
@@ -36,6 +46,14 @@ void FeatureManager::setRic(Matrix3d _ric[])
 void FeatureManager::clearState()
 {
     feature.clear();
+    pending_lidar_depth_priors_.clear();
+}
+
+void FeatureManager::setPendingLidarDepthPriors(const std::unordered_map<int, cake_slam::LidarDepthPrior> &priors)
+{
+    // The tracker assigns ids before the backend sees the frame. This map binds
+    // those ids to LiDAR inverse-depth priors exactly once during feature insert.
+    pending_lidar_depth_priors_ = priors;
 }
 
 // 统计“可用于优化”的特征数。
@@ -46,7 +64,7 @@ int FeatureManager::getFeatureCount()
     for (auto &it : feature)
     {
         it.used_num = it.feature_per_frame.size();
-        if (it.used_num >= 4)
+        if (it.isUsableForOptimization())
         {
             cnt++;
         }
@@ -89,6 +107,14 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
         if (it == feature.end())
         {
             feature.push_back(FeaturePerId(feature_id, frame_count));
+            auto prior_it = pending_lidar_depth_priors_.find(feature_id);
+            if (prior_it != pending_lidar_depth_priors_.end() && prior_it->second.valid)
+            {
+                feature.back().has_lidar_depth_prior = true;
+                feature.back().lidar_depth_prior = prior_it->second;
+                feature.back().estimated_depth = prior_it->second.depth;
+                feature.back().solve_flag = 1;
+            }
             feature.back().feature_per_frame.push_back(f_per_fra);
             new_feature_num++;
         }
@@ -100,6 +126,7 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
                 long_track_num++;
         }
     }
+    pending_lidar_depth_priors_.clear();
 
     //if (frame_count < 2 || last_track_num < 20)
     //if (frame_count < 2 || last_track_num < 20 || new_feature_num > 0.5 * last_track_num)
@@ -161,7 +188,7 @@ void FeatureManager::setDepth(const VectorXd &x)
     for (auto &it_per_id : feature)
     {
         it_per_id.used_num = it_per_id.feature_per_frame.size();
-        if (it_per_id.used_num < 4)
+        if (!it_per_id.isUsableForOptimization())
             continue;
 
         it_per_id.estimated_depth = 1.0 / x(++feature_index);
@@ -202,7 +229,7 @@ VectorXd FeatureManager::getDepthVector()
     for (auto &it_per_id : feature)
     {
         it_per_id.used_num = it_per_id.feature_per_frame.size();
-        if (it_per_id.used_num < 4)
+        if (!it_per_id.isUsableForOptimization())
             continue;
 #if 1
         dep_vec(++feature_index) = 1. / it_per_id.estimated_depth;
@@ -326,6 +353,9 @@ void FeatureManager::triangulate(int frameCnt, StatesGroup states_[], Vector3d t
 {
     for (auto &it_per_id : feature)
     {
+        if (it_per_id.has_lidar_depth_prior && it_per_id.estimated_depth > 0)
+            continue;
+
         if (it_per_id.estimated_depth > 0)
             continue;
 
@@ -404,7 +434,7 @@ void FeatureManager::triangulate(int frameCnt, StatesGroup states_[], Vector3d t
             continue;
         }
         it_per_id.used_num = it_per_id.feature_per_frame.size();
-        if (it_per_id.used_num < 4)
+        if (!it_per_id.isUsableForOptimization())
             continue;
 
         int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
@@ -500,6 +530,8 @@ void FeatureManager::removeBackShiftDepth(Eigen::Matrix3d marg_R, Eigen::Vector3
                     it->estimated_depth = dep_j;
                 else
                     it->estimated_depth = INIT_DEPTH;
+                it->has_lidar_depth_prior = false;
+                it->lidar_depth_prior.valid = false;
             }
         }
         // remove tracking-lost feature after marginalize
@@ -525,6 +557,8 @@ void FeatureManager::removeBack()
         else
         {
             it->feature_per_frame.erase(it->feature_per_frame.begin());
+            it->has_lidar_depth_prior = false;
+            it->lidar_depth_prior.valid = false;
             if (it->feature_per_frame.size() == 0)
                 feature.erase(it);
         }

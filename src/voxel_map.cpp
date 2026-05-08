@@ -13,6 +13,10 @@ which is included as part of this source code package.
 #include "cake_slam/voxel_map.h"
 using namespace Eigen;
 
+namespace {
+int voxel_plane_id = 0;
+} // namespace
+
 // 根据量测距离误差和角度误差，把激光点的原始测量不确定性传播成 3x3 空间协方差。
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov)
 {
@@ -33,56 +37,6 @@ void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_
   N << base_vector1(0), base_vector2(0), base_vector1(1), base_vector2(1), base_vector1(2), base_vector2(2);
   Eigen::Matrix<double, 3, 2> A = range * direction_hat * N;
   cov = direction * range_var * direction.transpose() + A * direction_var * A.transpose();
-}
-
-void loadVoxelConfig(rclcpp::Node::SharedPtr &node, VoxelMapConfig &voxel_config)
-{
-  // 兼容 ROS2 参数系统的写法：
-  // 若参数未声明则先声明，再统一读取回 voxel_config。
-  auto try_declare = [node]<typename ParameterT>(const std::string & name,
-    const ParameterT & default_value)
-  {
-    if (!node->has_parameter(name))
-    {
-      return node->declare_parameter<ParameterT>(name, default_value);
-    }
-    else
-    {
-      return node->get_parameter(name).get_value<ParameterT>();
-    }
-  };
-
-  // declare parameter
-  try_declare.template operator()<bool>("publish.pub_plane_en", false);
-  try_declare.template operator()<int>("lio.max_layer", 1);
-  try_declare.template operator()<double>("lio.voxel_size", 0.5);
-  try_declare.template operator()<double>("lio.min_eigen_value", 0.01);
-  try_declare.template operator()<double>("lio.sigma_num", 3);
-  try_declare.template operator()<double>("lio.beam_err", 0.02);
-  try_declare.template operator()<double>("lio.dept_err", 0.05);
-
-  // Declaration of parameter of type std::vector<int> won't build, https://github.com/ros2/rclcpp/issues/1585  
-  try_declare.template operator()<vector<int64_t>>("lio.layer_init_num", std::vector<int64_t>{5,5,5,5,5}); 
-  try_declare.template operator()<int>("lio.max_points_num", 50);
-  try_declare.template operator()<int>("lio.min_iterations", 5);
-  try_declare.template operator()<bool>("local_map.map_sliding_en", false);
-  try_declare.template operator()<int>("local_map.half_map_size", 100);
-  try_declare.template operator()<double>("local_map.sliding_thresh", 8.0);
-
-  // get parameter
-  node->get_parameter("publish.pub_plane_en", voxel_config.is_pub_plane_map_);
-  node->get_parameter("lio.max_layer", voxel_config.max_layer_);
-  node->get_parameter("lio.voxel_size", voxel_config.max_voxel_size_);
-  node->get_parameter("lio.min_eigen_value", voxel_config.planner_threshold_);
-  node->get_parameter("lio.sigma_num", voxel_config.sigma_num_);
-  node->get_parameter("lio.beam_err", voxel_config.beam_err_);
-  node->get_parameter("lio.dept_err", voxel_config.dept_err_);
-  node->get_parameter("lio.layer_init_num", voxel_config.layer_init_num_);
-  node->get_parameter("lio.max_points_num", voxel_config.max_points_num_);
-  node->get_parameter("lio.min_iterations", voxel_config.max_iterations_);
-  node->get_parameter("local_map.map_sliding_en", voxel_config.map_sliding_en);
-  node->get_parameter("local_map.half_map_size", voxel_config.half_map_size);
-  node->get_parameter("local_map.sliding_thresh", voxel_config.sliding_thresh);
 }
 
 void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane)

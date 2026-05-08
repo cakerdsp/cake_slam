@@ -46,9 +46,13 @@ std::string FISHEYE_MASK;
 std::vector<std::string> CAM_NAMES;
 int MAX_CNT;
 int MIN_DIST;
-double F_THRESHOLD;
 int SHOW_TRACK;
 int FLOW_BACK;
+int LIDAR_DEPTH_ENABLE;
+int LIDAR_INV_DEPTH_OPTIMIZE;
+double LIDAR_PRIOR_REPROJ_THRESHOLD;
+double MIN_INV_DEPTH_VAR;
+double MIN_LIO_POSE_PRIOR_VAR;
 
 std::string WORLD_FRAME_ID;
 std::string BODY_FRAME_ID;
@@ -234,15 +238,20 @@ void readParameters(std::string config_file)
     RIC.clear();
     TIC.clear();
     CAM_NAMES.clear();
+    FISHEYE_MASK.clear();
 
     // -------------------- 前端跟踪参数 --------------------
     readIfPresent(fsSettings, "vision.image_topic", IMAGE0_TOPIC);
     IMAGE1_TOPIC.clear();
     MAX_CNT = readOrDefault<int>(fsSettings, "vision.max_cnt", 150);
     MIN_DIST = readOrDefault<int>(fsSettings, "vision.min_dist", 30);
-    F_THRESHOLD = readOrDefault<double>(fsSettings, "vision.f_threshold", 1.0);
     SHOW_TRACK = readOrDefault<int>(fsSettings, "vision.show_track", 0);
     FLOW_BACK = readOrDefault<int>(fsSettings, "vision.flow_back", 0);
+    LIDAR_DEPTH_ENABLE = readOrDefault<int>(fsSettings, "vision.lidar_depth_enable", 1);
+    LIDAR_INV_DEPTH_OPTIMIZE = readOrDefault<int>(fsSettings, "vision.optimize_lidar_inv_depth", 1);
+    LIDAR_PRIOR_REPROJ_THRESHOLD = readOrDefault<double>(fsSettings, "vision.lio_prior_reproj_threshold", 3.0);
+    MIN_INV_DEPTH_VAR = readOrDefault<double>(fsSettings, "vision.min_inv_depth_var", 1e-6);
+    MIN_LIO_POSE_PRIOR_VAR = readOrDefault<double>(fsSettings, "vision.min_lio_pose_prior_var", 1e-6);
 
     MULTIPLE_THREAD = readOrDefault<int>(fsSettings, "vision.multiple_thread", 0);
 
@@ -321,7 +330,32 @@ void readParameters(std::string config_file)
 
     std::string cam0Calib;
     readIfPresent(fsSettings, "vision.cam0_calib", cam0Calib);
+    if (!cam0Calib.empty())
+    {
+        const bool absolute_path =
+            (cam0Calib.size() > 1 && cam0Calib[1] == ':') ||
+            (!cam0Calib.empty() && (cam0Calib[0] == '/' || cam0Calib[0] == '\\'));
+        if (!absolute_path)
+        {
+            const size_t slash = config_file.find_last_of("/\\");
+            if (slash != std::string::npos)
+                cam0Calib = config_file.substr(0, slash + 1) + cam0Calib;
+        }
+    }
     CAM_NAMES.push_back(cam0Calib);
+    readIfPresent(fsSettings, "vision.fisheye_mask", FISHEYE_MASK);
+    if (!FISHEYE_MASK.empty())
+    {
+        const bool absolute_path =
+            (FISHEYE_MASK.size() > 1 && FISHEYE_MASK[1] == ':') ||
+            (!FISHEYE_MASK.empty() && (FISHEYE_MASK[0] == '/' || FISHEYE_MASK[0] == '\\'));
+        if (!absolute_path)
+        {
+            const size_t slash = config_file.find_last_of("/\\");
+            if (slash != std::string::npos)
+                FISHEYE_MASK = config_file.substr(0, slash + 1) + FISHEYE_MASK;
+        }
+    }
 
     INIT_DEPTH = 5.0;
     BIAS_ACC_THRESHOLD = 0.1;

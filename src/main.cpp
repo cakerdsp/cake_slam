@@ -2,10 +2,9 @@
 
 int main(int argc, char **argv)
 {
-  // 目前这里只保留 ROS2 进程生命周期骨架。
-  // 真实的订阅、同步、LIO/VIO 节点装配还没有在这里接入。
+  // The installed node entrypoint is src/slam_node.cpp. This file is kept only as a
+  // minimal standalone lifecycle stub and is not listed in CMakeLists.txt.
   rclcpp::init(argc, argv);
-  // TODO: Wire up cake_slam modules here.
   rclcpp::shutdown();
   return 0;
 }

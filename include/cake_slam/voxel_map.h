@@ -30,8 +30,6 @@ which is included as part of this source code package.
 #define VOXELMAP_HASH_P 116101
 #define VOXELMAP_MAX_N 10000000000
 
-static int voxel_plane_id = 0;
-
 // 体素地图相关配置。
 // 这些参数控制体素层级、平面初始化、残差构建以及局部地图滑动范围。
 typedef struct VoxelMapConfig
@@ -223,9 +221,6 @@ public:
   // 插入点并返回最终落入的节点。
   VoxelOctoTree *Insert(const pointWithVar &pv);
 };
-
-// 从 ROS 参数服务器加载体素地图配置。
-void loadVoxelConfig(rclcpp::Node::SharedPtr &node, VoxelMapConfig &voxel_config);
 
 class VoxelMapManager
 {

@@ -1,0 +1,111 @@
+%YAML:1.0
+common:
+  lidar_enable: 1
+  image_enable: 1
+  ros_driver_bug_fix: 0
+  imu_time_offset: 0.0
+  image_time_offset: 0.0
+  max_buffer_size: 200000
+  gravity_align_enable: 0
+  imu_propagation_enable: 1
+
+imu:
+  enable: 1
+  topic: "/livox/imu"
+  acc_n: 0.02
+  acc_w: 0.04
+  gyr_n: 0.01
+  gyr_w: 0.001
+  g_norm: 9.81
+  gyr_cov: 1.0
+  acc_cov: 1.0
+  imu_int_frame: 30
+  gravity_est: 1
+  bias_est: 1
+
+lidar:
+  topic: "/livox/lidar"
+  type: 1
+  scan_line: 6
+  scan_rate: 10
+  point_filter_num: 3
+  blind: 0.1
+  feature_extract: 0
+  filter_size_surf: 0.5
+
+map:
+  voxel_size: 0.5
+  max_layer: 1
+  min_eigen_value: 0.01
+  sigma_num: 3.0
+  beam_err: 0.02
+  dept_err: 0.05
+  layer_init_num: [5, 5, 5, 5, 5]
+  max_points_num: 50
+  min_iterations: 5
+  sliding_enable: 0
+  half_map_size: 100
+  sliding_thresh: 8.0
+
+vision:
+  image_topic: "/camera/color/image_raw"
+  cam0_calib: "d435i_cam0.yaml"
+  image_height: 480
+  image_width: 640
+  max_cnt: 250
+  min_dist: 30
+  fisheye_mask: ""
+  show_track: 0
+  flow_back: 1
+  multiple_thread: 0
+  max_solver_time: 0.04
+  max_num_iterations: 8
+  keyframe_parallax: 10.0
+  estimate_extrinsic: 0
+  lidar_depth_enable: 1
+  optimize_lidar_inv_depth: 1
+  max_lidar_features: 250
+  min_lidar_depth: 0.2
+  max_lidar_depth: 80.0
+  z_buffer_cell_size: 8
+  z_buffer_depth_tolerance: 0.3
+  shi_tomasi_min_score: 1.0e-6
+  lidar_mask_radius: 20.0
+  lio_prior_reproj_threshold: 3.0
+  lidar_depth_std: 0.10
+  min_inv_depth_var: 1.0e-6
+  min_lio_pose_prior_var: 1.0e-6
+
+extrinsic:
+  # P_imu = R_I_L * P_lidar + t_I_L
+  lidar_T: [0.0, 0.0, 0.0]
+  lidar_R: [1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0]
+  # P_cam = R_C_L * P_lidar + t_C_L
+  camera_T: [0.0, 0.0, 0.0]
+  camera_R: [1.0, 0.0, 0.0,
+             0.0, 1.0, 0.0,
+             0.0, 0.0, 1.0]
+  # P_imu = R_I_C * P_cam + t_I_C
+  body_T_cam0: !!opencv-matrix
+    rows: 4
+    cols: 4
+    dt: d
+    data: [1.0, 0.0, 0.0, 0.0,
+           0.0, 1.0, 0.0, 0.0,
+           0.0, 0.0, 1.0, 0.0,
+           0.0, 0.0, 0.0, 1.0]
+
+frame:
+  world: "world"
+  body: "body"
+  lidar: "lidar"
+  camera: "camera"
+
+output:
+  path: "."
+
+time_offset:
+  td: 0.0
+  estimate_td: 0

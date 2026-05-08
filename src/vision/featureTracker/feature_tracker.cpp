@@ -17,7 +17,11 @@ bool FeatureTracker::inBorder(const cv::Point2f &pt)
     const int BORDER_SIZE = 1;
     int img_x = cvRound(pt.x);
     int img_y = cvRound(pt.y);
-    return BORDER_SIZE <= img_x && img_x < col - BORDER_SIZE && BORDER_SIZE <= img_y && img_y < row - BORDER_SIZE;
+    if (!(BORDER_SIZE <= img_x && img_x < col - BORDER_SIZE &&
+          BORDER_SIZE <= img_y && img_y < row - BORDER_SIZE))
+        return false;
+    return fisheye_mask.empty() ||
+           (fisheye_mask.size() == cv::Size(col, row) && fisheye_mask.at<uchar>(img_y, img_x) != 0);
 }
 
 // 全局辅助函数：计算两像素点欧氏距离。
@@ -55,13 +59,39 @@ FeatureTracker::FeatureTracker()
     stereo_cam = 0;
     n_id = 0;
     hasPrediction = false;
+    gate_R_I_C.setIdentity();
+    gate_t_I_C.setZero();
+}
+
+void FeatureTracker::setLidarDepthCandidates(const vector<cake_slam::LidarVisualCandidate> &candidates)
+{
+    pending_lidar_candidates = candidates;
+}
+
+void FeatureTracker::setLioPriorGate(const cake_slam::LioPosePrior &prior,
+                                     const Eigen::Matrix3d &R_I_C,
+                                     const Eigen::Vector3d &t_I_C)
+{
+    lio_prior_gate = prior;
+    gate_R_I_C = R_I_C;
+    gate_t_I_C = t_I_C;
+}
+
+std::unordered_map<int, cake_slam::LidarDepthPrior> FeatureTracker::takeLidarDepthPriors()
+{
+    std::unordered_map<int, cake_slam::LidarDepthPrior> out;
+    out.swap(current_lidar_priors);
+    return out;
 }
 
 void FeatureTracker::setMask()
 {
     // 用“长轨迹优先”策略构造新的检测掩膜：
     // 连续跟踪时间更长的点优先保留，附近区域则不再重复检测新点。
-    mask = cv::Mat(row, col, CV_8UC1, cv::Scalar(255));
+    if (!fisheye_mask.empty() && fisheye_mask.size() == cv::Size(col, row))
+        mask = fisheye_mask.clone();
+    else
+        mask = cv::Mat(row, col, CV_8UC1, cv::Scalar(255));
 
     // prefer to keep features that are tracked for long time
     vector<pair<int, pair<cv::Point2f, int>>> cnt_pts_id;
@@ -114,7 +144,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
 {
     // 这是视觉前端的主流程：
     // 1. 用 LK 光流跟踪上一帧特征；
-    // 2. 做边界检查、反向校验和极线约束剔除；
+    // 2. 做边界检查、反向校验和 LIO 先验重投影门控；
     // 3. 补充新特征；
     // 4. 输出统一的“id -> 观测”结构。
     TicToc t_r;
@@ -123,6 +153,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
     row = cur_img.rows;
     col = cur_img.cols;
     cv::Mat rightImg = _img1;
+    current_lidar_priors.clear();
     /*
     {
         cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
@@ -178,6 +209,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
                         status[i] = 0;
                 }
             }
+            rejectWithLioPrior(status);
             // printf("temporal optical flow costs: %fms\n", t_o.toc());
         }
 #ifdef GPU_MODE
@@ -274,6 +306,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
         reduceVector(cur_pts, status);
         reduceVector(ids, status);
         reduceVector(track_cnt, status);
+        pruneLidarTracks();
         // ROS_DEBUG("temporal optical flow costs: %fms", t_o.toc());
         
         //printf("track cnt %d\n", (int)ids.size());
@@ -284,7 +317,6 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
 
     if (1)
     {
-        //rejectWithF();
         ROS_DEBUG("set mask begins");
         TicToc t_m;
         setMask();
@@ -293,6 +325,12 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
         ROS_DEBUG("detect feature begins");
         
         int n_max_cnt = MAX_CNT - static_cast<int>(cur_pts.size());
+        if (LIDAR_DEPTH_ENABLE && n_max_cnt > 0 && !pending_lidar_candidates.empty())
+        {
+            const int added_lidar = addLidarCandidatePoints(n_max_cnt);
+            n_max_cnt = MAX_CNT - static_cast<int>(cur_pts.size());
+            ROS_DEBUG("add LiDAR visual candidates: %d", added_lidar);
+        }
         if(!USE_GPU)
         {
             if (n_max_cnt > 0)
@@ -461,6 +499,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
     prev_un_pts_map = cur_un_pts_map;
     prev_time = cur_time;
     hasPrediction = false;
+    pending_lidar_candidates.clear();
 
     prevLeftPtsMap.clear();
     for(size_t i = 0; i < cur_pts.size(); i++)
@@ -514,52 +553,123 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
     return featureFrame;
 }
 
-// 利用基础矩阵一致性删除不满足双视图几何约束的匹配。
-void FeatureTracker::rejectWithF()
+void FeatureTracker::rejectWithLioPrior(vector<uchar> &status)
 {
-    if (cur_pts.size() >= 8)
+    // LiDAR-seeded tracks have a world anchor from the LIO update. Reproject
+    // that anchor through the current LIO pose prior and reject tracks whose
+    // LK result moved too far in pixels. This replaces the old F-matrix gate.
+    if (!lio_prior_gate.valid || active_lidar_priors.empty() || m_camera.empty() ||
+        LIDAR_PRIOR_REPROJ_THRESHOLD <= 0.0)
     {
-        ROS_DEBUG("FM ransac begins");
-        TicToc t_f;
-        vector<cv::Point2f> un_cur_pts(cur_pts.size()), un_prev_pts(prev_pts.size());
-        for (unsigned int i = 0; i < cur_pts.size(); i++)
-        {
-            Eigen::Vector3d tmp_p;
-            m_camera[0]->liftProjective(Eigen::Vector2d(cur_pts[i].x, cur_pts[i].y), tmp_p);
-            tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + col / 2.0;
-            tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + row / 2.0;
-            un_cur_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
+        return;
+    }
 
-            m_camera[0]->liftProjective(Eigen::Vector2d(prev_pts[i].x, prev_pts[i].y), tmp_p);
-            tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + col / 2.0;
-            tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + row / 2.0;
-            un_prev_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
+    const double threshold_sq = LIDAR_PRIOR_REPROJ_THRESHOLD * LIDAR_PRIOR_REPROJ_THRESHOLD;
+    for (size_t i = 0; i < ids.size() && i < cur_pts.size() && i < status.size(); ++i)
+    {
+        if (!status[i])
+            continue;
+
+        const auto it = active_lidar_priors.find(ids[i]);
+        if (it == active_lidar_priors.end() || !it->second.valid)
+            continue;
+
+        const Eigen::Vector3d p_body =
+            lio_prior_gate.R_WB.transpose() * (it->second.P_W_init - lio_prior_gate.p_WB);
+        const Eigen::Vector3d p_cam = gate_R_I_C.transpose() * (p_body - gate_t_I_C);
+        if (p_cam.z() <= 0.05)
+        {
+            status[i] = 0;
+            continue;
         }
 
-        vector<uchar> status;
-        cv::findFundamentalMat(un_cur_pts, un_prev_pts, cv::FM_RANSAC, F_THRESHOLD, 0.99, status);
-        int size_a = cur_pts.size();
-        reduceVector(prev_pts, status);
-        reduceVector(cur_pts, status);
-        reduceVector(cur_un_pts, status);
-        reduceVector(ids, status);
-        reduceVector(track_cnt, status);
-        ROS_DEBUG("FM ransac: %d -> %lu: %f", size_a, cur_pts.size(), 1.0 * cur_pts.size() / size_a);
-        ROS_DEBUG("FM ransac costs: %fms", t_f.toc());
+        Eigen::Vector2d uv;
+        m_camera[0]->spaceToPlane(p_cam, uv);
+        const double dx = static_cast<double>(cur_pts[i].x) - uv.x();
+        const double dy = static_cast<double>(cur_pts[i].y) - uv.y();
+        if (dx * dx + dy * dy > threshold_sq)
+            status[i] = 0;
+    }
+}
+
+int FeatureTracker::addLidarCandidatePoints(int max_num)
+{
+    // Insert LiDAR candidates as normal VINS feature ids while attaching their
+    // inverse-depth priors. The mask check preserves VINS spatial uniformity.
+    if (max_num <= 0 || mask.empty())
+        return 0;
+
+    int added = 0;
+    for (auto candidate : pending_lidar_candidates)
+    {
+        if (added >= max_num)
+            break;
+        if (!inBorder(candidate.pixel))
+            continue;
+
+        const int u = cvRound(candidate.pixel.x);
+        const int v = cvRound(candidate.pixel.y);
+        if (u < 0 || v < 0 || u >= mask.cols || v >= mask.rows || mask.at<uchar>(v, u) != 255)
+            continue;
+
+        const int id = n_id++;
+        cake_slam::LidarDepthPrior prior = cake_slam::MakeDepthPrior(candidate);
+
+        cur_pts.push_back(candidate.pixel);
+        ids.push_back(id);
+        track_cnt.push_back(1);
+        active_lidar_priors[id] = prior;
+        current_lidar_priors[id] = prior;
+
+        const int radius = std::max(1, static_cast<int>(std::round(candidate.mask_radius)));
+        cv::circle(mask, candidate.pixel, radius, 0, -1);
+        added++;
+    }
+    return added;
+}
+
+void FeatureTracker::pruneLidarTracks()
+{
+    // Keep prior metadata only for still-alive feature ids; otherwise old
+    // LiDAR anchors would be accidentally reused by a future id.
+    if (active_lidar_priors.empty())
+        return;
+
+    std::set<int> alive(ids.begin(), ids.end());
+    for (auto it = active_lidar_priors.begin(); it != active_lidar_priors.end();)
+    {
+        if (alive.find(it->first) == alive.end())
+            it = active_lidar_priors.erase(it);
+        else
+            ++it;
     }
 }
 
 // 读取所有相机模型文件。
 void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
 {
+    if (calib_file.empty())
+        throw std::runtime_error("FeatureTracker requires at least one camera calibration file");
+
     for (size_t i = 0; i < calib_file.size(); i++)
     {
+        if (calib_file[i].empty())
+            throw std::runtime_error("FeatureTracker camera calibration path is empty");
+
         ROS_INFO("reading paramerter of camera %s", calib_file[i].c_str());
         camodocal::CameraPtr camera = CameraFactory::instance()->generateCameraFromYamlFile(calib_file[i]);
+        if (!camera)
+            throw std::runtime_error("FeatureTracker failed to load camera calibration: " + calib_file[i]);
         m_camera.push_back(camera);
     }
     if (calib_file.size() == 2)
         stereo_cam = 1;
+    if (!FISHEYE_MASK.empty())
+    {
+        fisheye_mask = cv::imread(FISHEYE_MASK, cv::IMREAD_GRAYSCALE);
+        if (fisheye_mask.empty())
+            ROS_WARN("fisheye/valid-domain mask path is set but failed to load: %s", FISHEYE_MASK.c_str());
+    }
 }
 
 // 把像素网格经相机模型反投影后再投影回来，用于观察去畸变效果。
@@ -761,4 +871,9 @@ void FeatureTracker::removeOutliers(set<int> &removePtsIds)
 cv::Mat FeatureTracker::getTrackImage()
 {
     return imTrack;
+}
+
+const cv::Mat &FeatureTracker::validMask() const
+{
+    return fisheye_mask;
 }

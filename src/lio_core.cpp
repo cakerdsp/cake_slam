@@ -7,7 +7,6 @@ namespace cake_slam {
 // 构造函数只做对象与缓存分配，避免把配置依赖硬编码在构造阶段。
 LioCore::LioCore()
 {
-  preprocess_.reset(new Preprocess());
   imu_proc_.reset(new ImuProcess());
   feats_undistort_.reset(new PointCloudXYZI());
   feats_down_body_.reset(new PointCloudXYZI());
@@ -16,14 +15,7 @@ LioCore::LioCore()
 
 void LioCore::Configure(const Config &config)
 {
-  // 1. 初始化点云预处理参数。
-  preprocess_->set(config.lidar.feature_extract, config.lidar.type, config.lidar.blind, config.lidar.point_filter_num);
-  preprocess_->N_SCANS = config.lidar.scan_line;
-  preprocess_->SCAN_RATE = config.lidar.scan_rate;
-  preprocess_->blind = config.lidar.blind;
-  preprocess_->blind_sqr = config.lidar.blind * config.lidar.blind;
-
-  // 2. 读取 LiDAR 到 body(IMU) 的外参，语义与 FAST-LIVO2 保持一致。
+  // 1. Read LiDAR-to-body(IMU) extrinsics, matching the FAST-LIVO2 convention.
   if (config.extrinsic.lidar_T.size() >= 3) {
     extT_ << config.extrinsic.lidar_T[0], config.extrinsic.lidar_T[1], config.extrinsic.lidar_T[2];
   }
@@ -33,7 +25,7 @@ void LioCore::Configure(const Config &config)
              config.extrinsic.lidar_R[6], config.extrinsic.lidar_R[7], config.extrinsic.lidar_R[8];
   }
 
-  // 3. 配置 IMU 传播与初始化策略。
+  // 2. Configure IMU propagation and initialization policy.
   imu_proc_->set_extrinsic(extT_, extR_);
   imu_proc_->set_gyr_cov_scale(V3D(config.imu.gyr_cov, config.imu.gyr_cov, config.imu.gyr_cov));
   imu_proc_->set_acc_cov_scale(V3D(config.imu.acc_cov, config.imu.acc_cov, config.imu.acc_cov));
@@ -48,7 +40,7 @@ void LioCore::Configure(const Config &config)
     imu_proc_->disable_bias_est();
   }
 
-  // 4. 组织体素地图配置，并创建地图管理器。
+  // 3. Build the voxel-map configuration.
   VoxelMapConfig map_cfg;
   map_cfg.max_layer_ = config.map.max_layer;
   map_cfg.max_voxel_size_ = config.map.voxel_size;
@@ -69,7 +61,7 @@ void LioCore::Configure(const Config &config)
   voxel_manager_->extT_ = extT_;
   voxel_manager_->extR_ = extR_;
 
-  // 5. 配置点云下采样分辨率。
+  // 4. Configure body-frame point-cloud downsampling resolution [m].
   downsample_filter_.setLeafSize(config.lidar.filter_size_surf, config.lidar.filter_size_surf, config.lidar.filter_size_surf);
 }
 

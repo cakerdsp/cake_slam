@@ -82,33 +82,8 @@ bool InitialEXRotation::CalibrationExRotation(vector<pair<Vector3d, Vector3d>> c
 // 用五点法/本质矩阵思路从视觉对应点估计相对旋转。
 Matrix3d InitialEXRotation::solveRelativeR(const vector<pair<Vector3d, Vector3d>> &corres)
 {
-    if (corres.size() >= 9)
-    {
-        vector<cv::Point2f> ll, rr;
-        for (int i = 0; i < int(corres.size()); i++)
-        {
-            ll.push_back(cv::Point2f(corres[i].first(0), corres[i].first(1)));
-            rr.push_back(cv::Point2f(corres[i].second(0), corres[i].second(1)));
-        }
-        cv::Mat E = cv::findFundamentalMat(ll, rr);
-        cv::Mat_<double> R1, R2, t1, t2;
-        decomposeE(E, R1, R2, t1, t2);
-
-        if (determinant(R1) + 1.0 < 1e-09)
-        {
-            E = -E;
-            decomposeE(E, R1, R2, t1, t2);
-        }
-        double ratio1 = max(testTriangulation(ll, rr, R1, t1), testTriangulation(ll, rr, R1, t2));
-        double ratio2 = max(testTriangulation(ll, rr, R2, t1), testTriangulation(ll, rr, R2, t2));
-        cv::Mat_<double> ans_R_cv = ratio1 > ratio2 ? R1 : R2;
-
-        Matrix3d ans_R_eigen;
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-                ans_R_eigen(j, i) = ans_R_cv(i, j);
-        return ans_R_eigen;
-    }
+    (void)corres;
+    ROS_WARN("2D-2D epipolar extrinsic bootstrap is disabled; use configured LiDAR-camera/IMU-camera extrinsics.");
     return Matrix3d::Identity();
 }
 

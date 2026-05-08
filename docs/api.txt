@@ -14,13 +14,27 @@ LIO
   - GetUndistortedCloud() -> PointCloudXYZI::Ptr
   - GetDownsampledCloud() -> PointCloudXYZI::Ptr
   - GetDownsampledWorldCloud() -> PointCloudXYZI::Ptr
+  - GetEffectPoints() -> point-to-plane inlier list
 
 Vision
 - readParameters(config_path)
   - uses unified config.yaml keys under vision.*, imu.*, extrinsic.*, frame.*, time_offset.*
 - Estimator
   - inputImuSample(sample)
+  - inputImage(t, mono_image, lidar_candidates, lio_pose_prior)
   - getLatestState() -> StatesGroup
+  - getUndistortedValidMask() -> CV_8UC1 mask
+
+LiDAR-to-vision
+- LidarVisualSelector
+  - Configure(config)
+  - SetExtrinsics(R_I_L, t_I_L, R_C_L, t_C_L)
+  - Select(cloud_lidar, state, gray, valid_mask, camera) -> candidates
+- LidarVisualCandidate
+  - fields: pixel, depth, inv_depth, inv_depth_var, P_W_init,
+    shi_tomasi_score, mask_radius
+- LioPosePrior
+  - timestamp, R_WB, p_WB, sqrt_information, valid
 
 Unified state
 - StatesGroup is the only internal state carrier for LIO and VIO.
@@ -33,11 +47,16 @@ Config keys (summary)
 - map.voxel_size, map.max_layer, map.min_eigen_value, map.sigma_num, map.beam_err, map.dept_err
 - map.layer_init_num, map.max_points_num, map.min_iterations
 - map.sliding_enable, map.half_map_size, map.sliding_thresh
-- vision.image_topic, vision.max_cnt, vision.min_dist, vision.f_threshold
+- vision.image_topic, vision.max_cnt, vision.min_dist, vision.fisheye_mask
 - vision.show_track, vision.flow_back, vision.multiple_thread
 - vision.max_solver_time, vision.max_num_iterations, vision.keyframe_parallax
 - vision.estimate_extrinsic, vision.cam0_calib, vision.image_height, vision.image_width
+- vision.lidar_depth_enable, vision.optimize_lidar_inv_depth, vision.max_lidar_features
+- vision.min_lidar_depth, vision.max_lidar_depth, vision.z_buffer_cell_size
+- vision.z_buffer_depth_tolerance, vision.shi_tomasi_min_score, vision.lidar_mask_radius
+- vision.lio_prior_reproj_threshold, vision.lidar_depth_std, vision.min_inv_depth_var
+- vision.min_lio_pose_prior_var
 - extrinsic.lidar_T (3), extrinsic.lidar_R (9), extrinsic.camera_T/Pcl (3), extrinsic.camera_R/Rcl (9)
-- frame.world, frame.body, frame.camera
+- frame.world, frame.body, frame.lidar, frame.camera
 - output.path
 - time_offset.td, time_offset.estimate_td

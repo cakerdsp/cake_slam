@@ -20,19 +20,24 @@ SlamNode::SlamNode(const rclcpp::NodeOptions &options)
   initialize();
 }
 
+SlamNode::~SlamNode()
+{
+  stopSyncProcessThread();
+}
+
 void SlamNode::initialize()
 {
   // 初始化顺序保持和 FAST-LIVO2 主程序接近：
   // 1. 读取统一 yaml；
   // 2. 配置 LiDAR/LIO 和 VINS 风格视觉后端；
   // 3. 创建订阅；
-  // 4. 启动高频同步调度定时器。
+  // 4. 启动 sync_process 独立线程。
   loadConfiguration();
   configureModules();
   createSubscriptions();
   createPublishers();
-  createProcessingTimer();
   configured_ = true;
+  startSyncProcessThread();
 }
 
 void SlamNode::loadConfiguration()
@@ -88,6 +93,9 @@ void SlamNode::configureModules()
   // LIO 内部会配置 ImuProcess、体素地图和下采样器。
   lio_.Configure(config_);
   loadExtrinsicsForMain();
+  lidar_visual_selector_.Configure(config_);
+  lidar_visual_selector_.SetExtrinsics(lidar_to_imu_R_, lidar_to_imu_t_,
+                                       lidar_to_camera_R_, lidar_to_camera_t_);
 
   // 视觉后端完全走 VINS-Fusion 风格：
   // setParameter() 会读取 readParameters() 写好的全局变量，包括相机内参文件路径、IMU 噪声、外参等。
@@ -129,6 +137,7 @@ void SlamNode::createSubscriptions()
 
 void SlamNode::createPublishers()
 {
+  pub_cloud_raw_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_raw", 100);
   pub_cloud_registered_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 100);
   pub_cloud_map_ = create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 100);
   pub_cloud_colored_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_colored", 100);
@@ -141,59 +150,38 @@ void SlamNode::createPublishers()
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 }
 
-void SlamNode::createProcessingTimer()
+void SlamNode::startSyncProcessThread()
 {
-  const int rate_hz = std::max(1, config_.common.process_rate_hz);
-  const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::duration<double>(1.0 / static_cast<double>(rate_hz)));
-  processing_timer_ = create_wall_timer(period, std::bind(&SlamNode::processingLoop, this));
+  sync_thread_running_.store(true);
+  sync_process_thread_ = std::thread(&SlamNode::syncProcessLoop, this);
   if (config_.common.imu_propagation_enable) {
     imu_prop_timer_ = create_wall_timer(4ms, std::bind(&SlamNode::imuPropagationTimer, this));
   }
 }
 
+void SlamNode::stopSyncProcessThread()
+{
+  sync_thread_running_.store(false);
+  buffer_cv_.notify_all();
+  if (sync_process_thread_.joinable()) {
+    sync_process_thread_.join();
+  }
+}
+
 void SlamNode::livoxPointCloudCallback(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr msg)
 {
-  // 回调只做轻量工作：时间检查、点云预处理、入队。
-  auto mutable_msg = std::make_shared<livox_ros_driver2::msg::CustomMsg>(*msg);
-  PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
-  preprocess_->process(mutable_msg, cloud);
-  if (!cloud || cloud->empty()) {
-    RCLCPP_WARN(get_logger(), "Dropped empty Livox point cloud.");
-    return;
-  }
-
-  const double stamp = stampToSec(msg->header.stamp);
   std::lock_guard<std::mutex> lock(buffer_mutex_);
-  if (last_lidar_time_ > 0.0 && stamp < last_lidar_time_) {
-    RCLCPP_ERROR(get_logger(), "LiDAR timestamp moved backwards; clearing synchronized buffers.");
-    clearAllBuffersLocked();
-  }
-  lidar_buffer_.push_back(cloud);
-  lidar_time_buffer_.push_back(stamp);
-  last_lidar_time_ = stamp;
+  raw_livox_buffer_.push_back(msg);
   trimBuffersLocked();
+  buffer_cv_.notify_one();
 }
 
 void SlamNode::standardPointCloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
 {
-  PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
-  preprocess_->process(msg, cloud);
-  if (!cloud || cloud->empty()) {
-    RCLCPP_WARN(get_logger(), "Dropped empty point cloud.");
-    return;
-  }
-
-  const double stamp = stampToSec(msg->header.stamp);
   std::lock_guard<std::mutex> lock(buffer_mutex_);
-  if (last_lidar_time_ > 0.0 && stamp < last_lidar_time_) {
-    RCLCPP_ERROR(get_logger(), "LiDAR timestamp moved backwards; clearing synchronized buffers.");
-    clearAllBuffersLocked();
-  }
-  lidar_buffer_.push_back(cloud);
-  lidar_time_buffer_.push_back(stamp);
-  last_lidar_time_ = stamp;
+  raw_cloud_buffer_.push_back(msg);
   trimBuffersLocked();
+  buffer_cv_.notify_one();
 }
 
 void SlamNode::imuCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
@@ -228,6 +216,7 @@ void SlamNode::imuCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
   }
   last_imu_time_ = sample.stamp;
   trimBuffersLocked();
+  buffer_cv_.notify_one();
 }
 
 void SlamNode::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg)
@@ -236,44 +225,127 @@ void SlamNode::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg)
     return;
   }
 
-  ImagePacket packet;
-  packet.stamp = stampToSec(msg->header.stamp) + config_.common.image_time_offset;
-  packet.mono = monoImageFromMsg(msg);
-  packet.color = colorImageFromMsg(msg);
+  std::lock_guard<std::mutex> lock(buffer_mutex_);
+  raw_image_buffer_.push_back(msg);
+  trimBuffersLocked();
+  buffer_cv_.notify_one();
+}
+
+void SlamNode::syncProcessLoop()
+{
+  // Heavy work lives in this worker thread. ROS callbacks only enqueue raw
+  // messages, while this loop decodes, synchronizes, optimizes, colors, and
+  // publishes.
+  while (rclcpp::ok() && sync_thread_running_.load()) {
+    drainRawInputBuffers();
+
+    bool did_work = false;
+    while (syncPackages(measures_)) {
+      did_work = true;
+      switch (measures_.lio_vio_flg) {
+        case LIO:
+        case LO:
+          handleLIO();
+          break;
+        case VIO:
+          handleVIO();
+          break;
+        default:
+          break;
+      }
+      drainRawInputBuffers();
+    }
+
+    if (!did_work) {
+      std::unique_lock<std::mutex> lock(buffer_mutex_);
+      buffer_cv_.wait_for(lock, 2ms, [this]() {
+        return !sync_thread_running_.load() || !raw_livox_buffer_.empty() ||
+               !raw_cloud_buffer_.empty() || !raw_image_buffer_.empty() ||
+               !lidar_buffer_.empty() || !image_buffer_.empty();
+      });
+    }
+  }
+}
+
+void SlamNode::drainRawInputBuffers()
+{
+  // Pop raw messages under the mutex, then decode/preprocess them outside the
+  // critical section so sensor callbacks remain lightweight.
+  while (sync_thread_running_.load()) {
+    livox_ros_driver2::msg::CustomMsg::ConstSharedPtr livox_msg;
+    sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud_msg;
+    sensor_msgs::msg::Image::ConstSharedPtr image_msg;
+
+    {
+      std::lock_guard<std::mutex> lock(buffer_mutex_);
+      if (!raw_livox_buffer_.empty()) {
+        livox_msg = raw_livox_buffer_.front();
+        raw_livox_buffer_.pop_front();
+      } else if (!raw_cloud_buffer_.empty()) {
+        cloud_msg = raw_cloud_buffer_.front();
+        raw_cloud_buffer_.pop_front();
+      } else if (!raw_image_buffer_.empty()) {
+        image_msg = raw_image_buffer_.front();
+        raw_image_buffer_.pop_front();
+      } else {
+        break;
+      }
+    }
+
+    if (livox_msg) {
+      auto mutable_msg = std::make_shared<livox_ros_driver2::msg::CustomMsg>(*livox_msg);
+      PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
+      preprocess_->process(mutable_msg, cloud);
+      enqueueProcessedCloud(stampToSec(livox_msg->header.stamp), cloud);
+    } else if (cloud_msg) {
+      PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
+      preprocess_->process(cloud_msg, cloud);
+      enqueueProcessedCloud(stampToSec(cloud_msg->header.stamp), cloud);
+    } else if (image_msg) {
+      ImagePacket packet;
+      packet.stamp = stampToSec(image_msg->header.stamp) + config_.common.image_time_offset;
+      packet.mono = monoImageFromMsg(image_msg);
+      packet.color = colorImageFromMsg(image_msg);
+      enqueueImagePacket(std::move(packet));
+    }
+  }
+}
+
+void SlamNode::enqueueProcessedCloud(double stamp, const PointCloudXYZI::Ptr &cloud)
+{
+  if (!cloud || cloud->empty()) {
+    RCLCPP_WARN(get_logger(), "Dropped empty LiDAR point cloud.");
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(buffer_mutex_);
+  if (last_lidar_time_ > 0.0 && stamp < last_lidar_time_) {
+    RCLCPP_ERROR(get_logger(), "LiDAR timestamp moved backwards; clearing synchronized buffers.");
+    clearAllBuffersLocked();
+  }
+  lidar_buffer_.push_back(cloud);
+  lidar_time_buffer_.push_back(stamp);
+  last_lidar_time_ = stamp;
+  trimBuffersLocked();
+  buffer_cv_.notify_one();
+}
+
+void SlamNode::enqueueImagePacket(ImagePacket &&packet)
+{
+  if (packet.mono.empty()) {
+    RCLCPP_WARN(get_logger(), "Dropped empty image packet.");
+    return;
+  }
 
   std::lock_guard<std::mutex> lock(buffer_mutex_);
   if (last_image_time_ > 0.0 && packet.stamp < last_image_time_) {
     RCLCPP_ERROR(get_logger(), "Image timestamp moved backwards; clearing image buffer.");
     image_buffer_.clear();
   }
-  image_buffer_.push_back(packet);
-  last_image_time_ = packet.stamp;
+  image_buffer_.push_back(std::move(packet));
+  last_image_time_ = image_buffer_.back().stamp;
   trimBuffersLocked();
-}
-
-void SlamNode::processingLoop()
-{
-  if (!configured_) {
-    return;
-  }
-  if (!syncPackages(measures_)) {
-    return;
-  }
-
-  // 顺序调度策略：
-  // LIVO 模式下 syncPackages 会交替产生 LIO 包和 VIO 包；
-  // LIO/LO 模式下只产生 LiDAR 包。
-  switch (measures_.lio_vio_flg) {
-    case LIO:
-    case LO:
-      handleLIO();
-      break;
-    case VIO:
-      handleVIO();
-      break;
-    default:
-      break;
-  }
+  buffer_cv_.notify_one();
 }
 
 bool SlamNode::syncPackages(FusionMeasureGroup &meas)
@@ -364,6 +436,8 @@ bool SlamNode::syncLivo(FusionMeasureGroup &meas)
   // FAST-LIVO2 的 LIVO 调度方式：
   // WAIT/VIO 之后先把 LiDAR 切到下一帧图像时间，做 LIO；
   // LIO 之后再用同一张图像做一次 VIO。
+  // WAIT/VIO -> run LIO up to the next image time; LIO -> run VIO on that same
+  // image with the freshly computed LIO state/covariance prior.
   switch (meas.lio_vio_flg) {
     case WAIT:
     case VIO:
@@ -377,6 +451,8 @@ bool SlamNode::syncLivo(FusionMeasureGroup &meas)
 
 bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_time)
 {
+  // Slice LiDAR data at the selected image timestamp. Points after update_time
+  // stay in pcl_proc_next and become the prefix of the next LIO packet.
   if (meas.last_lio_update_time < 0.0) {
     meas.last_lio_update_time = lidar_time_buffer_.front();
   }
@@ -389,7 +465,7 @@ bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_tim
     return false;
   }
   update_time = image_buffer_.front().stamp;
-  latest_sync_image_time_ = update_time;
+  latest_sync_mono_image_ = image_buffer_.front().mono.clone();
   latest_sync_color_image_ = image_buffer_.front().color.clone();
 
   if (update_time > newestLidarEndTimeLocked()) {
@@ -449,6 +525,8 @@ bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_tim
 
 bool SlamNode::buildVioMeasure(FusionMeasureGroup &meas)
 {
+  // Consume the image that defined the preceding LIO cut time. VIO has its own
+  // IMU queue, so LIO and VIO can integrate the same physical measurements.
   if (image_buffer_.empty()) {
     return false;
   }
@@ -484,6 +562,8 @@ bool SlamNode::buildVioMeasure(FusionMeasureGroup &meas)
 
 void SlamNode::handleLIO()
 {
+  // Sequential update stage 1: run LIO, publish state/cloud outputs, and prepare
+  // direct priors for the next VIO image update.
   if (measures_.measures.empty()) {
     return;
   }
@@ -497,10 +577,11 @@ void SlamNode::handleLIO()
   lio_.ProcessMeasurement(measures_);
   measures_.last_lio_update_time = update_time;
   state_ = lio_.GetState();
-  state_propagat_ = state_;
   gravityAlignment();
   latest_ekf_state_ = state_;
   latest_ekf_time_ = update_time;
+  pending_lio_pose_prior_ = makeLioPosePrior(update_time);
+  buildLidarVisualCandidates(update_time);
   state_update_flag_ = true;
   ekf_finish_once_ = true;
 
@@ -513,6 +594,8 @@ void SlamNode::handleLIO()
 
 void SlamNode::handleVIO()
 {
+  // Sequential update stage 2: feed IMU samples, LiDAR visual candidates, and
+  // the LIO pose prior directly into Estimator::inputImage().
   if (!vio_ || measures_.measures.empty()) {
     return;
   }
@@ -525,9 +608,15 @@ void SlamNode::handleVIO()
     vio_->inputImuSample(imu);
   }
   if (!measure.img.empty()) {
-    vio_->inputImage(measure.vio_time, measure.img);
+    if (last_vio_update_time_ < 0.0) {
+      vio_->initFirstPose(state_.pos_end, state_.rot_end);
+    }
+    vio_->inputImage(measure.vio_time, measure.img,
+                     pending_lidar_visual_candidates_, pending_lio_pose_prior_);
+    pending_lidar_visual_candidates_.clear();
+    pending_lio_pose_prior_ = LioPosePrior();
     last_vio_update_time_ = measure.vio_time;
-    if (vio_->solver_flag == Estimator::SolverFlag::NON_LINEAR) {
+    if (vio_->solver_flag == Estimator::NON_LINEAR) {
       state_ = vio_->getLatestState();
       lio_.SetState(state_);
       latest_ekf_state_ = state_;
@@ -547,6 +636,9 @@ void SlamNode::clearAllBuffersLocked()
 {
   lidar_buffer_.clear();
   lidar_time_buffer_.clear();
+  raw_livox_buffer_.clear();
+  raw_cloud_buffer_.clear();
+  raw_image_buffer_.clear();
   imu_lio_buffer_.clear();
   imu_vio_buffer_.clear();
   imu_prop_buffer_.clear();
@@ -560,6 +652,15 @@ void SlamNode::trimBuffersLocked()
   while (lidar_buffer_.size() > max_size) {
     lidar_buffer_.pop_front();
     lidar_time_buffer_.pop_front();
+  }
+  while (raw_livox_buffer_.size() > max_size) {
+    raw_livox_buffer_.pop_front();
+  }
+  while (raw_cloud_buffer_.size() > max_size) {
+    raw_cloud_buffer_.pop_front();
+  }
+  while (raw_image_buffer_.size() > max_size) {
+    raw_image_buffer_.pop_front();
   }
   while (imu_lio_buffer_.size() > max_size) {
     imu_lio_buffer_.pop_front();
@@ -588,8 +689,10 @@ void SlamNode::resetSyncStateLocked()
   ekf_finish_once_ = false;
   state_update_flag_ = false;
   new_imu_ = false;
-  latest_sync_image_time_ = -1.0;
+  latest_sync_mono_image_.release();
   latest_sync_color_image_.release();
+  pending_lidar_visual_candidates_.clear();
+  pending_lio_pose_prior_ = LioPosePrior();
 }
 
 double SlamNode::newestLidarEndTimeLocked() const
@@ -679,6 +782,70 @@ void SlamNode::loadExtrinsicsForMain()
   if (config_.extrinsic.camera_T.size() >= 3) {
     lidar_to_camera_t_ << config_.extrinsic.camera_T[0], config_.extrinsic.camera_T[1], config_.extrinsic.camera_T[2];
   }
+}
+
+LioPosePrior SlamNode::makeLioPosePrior(double stamp) const
+{
+  // Crop the StatesGroup covariance as [delta_theta(rad), delta_p(m)], inflate
+  // rotation/translation blocks, invert, then store a square-root information
+  // matrix for the Ceres prior residual.
+  LioPosePrior prior;
+  prior.valid = true;
+  prior.timestamp = stamp;
+  prior.R_WB = state_.rot_end;
+  prior.p_WB = state_.pos_end;
+
+  Eigen::Matrix<double, 6, 6> cov_pose =
+      state_.cov.block<6, 6>(0, 0).cast<double>();
+  cov_pose = 0.5 * (cov_pose + cov_pose.transpose());
+  cov_pose.topLeftCorner<3, 3>() *= 5.0;
+  cov_pose.bottomRightCorner<3, 3>() *= 2.0;
+
+  const double min_var = std::max(1e-12, config_.vision.min_lio_pose_prior_var);
+  for (int i = 0; i < 3; ++i) {
+    cov_pose(i, i) = std::max(min_var, cov_pose(i, i));
+    cov_pose(i + 3, i + 3) = std::max(min_var, cov_pose(i + 3, i + 3));
+  }
+
+  const Eigen::Matrix<double, 6, 6> information = cov_pose.inverse();
+  Eigen::LLT<Eigen::Matrix<double, 6, 6>> llt(information);
+  if (llt.info() == Eigen::Success) {
+    prior.sqrt_information = llt.matrixL().transpose();
+  } else {
+    prior.sqrt_information.setZero();
+    for (int i = 0; i < 6; ++i) {
+      prior.sqrt_information(i, i) = 1.0 / std::sqrt(std::max(min_var, cov_pose(i, i)));
+    }
+  }
+  return prior;
+}
+
+void SlamNode::buildLidarVisualCandidates(double /*stamp*/)
+{
+  // Project the latest LIO cloud into the synchronized image and keep only
+  // candidates that pass valid-mask, z-buffer, texture, and spacing checks.
+  pending_lidar_visual_candidates_.clear();
+  if (!use_image_ || !vio_ || !config_.vision.lidar_depth_enable || latest_sync_mono_image_.empty()) {
+    return;
+  }
+
+  auto camera = vio_->getCameraModel();
+  if (!camera) {
+    return;
+  }
+
+  PointCloudXYZI::Ptr source_cloud = lio_.GetDownsampledCloud();
+  if (!source_cloud || source_cloud->empty()) {
+    source_cloud = lio_.GetUndistortedCloud();
+  }
+  pending_lidar_visual_candidates_ = lidar_visual_selector_.Select(
+      source_cloud, state_, latest_sync_mono_image_, vio_->getUndistortedValidMask(), camera);
+
+  const auto &stats = lidar_visual_selector_.lastStats();
+  RCLCPP_DEBUG(get_logger(),
+               "LiDAR visual candidates: input=%d depth=%d image=%d z=%d texture=%d mask=%d",
+               stats.input_points, stats.positive_depth, stats.in_image, stats.zbuffer_kept,
+               stats.texture_kept, stats.mask_kept);
 }
 
 Eigen::Vector3d SlamNode::lidarToWorld(const Eigen::Vector3d &point_lidar) const
@@ -798,8 +965,22 @@ void SlamNode::publishTf(double stamp)
   tf_broadcaster_->sendTransform(tf);
 }
 
+void SlamNode::publishRawCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar)
+{
+  if (!pub_cloud_raw_ || !cloud_lidar || cloud_lidar->empty()) {
+    return;
+  }
+  sensor_msgs::msg::PointCloud2 msg;
+  pcl::toROSMsg(*cloud_lidar, msg);
+  msg.header.stamp = secToStamp(stamp);
+  msg.header.frame_id = config_.frame.lidar;
+  pub_cloud_raw_->publish(msg);
+}
+
 void SlamNode::publishClouds(double stamp)
 {
+  publishRawCloud(stamp, measures_.pcl_proc_cur);
+
   const PointCloudXYZI::Ptr cloud_world = lio_.GetDownsampledWorldCloud();
   if (pub_cloud_registered_ && cloud_world && !cloud_world->empty()) {
     sensor_msgs::msg::PointCloud2 msg;
@@ -834,47 +1015,46 @@ void SlamNode::publishClouds(double stamp)
 
 void SlamNode::publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar)
 {
-  if (!pub_cloud_colored_ || !vio_ || latest_sync_color_image_.empty() || !cloud_lidar || cloud_lidar->empty()) {
+  // Project each LiDAR point with T_C_L into the synchronized color image. Valid
+  // projections sample image RGB; invalid projections keep the default gray.
+  if (!pub_cloud_colored_ || !cloud_lidar || cloud_lidar->empty()) {
     return;
   }
 
-  const auto camera = vio_->getCameraModel();
-  if (!camera) {
-    return;
-  }
+  const auto camera = vio_ ? vio_->getCameraModel() : camodocal::CameraConstPtr();
+  const bool can_color = camera && !latest_sync_color_image_.empty();
 
   PointCloudXYZRGB colored;
   colored.reserve(cloud_lidar->size());
   for (const auto &pt : cloud_lidar->points) {
     const Eigen::Vector3d p_lidar(pt.x, pt.y, pt.z);
-    const Eigen::Vector3d p_cam = lidar_to_camera_R_ * p_lidar + lidar_to_camera_t_;
-    if (p_cam.z() <= 0.05) {
-      continue;
-    }
-
-    Eigen::Vector2d uv;
-    camera->spaceToPlane(p_cam, uv);
-    const int u = static_cast<int>(std::round(uv.x()));
-    const int v = static_cast<int>(std::round(uv.y()));
-    if (u < 0 || v < 0 || u >= latest_sync_color_image_.cols || v >= latest_sync_color_image_.rows) {
-      continue;
-    }
-
-    const cv::Vec3b bgr = latest_sync_color_image_.at<cv::Vec3b>(v, u);
     PointTypeRGB out;
     const Eigen::Vector3d p_world = lidarToWorld(p_lidar);
     out.x = static_cast<float>(p_world.x());
     out.y = static_cast<float>(p_world.y());
     out.z = static_cast<float>(p_world.z());
-    out.r = bgr[2];
-    out.g = bgr[1];
-    out.b = bgr[0];
+    out.r = 160;
+    out.g = 160;
+    out.b = 160;
+
+    if (can_color) {
+      const Eigen::Vector3d p_cam = lidar_to_camera_R_ * p_lidar + lidar_to_camera_t_;
+      if (p_cam.z() > 0.05) {
+        Eigen::Vector2d uv;
+        camera->spaceToPlane(p_cam, uv);
+        const int u = static_cast<int>(std::round(uv.x()));
+        const int v = static_cast<int>(std::round(uv.y()));
+        if (u >= 0 && v >= 0 && u < latest_sync_color_image_.cols && v < latest_sync_color_image_.rows) {
+          const cv::Vec3b bgr = latest_sync_color_image_.at<cv::Vec3b>(v, u);
+          out.r = bgr[2];
+          out.g = bgr[1];
+          out.b = bgr[0];
+        }
+      }
+    }
     colored.push_back(out);
   }
 
-  if (colored.empty()) {
-    return;
-  }
   sensor_msgs::msg::PointCloud2 msg;
   pcl::toROSMsg(colored, msg);
   msg.header.stamp = secToStamp(stamp);
@@ -884,7 +1064,7 @@ void SlamNode::publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &clou
 
 void SlamNode::publishVisualSubmap(double stamp)
 {
-  if (!pub_cloud_visual_submap_ || !vio_ || vio_->solver_flag != Estimator::SolverFlag::NON_LINEAR) {
+  if (!pub_cloud_visual_submap_ || !vio_ || vio_->solver_flag != Estimator::NON_LINEAR) {
     return;
   }
 
