@@ -10,6 +10,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# 1. 查找依赖
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -34,21 +35,17 @@ find_package(Sophus REQUIRED)
 find_package(livox_ros_driver2 REQUIRED)
 find_package(OpenMP REQUIRED)
 
+# 2. QHULL 补丁（防止 PCL 报错找不到目标）
+find_package(Qhull REQUIRED)
 if(NOT TARGET QHULL::QHULL)
-    # 如果系统找到了 Qhull 但没定义这个别名，我们手动建立链接
     add_library(QHULL::QHULL UNKNOWN IMPORTED)
     set_target_properties(QHULL::QHULL PROPERTIES
         INTERFACE_INCLUDE_DIRECTORIES "${QHULL_INCLUDE_DIRS}"
-        IMPORTED_LOCATION "${QHULL_LIBRARIES}"
+        IMPORTED_LOCATION "/usr/lib/x86_64-linux-gnu/libqhull_r.so"
     )
-    # 针对 Ubuntu 22.04 的特殊处理：如果上面的变量为空，尝试直接链接系统库
-    if("${QHULL_LIBRARIES}" STREQUAL "")
-        set_target_properties(QHULL::QHULL PROPERTIES
-            IMPORTED_LOCATION "/usr/lib/x86_64-linux-gnu/libqhull_r.so"
-        )
-    endif()
 endif()
 
+# 3. 包含路径
 include_directories(
   include
   include/cake_slam
@@ -66,6 +63,7 @@ include_directories(
 
 add_definitions(${PCL_DEFINITIONS})
 
+# 4. 收集源码
 file(GLOB_RECURSE VISION_SOURCES
   src/vision/estimator/*.cpp
   src/vision/featureTracker/*.cpp
@@ -85,7 +83,10 @@ set(cake_slam_SOURCES
   ${VISION_SOURCES}
 )
 
+# 5. 构建核心库
 add_library(cake_slam_core ${cake_slam_SOURCES})
+
+# ROS2 依赖链接（底层使用 plain signature）
 ament_target_dependencies(cake_slam_core
   rclcpp
   sensor_msgs
@@ -108,20 +109,23 @@ ament_target_dependencies(cake_slam_core
   Sophus
   livox_ros_driver2
 )
+
+# 【核心修正】：手动链接其他非 ROS2 包，全部删掉 PUBLIC/PRIVATE 关键字
 target_link_libraries(cake_slam_core
-  PUBLIC
-    OpenMP::OpenMP_CXX
-  PRIVATE
-    ${PCL_LIBRARIES}
-    ${CERES_LIBRARIES}
-    ${OpenCV_LIBS}
+  ${PCL_LIBRARIES}
+  ${CERES_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+  QHULL::QHULL
 )
 
 if(TARGET Sophus::Sophus)
-  target_link_libraries(cake_slam_core PUBLIC Sophus::Sophus)
+  target_link_libraries(cake_slam_core Sophus::Sophus)
 endif()
 
+# 6. 构建节点
 add_executable(cake_slam_node src/slam_node.cpp)
+
 ament_target_dependencies(cake_slam_node
   rclcpp
   sensor_msgs
@@ -132,17 +136,12 @@ ament_target_dependencies(cake_slam_node
   cv_bridge
   livox_ros_driver2
 )
+
 target_link_libraries(cake_slam_node cake_slam_core)
 
-install(
-  DIRECTORY include/
-  DESTINATION include
-)
-
-install(
-  DIRECTORY launch config
-  DESTINATION share/${PROJECT_NAME}
-)
+# 7. 安装与导出
+install(DIRECTORY include/ DESTINATION include)
+install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 
 install(TARGETS
   cake_slam_core
