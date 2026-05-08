@@ -26,8 +26,6 @@ which is included as part of this source code package.
 #include <tf2/LinearMath/Quaternion.hpp>
 
 using namespace std;
-// using namespace Eigen;   // avoid cmake error: reference to ‘Matrix’ is ambiguous
-using namespace Sophus;
 
 #define print_line std::cout << __FILE__ << ", " << __LINE__ << std::endl;
 #define G_m_s2 (9.81)   // Gravaty const in GuangDong/China
@@ -71,7 +69,7 @@ struct FusionMeasure
   // 当前 LIO 更新或最近一次 LIO 更新对应的时间戳。
   double lio_time;
   // 覆盖该时间区间的 IMU 数据，要求按时间升序排列。
-  deque<ImuSample> imu;
+  std::deque<ImuSample> imu;
   // 当前图像帧。
   cv::Mat img;
   FusionMeasure()
@@ -98,7 +96,7 @@ struct FusionMeasureGroup
   // 下一帧预取/处理中点云缓存。
   PointCloudXYZI::Ptr pcl_proc_next;
   // 当前等待处理的 LIO/VIO 测量包。
-  deque<struct FusionMeasure> measures;
+  std::deque<struct FusionMeasure> measures;
   // 当前测量由哪种模式驱动更新。
   EKF_STATE lio_vio_flg;
   // 当前扫描编号或序列号。
@@ -188,7 +186,7 @@ struct StatesGroup
     return *this;
   };
 
-  StatesGroup operator+(const Matrix<double, DIM_STATE, 1> &state_add)
+  StatesGroup operator+(const Eigen::Matrix<double, DIM_STATE, 1> &state_add)
   {
     StatesGroup a;
     a.rot_end = this->rot_end * Exp(state_add(0, 0), state_add(1, 0), state_add(2, 0));
@@ -203,7 +201,7 @@ struct StatesGroup
     return a;
   };
 
-  StatesGroup &operator+=(const Matrix<double, DIM_STATE, 1> &state_add)
+  StatesGroup &operator+=(const Eigen::Matrix<double, DIM_STATE, 1> &state_add)
   {
     this->rot_end = this->rot_end * Exp(state_add(0, 0), state_add(1, 0), state_add(2, 0));
     this->pos_end += state_add.block<3, 1>(3, 0);
@@ -215,9 +213,9 @@ struct StatesGroup
     return *this;
   };
 
-  Matrix<double, DIM_STATE, 1> operator-(const StatesGroup &b)
+  Eigen::Matrix<double, DIM_STATE, 1> operator-(const StatesGroup &b)
   {
-    Matrix<double, DIM_STATE, 1> a;
+    Eigen::Matrix<double, DIM_STATE, 1> a;
     M3D rotd(b.rot_end.transpose() * this->rot_end);
     a.block<3, 1>(0, 0) = Log(rotd);
     a.block<3, 1>(3, 0) = this->pos_end - b.pos_end;
@@ -243,14 +241,17 @@ struct StatesGroup
   V3D bias_g;                               // 陀螺仪零偏估计。
   V3D bias_a;                               // 加速度计零偏估计。
   V3D gravity;                              // 重力向量估计。
-  Matrix<double, DIM_STATE, DIM_STATE> cov; // 19 维误差状态协方差矩阵。
+  Eigen::Matrix<double, DIM_STATE, DIM_STATE> cov; // 19 维误差状态协方差矩阵。
 };
 
 // 组装一条 Pose6D 记录。
 // 主要用于保存 IMU 传播轨迹，便于点云去畸变时对逐点姿态进行插值。
 template <typename T>
-auto set_pose6d(const double t, const Matrix<T, 3, 1> &a, const Matrix<T, 3, 1> &g, const Matrix<T, 3, 1> &v, const Matrix<T, 3, 1> &p,
-                const Matrix<T, 3, 3> &R)
+auto set_pose6d(const double t, const Eigen::Matrix<T, 3, 1> &a,
+                const Eigen::Matrix<T, 3, 1> &g,
+                const Eigen::Matrix<T, 3, 1> &v,
+                const Eigen::Matrix<T, 3, 1> &p,
+                const Eigen::Matrix<T, 3, 3> &R)
 {
   Pose6D rot_kp;
   rot_kp.offset_time = t;
@@ -263,8 +264,8 @@ auto set_pose6d(const double t, const Matrix<T, 3, 1> &a, const Matrix<T, 3, 1> 
     for (int j = 0; j < 3; j++)
       rot_kp.rot[i * 3 + j] = R(i, j);
   }
-  // Map<M3D>(rot_kp.rot, 3,3) = R;
-  return move(rot_kp);
+  // Eigen::Map<M3D>(rot_kp.rot, 3, 3) = R;
+  return rot_kp;
 }
 
 #endif

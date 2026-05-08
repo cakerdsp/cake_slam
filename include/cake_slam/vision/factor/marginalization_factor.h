@@ -10,6 +10,7 @@
 #pragma once
 
 #include <rclcpp/rclcpp.hpp>
+#include <rcutils/logging_macros.h>
 // #include <ros/console.h>
 #include <cstdlib>
 #include <pthread.h>

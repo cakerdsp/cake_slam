@@ -10,7 +10,6 @@
 #include "visualization.h"
 
 // using namespace ros;
-using namespace Eigen;
 rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odometry, pub_latest_odometry;
 rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud>::SharedPtr pub_point_cloud, pub_margin_cloud;
@@ -27,7 +26,7 @@ rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_image_track;
 
 CameraPoseVisualization cameraposevisual(1, 0, 0, 1);
 static double sum_of_path = 0;
-static Vector3d last_path(0.0, 0.0, 0.0);
+static Eigen::Vector3d last_path(0.0, 0.0, 0.0);
 
 size_t pub_counter = 0;
 
@@ -150,8 +149,8 @@ void pubOdometry(const Estimator &estimator, const std_msgs::msg::Header &header
         odometry.header = header;
         odometry.header.frame_id = WORLD_FRAME_ID;
         odometry.child_frame_id = BODY_FRAME_ID;
-        Quaterniond tmp_Q;
-        tmp_Q = Quaterniond(estimator.states_[WINDOW_SIZE].rot_end);
+        Eigen::Quaterniond tmp_Q;
+        tmp_Q = Eigen::Quaterniond(estimator.states_[WINDOW_SIZE].rot_end);
         odometry.pose.pose.position.x = estimator.states_[WINDOW_SIZE].pos_end.x();
         odometry.pose.pose.position.y = estimator.states_[WINDOW_SIZE].pos_end.y();
         odometry.pose.pose.position.z = estimator.states_[WINDOW_SIZE].pos_end.z();
@@ -224,7 +223,7 @@ void pubKeyPoses(const Estimator &estimator, const std_msgs::msg::Header &header
     for (int i = 0; i <= WINDOW_SIZE; i++)
     {
         geometry_msgs::msg::Point pose_marker;
-        Vector3d correct_pose;
+        Eigen::Vector3d correct_pose;
         correct_pose = estimator.key_poses[i];
         pose_marker.x = correct_pose.x();
         pose_marker.y = correct_pose.y();
@@ -244,8 +243,8 @@ void pubCameraPose(const Estimator &estimator, const std_msgs::msg::Header &head
     if (estimator.solver_flag == Estimator::NON_LINEAR)
     {
         int i = idx2;
-        Vector3d P = estimator.states_[i].pos_end + estimator.states_[i].rot_end * estimator.tic[0];
-        Quaterniond R = Quaterniond(estimator.states_[i].rot_end * estimator.ric[0]);
+        Eigen::Vector3d P = estimator.states_[i].pos_end + estimator.states_[i].rot_end * estimator.tic[0];
+        Eigen::Quaterniond R = Eigen::Quaterniond(estimator.states_[i].rot_end * estimator.ric[0]);
 
         nav_msgs::msg::Odometry odometry;
         odometry.header = header;
@@ -264,8 +263,8 @@ void pubCameraPose(const Estimator &estimator, const std_msgs::msg::Header &head
         cameraposevisual.add_pose(P, R);
         if(STEREO)
         {
-            Vector3d P = estimator.states_[i].pos_end + estimator.states_[i].rot_end * estimator.tic[1];
-            Quaterniond R = Quaterniond(estimator.states_[i].rot_end * estimator.ric[1]);
+            Eigen::Vector3d P = estimator.states_[i].pos_end + estimator.states_[i].rot_end * estimator.tic[1];
+            Eigen::Quaterniond R = Eigen::Quaterniond(estimator.states_[i].rot_end * estimator.ric[1]);
             cameraposevisual.add_pose(P, R);
         }
         cameraposevisual.publish_by(pub_camera_pose_visual, odometry.header);
@@ -292,8 +291,8 @@ void pubPointCloud(const Estimator &estimator, const std_msgs::msg::Header &head
         if (it_per_id.start_frame > WINDOW_SIZE * 3.0 / 4.0 || it_per_id.solve_flag != 1)
             continue;
         int imu_i = it_per_id.start_frame;
-        Vector3d pts_i = it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth;
-        Vector3d w_pts_i = estimator.states_[imu_i].rot_end * (estimator.ric[0] * pts_i + estimator.tic[0]) + estimator.states_[imu_i].pos_end;
+        Eigen::Vector3d pts_i = it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth;
+        Eigen::Vector3d w_pts_i = estimator.states_[imu_i].rot_end * (estimator.ric[0] * pts_i + estimator.tic[0]) + estimator.states_[imu_i].pos_end;
 
         geometry_msgs::msg::Point32 p;
         p.x = w_pts_i(0);
@@ -321,8 +320,8 @@ void pubPointCloud(const Estimator &estimator, const std_msgs::msg::Header &head
             && it_per_id.solve_flag == 1 )
         {
             int imu_i = it_per_id.start_frame;
-            Vector3d pts_i = it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth;
-            Vector3d w_pts_i = estimator.states_[imu_i].rot_end * (estimator.ric[0] * pts_i + estimator.tic[0]) + estimator.states_[imu_i].pos_end;
+            Eigen::Vector3d pts_i = it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth;
+            Eigen::Vector3d w_pts_i = estimator.states_[imu_i].rot_end * (estimator.ric[0] * pts_i + estimator.tic[0]) + estimator.states_[imu_i].pos_end;
 
             geometry_msgs::msg::Point32 p;
             p.x = w_pts_i(0);
@@ -351,8 +350,8 @@ void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
 
     tf2::Quaternion q;
     // body frame
-    Vector3d correct_t;
-    Quaterniond correct_q;
+    Eigen::Vector3d correct_t;
+    Eigen::Quaterniond correct_q;
     
     cout << "tf 2" << endl;
     correct_t = estimator.states_[WINDOW_SIZE].pos_end;
@@ -405,10 +404,10 @@ void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
     transform_cam.transform.translation.y = estimator.tic[0].y();
     transform_cam.transform.translation.z = estimator.tic[0].z();
 
-    q.setW(Quaterniond(estimator.ric[0]).w());
-    q.setX(Quaterniond(estimator.ric[0]).x());
-    q.setY(Quaterniond(estimator.ric[0]).y());
-    q.setZ(Quaterniond(estimator.ric[0]).z());
+    q.setW(Eigen::Quaterniond(estimator.ric[0]).w());
+    q.setX(Eigen::Quaterniond(estimator.ric[0]).x());
+    q.setY(Eigen::Quaterniond(estimator.ric[0]).y());
+    q.setZ(Eigen::Quaterniond(estimator.ric[0]).z());
 
     transform_cam.transform.rotation.x = q.x();
     transform_cam.transform.rotation.y = q.y();
@@ -426,7 +425,7 @@ void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
     odometry.pose.pose.position.x = estimator.tic[0].x();
     odometry.pose.pose.position.y = estimator.tic[0].y();
     odometry.pose.pose.position.z = estimator.tic[0].z();
-    Quaterniond tmp_q{estimator.ric[0]};
+    Eigen::Quaterniond tmp_q{estimator.ric[0]};
     odometry.pose.pose.orientation.x = tmp_q.x();
     odometry.pose.pose.orientation.y = tmp_q.y();
     odometry.pose.pose.orientation.z = tmp_q.z();
@@ -447,8 +446,8 @@ void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
 //     tf2::Transform transform;
 //     tf2::Quaternion q;
 //     // body frame
-//     Vector3d correct_t;
-//     Quaterniond correct_q;
+//     Eigen::Vector3d correct_t;
+//     Eigen::Quaterniond correct_q;
 //     correct_t = estimator.states_[WINDOW_SIZE].pos_end;
 //     correct_q = estimator.states_[WINDOW_SIZE].rot_end;
 
@@ -467,10 +466,10 @@ void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
 //     transform.setOrigin(tf2::Vector3(estimator.tic[0].x(),
 //                                     estimator.tic[0].y(),
 //                                     estimator.tic[0].z()));
-//     q.setW(Quaterniond(estimator.ric[0]).w());
-//     q.setX(Quaterniond(estimator.ric[0]).x());
-//     q.setY(Quaterniond(estimator.ric[0]).y());
-//     q.setZ(Quaterniond(estimator.ric[0]).z());
+//     q.setW(Eigen::Quaterniond(estimator.ric[0]).w());
+//     q.setX(Eigen::Quaterniond(estimator.ric[0]).x());
+//     q.setY(Eigen::Quaterniond(estimator.ric[0]).y());
+//     q.setZ(Eigen::Quaterniond(estimator.ric[0]).z());
 //     transform.setRotation(q);
 //     // br->sendTransform(tf2::StampedTransform(transform, header.stamp, "body", "camera"));
 //     br->sendTransform(tf2::StampedTransform(transform, header.stamp, "body", "camera"));
@@ -482,7 +481,7 @@ void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
 //     odometry.pose.pose.position.x = estimator.tic[0].x();
 //     odometry.pose.pose.position.y = estimator.tic[0].y();
 //     odometry.pose.pose.position.z = estimator.tic[0].z();
-//     Quaterniond tmp_q{estimator.ric[0]};
+//     Eigen::Quaterniond tmp_q{estimator.ric[0]};
 //     odometry.pose.pose.orientation.x = tmp_q.x();
 //     odometry.pose.pose.orientation.y = tmp_q.y();
 //     odometry.pose.pose.orientation.z = tmp_q.z();
@@ -499,9 +498,9 @@ void pubKeyframe(const Estimator &estimator)
     if (estimator.solver_flag == Estimator::NON_LINEAR && estimator.marginalization_flag == 0)
     {
         int i = WINDOW_SIZE - 2;
-        //Vector3d P = estimator.states_[i].pos_end + estimator.states_[i].rot_end * estimator.tic[0];
-        Vector3d P = estimator.states_[i].pos_end;
-        Quaterniond R = Quaterniond(estimator.states_[i].rot_end);
+        //Eigen::Vector3d P = estimator.states_[i].pos_end + estimator.states_[i].rot_end * estimator.tic[0];
+        Eigen::Vector3d P = estimator.states_[i].pos_end;
+        Eigen::Quaterniond R = Eigen::Quaterniond(estimator.states_[i].rot_end);
 
         nav_msgs::msg::Odometry odometry;
 
@@ -538,8 +537,8 @@ void pubKeyframe(const Estimator &estimator)
             {
 
                 int imu_i = it_per_id.start_frame;
-                Vector3d pts_i = it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth;
-                Vector3d w_pts_i = estimator.states_[imu_i].rot_end * (estimator.ric[0] * pts_i + estimator.tic[0])
+                Eigen::Vector3d pts_i = it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth;
+                Eigen::Vector3d w_pts_i = estimator.states_[imu_i].rot_end * (estimator.ric[0] * pts_i + estimator.tic[0])
                                       + estimator.states_[imu_i].pos_end;
                 geometry_msgs::msg::Point32 p;
                 p.x = w_pts_i(0);

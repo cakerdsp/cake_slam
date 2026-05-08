@@ -20,8 +20,9 @@
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
 #include <opencv2/core/eigen.hpp>
-#include <std_msgs/msg/float32.h>
-#include <std_msgs/msg/header.h>
+#include <rcutils/logging_macros.h>
+#include <std_msgs/msg/float32.hpp>
+#include <std_msgs/msg/header.hpp>
 
 #include <cake_slam/imu_sample.h>
 
@@ -52,7 +53,7 @@
 struct VisionFeaturePacket
 {
     double timestamp = 0.0; ///< Image timestamp [s].
-    map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> features;
+    std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> features;
     std::unordered_map<int, cake_slam::LidarDepthPrior> lidar_depth_priors;
     cake_slam::LioPosePrior lio_pose_prior;
 };
@@ -103,8 +104,8 @@ public:
                     const cv::Mat &_img1 = cv::Mat());
 
     /** @brief Integrate one IMU sample into the current preintegration segment. */
-    void processIMU(double t, double dt, const Vector3d &linear_acceleration,
-                    const Vector3d &angular_velocity);
+    void processIMU(double t, double dt, const Eigen::Vector3d &linear_acceleration,
+                    const Eigen::Vector3d &angular_velocity);
 
     /** @brief Process one visual frame and advance initialization/optimization. */
     void processImage(const VisionFeaturePacket &packet);
@@ -115,7 +116,7 @@ public:
     void clearState();
     bool initialStructure();
     bool visualInitialAlign();
-    bool relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l);
+    bool relativePose(Eigen::Matrix3d &relative_R, Eigen::Vector3d &relative_T, int &l);
     void slideWindow();
     void slideWindowNew();
     void slideWindowOld();
@@ -135,9 +136,9 @@ public:
 
     void predictPtsInNextFrame();
     void outliersRejection(set<int> &removeIndex);
-    double reprojectionError(Matrix3d &Ri, Vector3d &Pi, Matrix3d &rici, Vector3d &tici,
-                             Matrix3d &Rj, Vector3d &Pj, Matrix3d &ricj, Vector3d &ticj,
-                             double depth, Vector3d &uvi, Vector3d &uvj);
+    double reprojectionError(Eigen::Matrix3d &Ri, Eigen::Vector3d &Pi, Eigen::Matrix3d &rici, Eigen::Vector3d &tici,
+                             Eigen::Matrix3d &Rj, Eigen::Vector3d &Pj, Eigen::Matrix3d &ricj, Eigen::Vector3d &ticj,
+                             double depth, Eigen::Vector3d &uvi, Eigen::Vector3d &uvj);
     void updateLatestStates();
     void fastPredictIMU(double t, Eigen::Vector3d linear_acceleration,
                         Eigen::Vector3d angular_velocity);
@@ -171,23 +172,23 @@ public:
 
     SolverFlag solver_flag = INITIAL;
     MarginalizationFlag marginalization_flag = MARGIN_OLD;
-    Vector3d g = Vector3d::Zero();
+    Eigen::Vector3d g = Eigen::Vector3d::Zero();
 
-    Matrix3d ric[2];
-    Vector3d tic[2];
+    Eigen::Matrix3d ric[2];
+    Eigen::Vector3d tic[2];
     StatesGroup states_[WINDOW_SIZE + 1];
     double td = 0.0;
 
-    Matrix3d back_R0, last_R, last_R0;
-    Vector3d back_P0, last_P, last_P0;
+    Eigen::Matrix3d back_R0, last_R, last_R0;
+    Eigen::Vector3d back_P0, last_P, last_P0;
     double Headers[WINDOW_SIZE + 1];
 
     IntegrationBase *pre_integrations[WINDOW_SIZE + 1];
-    Vector3d acc_0, gyr_0;
+    Eigen::Vector3d acc_0, gyr_0;
 
     vector<double> dt_buf[WINDOW_SIZE + 1];
-    vector<Vector3d> linear_acceleration_buf[WINDOW_SIZE + 1];
-    vector<Vector3d> angular_velocity_buf[WINDOW_SIZE + 1];
+    vector<Eigen::Vector3d> linear_acceleration_buf[WINDOW_SIZE + 1];
+    vector<Eigen::Vector3d> angular_velocity_buf[WINDOW_SIZE + 1];
 
     int frame_count = 0;
     int sum_of_outlier = 0;
@@ -205,9 +206,9 @@ public:
     bool is_key = false;
     bool failure_occur = false;
 
-    vector<Vector3d> point_cloud;
-    vector<Vector3d> margin_cloud;
-    vector<Vector3d> key_poses;
+    vector<Eigen::Vector3d> point_cloud;
+    vector<Eigen::Vector3d> margin_cloud;
+    vector<Eigen::Vector3d> key_poses;
     double initial_timestamp = 0.0;
 
     double para_Pose[WINDOW_SIZE + 1][SIZE_POSE];
@@ -223,7 +224,7 @@ public:
     MarginalizationInfo *last_marginalization_info = nullptr;
     vector<double *> last_marginalization_parameter_blocks;
 
-    map<double, ImageFrame> all_image_frame;
+    std::map<double, ImageFrame> all_image_frame;
     IntegrationBase *tmp_pre_integration = nullptr;
     cake_slam::LioPosePrior lio_pose_priors_[WINDOW_SIZE + 1];
     Eigen::Vector3d initP = Eigen::Vector3d::Zero();

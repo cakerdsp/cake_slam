@@ -34,7 +34,7 @@ FeatureManager::FeatureManager()
 }
 
 // 更新 IMU 到相机的旋转外参缓存。
-void FeatureManager::setRic(Matrix3d _ric[])
+void FeatureManager::setRic(Eigen::Matrix3d _ric[])
 {
     for (int i = 0; i < NUM_OF_CAM; i++)
     {
@@ -73,7 +73,7 @@ int FeatureManager::getFeatureCount()
 }
 
 
-bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td)
+bool FeatureManager::addFeatureCheckParallax(int frame_count, const std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td)
 {
     // 本函数承担两件事：
     // 1. 把当前帧的特征观测并入历史轨迹；
@@ -160,14 +160,14 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
 }
 
 // 取出两帧都看见的特征，形成归一化坐标对应对。
-vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_count_l, int frame_count_r)
+vector<pair<Eigen::Vector3d, Eigen::Vector3d>> FeatureManager::getCorresponding(int frame_count_l, int frame_count_r)
 {
-    vector<pair<Vector3d, Vector3d>> corres;
+    vector<pair<Eigen::Vector3d, Eigen::Vector3d>> corres;
     for (auto &it : feature)
     {
         if (it.start_frame <= frame_count_l && it.endFrame() >= frame_count_r)
         {
-            Vector3d a = Vector3d::Zero(), b = Vector3d::Zero();
+            Eigen::Vector3d a = Eigen::Vector3d::Zero(), b = Eigen::Vector3d::Zero();
             int idx_l = frame_count_l - it.start_frame;
             int idx_r = frame_count_r - it.start_frame;
 
@@ -182,7 +182,7 @@ vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_coun
 }
 
 // 把优化变量中的深度回写到特征轨迹中。
-void FeatureManager::setDepth(const VectorXd &x)
+void FeatureManager::setDepth(const Eigen::VectorXd &x)
 {
     int feature_index = -1;
     for (auto &it_per_id : feature)
@@ -222,9 +222,9 @@ void FeatureManager::clearDepth()
 }
 
 // 导出当前全部可优化特征的深度参数向量。
-VectorXd FeatureManager::getDepthVector()
+Eigen::VectorXd FeatureManager::getDepthVector()
 {
-    VectorXd dep_vec(getFeatureCount());
+    Eigen::VectorXd dep_vec(getFeatureCount());
     int feature_index = -1;
     for (auto &it_per_id : feature)
     {
@@ -305,7 +305,7 @@ bool FeatureManager::solvePoseByPnP(Eigen::Matrix3d &R, Eigen::Vector3d &P,
 }
 
 // 当某一帧还没有稳定位姿时，借助已有三维点通过 PnP 进行初始化。
-void FeatureManager::initFramePoseByPnP(int frameCnt, StatesGroup states_[], Vector3d tic[], Matrix3d ric[])
+void FeatureManager::initFramePoseByPnP(int frameCnt, StatesGroup states_[], Eigen::Vector3d tic[], Eigen::Matrix3d ric[])
 {
 
     if(frameCnt > 0)
@@ -319,8 +319,8 @@ void FeatureManager::initFramePoseByPnP(int frameCnt, StatesGroup states_[], Vec
                 int index = frameCnt - it_per_id.start_frame;
                 if((int)it_per_id.feature_per_frame.size() >= index + 1)
                 {
-                    Vector3d ptsInCam = ric[0] * (it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth) + tic[0];
-                    Vector3d ptsInWorld = states_[it_per_id.start_frame].rot_end * ptsInCam + states_[it_per_id.start_frame].pos_end;
+                    Eigen::Vector3d ptsInCam = ric[0] * (it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth) + tic[0];
+                    Eigen::Vector3d ptsInWorld = states_[it_per_id.start_frame].rot_end * ptsInCam + states_[it_per_id.start_frame].pos_end;
 
                     cv::Point3f point3d(ptsInWorld.x(), ptsInWorld.y(), ptsInWorld.z());
                     cv::Point2f point2d(it_per_id.feature_per_frame[index].point.x(), it_per_id.feature_per_frame[index].point.y());
@@ -349,7 +349,7 @@ void FeatureManager::initFramePoseByPnP(int frameCnt, StatesGroup states_[], Vec
 }
 
 // 对当前滑窗内所有满足条件的特征做批量三角化。
-void FeatureManager::triangulate(int frameCnt, StatesGroup states_[], Vector3d tic[], Matrix3d ric[])
+void FeatureManager::triangulate(int frameCnt, StatesGroup states_[], Eigen::Vector3d tic[], Eigen::Matrix3d ric[])
 {
     for (auto &it_per_id : feature)
     {
@@ -392,7 +392,7 @@ void FeatureManager::triangulate(int frameCnt, StatesGroup states_[], Vector3d t
             else
                 it_per_id.estimated_depth = INIT_DEPTH;
             /*
-            Vector3d ptsGt = pts_gt[it_per_id.feature_id];
+            Eigen::Vector3d ptsGt = pts_gt[it_per_id.feature_id];
             printf("stereo %d pts: %f %f %f gt: %f %f %f \n",it_per_id.feature_id, point3d.x(), point3d.y(), point3d.z(),
                                                             ptsGt.x(), ptsGt.y(), ptsGt.z());
             */
@@ -427,7 +427,7 @@ void FeatureManager::triangulate(int frameCnt, StatesGroup states_[], Vector3d t
             else
                 it_per_id.estimated_depth = INIT_DEPTH;
             /*
-            Vector3d ptsGt = pts_gt[it_per_id.feature_id];
+            Eigen::Vector3d ptsGt = pts_gt[it_per_id.feature_id];
             printf("motion  %d pts: %f %f %f gt: %f %f %f \n",it_per_id.feature_id, point3d.x(), point3d.y(), point3d.z(),
                                                             ptsGt.x(), ptsGt.y(), ptsGt.z());
             */
@@ -598,13 +598,13 @@ double FeatureManager::compensatedParallax2(const FeaturePerId &it_per_id, int f
     const FeaturePerFrame &frame_j = it_per_id.feature_per_frame[frame_count - 1 - it_per_id.start_frame];
 
     double ans = 0;
-    Vector3d p_j = frame_j.point;
+    Eigen::Vector3d p_j = frame_j.point;
 
     double u_j = p_j(0);
     double v_j = p_j(1);
 
-    Vector3d p_i = frame_i.point;
-    Vector3d p_i_comp;
+    Eigen::Vector3d p_i = frame_i.point;
+    Eigen::Vector3d p_i_comp;
 
     p_i_comp = p_i;
     double dep_i = p_i(2);

@@ -11,8 +11,6 @@ which is included as part of this source code package.
 */
 
 #include "cake_slam/voxel_map.h"
-using namespace Eigen;
-
 namespace {
 int voxel_plane_id = 0;
 } // namespace
@@ -376,7 +374,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   for (int iterCount = 0; iterCount < config_setting_.max_iterations_; iterCount++)
   {
     double total_residual = 0.0;
-    pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(new pcl::PointCloud<pcl::PointXYZI>);
+    PointCloudXYZI::Ptr world_lidar(new PointCloudXYZI);
     TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, world_lidar);
     M3D rot_var = state_.cov.block<3, 3>(0, 0);
     M3D t_var = state_.cov.block<3, 3>(3, 3);
@@ -410,10 +408,10 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
      * ***/
-    MatrixXd Hsub(effct_feat_num_, 6);
-    MatrixXd Hsub_T_R_inv(6, effct_feat_num_);
-    VectorXd R_inv(effct_feat_num_);
-    VectorXd meas_vec(effct_feat_num_);
+    Eigen::MatrixXd Hsub(effct_feat_num_, 6);
+    Eigen::MatrixXd Hsub_T_R_inv(6, effct_feat_num_);
+    Eigen::VectorXd R_inv(effct_feat_num_);
+    Eigen::VectorXd meas_vec(effct_feat_num_);
     meas_vec.setZero();
     for (int i = 0; i < effct_feat_num_; i++)
     {
@@ -463,12 +461,12 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     EKF_stop_flg = false;
     flg_EKF_converged = false;
     /*** Iterative Kalman Filter Update ***/
-    MatrixXd K(DIM_STATE, effct_feat_num_);
+    Eigen::MatrixXd K(DIM_STATE, effct_feat_num_);
     // auto &&Hsub_T = Hsub.transpose();
     auto &&HTz = Hsub_T_R_inv * meas_vec;
     // fout_dbg<<"HTz: "<<HTz<<endl;
     H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
-    // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
+    // Eigen::EigenSolver<Eigen::Matrix<double, 6, 6>> es(H_T_H.block<6, 6>(0, 0));
     MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H.block<DIM_STATE, DIM_STATE>(0, 0) + state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).inverse()).inverse();
     G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
     auto vec = state_propagat - state_;
@@ -515,21 +513,25 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 }
 
 void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
-                      pcl::PointCloud<pcl::PointXYZI>::Ptr &trans_cloud)
+                      PointCloudXYZI::Ptr &trans_cloud)
 {
   // 按给定位姿把点云从机体系转换到世界系。
-  pcl::PointCloud<pcl::PointXYZI>().swap(*trans_cloud);
+  PointCloudXYZI().swap(*trans_cloud);
   trans_cloud->reserve(input_cloud->size());
   for (size_t i = 0; i < input_cloud->size(); i++)
   {
-    pcl::PointXYZINormal p_c = input_cloud->points[i];
+    PointType p_c = input_cloud->points[i];
     Eigen::Vector3d p(p_c.x, p_c.y, p_c.z);
     p = (rot * (extR_ * p + extT_) + t);
-    pcl::PointXYZI pi;
+    PointType pi;
     pi.x = p(0);
     pi.y = p(1);
     pi.z = p(2);
     pi.intensity = p_c.intensity;
+    pi.normal_x = p_c.normal_x;
+    pi.normal_y = p_c.normal_y;
+    pi.normal_z = p_c.normal_z;
+    pi.curvature = p_c.curvature;
     trans_cloud->points.push_back(pi);
   }
 }

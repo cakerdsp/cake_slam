@@ -13,8 +13,6 @@
 #include "../estimator/parameters.h"
 
 #include <ceres/ceres.h>
-using namespace Eigen;
-
 class IntegrationBase
 {
   public:
@@ -69,11 +67,11 @@ class IntegrationBase
                             Eigen::Vector3d &result_linearized_ba, Eigen::Vector3d &result_linearized_bg, bool update_jacobian)
     {
         //ROS_INFO("midpoint integration");
-        Vector3d un_acc_0 = delta_q * (_acc_0 - linearized_ba);
-        Vector3d un_gyr = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
-        result_delta_q = delta_q * Quaterniond(1, un_gyr(0) * _dt / 2, un_gyr(1) * _dt / 2, un_gyr(2) * _dt / 2);
-        Vector3d un_acc_1 = result_delta_q * (_acc_1 - linearized_ba);
-        Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
+        Eigen::Vector3d un_acc_0 = delta_q * (_acc_0 - linearized_ba);
+        Eigen::Vector3d un_gyr = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
+        result_delta_q = delta_q * Eigen::Quaterniond(1, un_gyr(0) * _dt / 2, un_gyr(1) * _dt / 2, un_gyr(2) * _dt / 2);
+        Eigen::Vector3d un_acc_1 = result_delta_q * (_acc_1 - linearized_ba);
+        Eigen::Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
         result_delta_p = delta_p + delta_v * _dt + 0.5 * un_acc * _dt * _dt;
         result_delta_v = delta_v + un_acc * _dt;
         result_linearized_ba = linearized_ba;
@@ -81,10 +79,10 @@ class IntegrationBase
 
         if(update_jacobian)
         {
-            Vector3d w_x = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
-            Vector3d a_0_x = _acc_0 - linearized_ba;
-            Vector3d a_1_x = _acc_1 - linearized_ba;
-            Matrix3d R_w_x, R_a_0_x, R_a_1_x;
+            Eigen::Vector3d w_x = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
+            Eigen::Vector3d a_0_x = _acc_0 - linearized_ba;
+            Eigen::Vector3d a_1_x = _acc_1 - linearized_ba;
+            Eigen::Matrix3d R_w_x, R_a_0_x, R_a_1_x;
 
             R_w_x<<0, -w_x(2), w_x(1),
                 w_x(2), 0, -w_x(0),
@@ -96,37 +94,37 @@ class IntegrationBase
                 a_1_x(2), 0, -a_1_x(0),
                 -a_1_x(1), a_1_x(0), 0;
 
-            MatrixXd F = MatrixXd::Zero(15, 15);
-            F.block<3, 3>(0, 0) = Matrix3d::Identity();
+            Eigen::MatrixXd F = Eigen::MatrixXd::Zero(15, 15);
+            F.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
             F.block<3, 3>(0, 3) = -0.25 * delta_q.toRotationMatrix() * R_a_0_x * _dt * _dt + 
-                                  -0.25 * result_delta_q.toRotationMatrix() * R_a_1_x * (Matrix3d::Identity() - R_w_x * _dt) * _dt * _dt;
-            F.block<3, 3>(0, 6) = MatrixXd::Identity(3,3) * _dt;
+                                  -0.25 * result_delta_q.toRotationMatrix() * R_a_1_x * (Eigen::Matrix3d::Identity() - R_w_x * _dt) * _dt * _dt;
+            F.block<3, 3>(0, 6) = Eigen::MatrixXd::Identity(3,3) * _dt;
             F.block<3, 3>(0, 9) = -0.25 * (delta_q.toRotationMatrix() + result_delta_q.toRotationMatrix()) * _dt * _dt;
             F.block<3, 3>(0, 12) = -0.25 * result_delta_q.toRotationMatrix() * R_a_1_x * _dt * _dt * -_dt;
-            F.block<3, 3>(3, 3) = Matrix3d::Identity() - R_w_x * _dt;
-            F.block<3, 3>(3, 12) = -1.0 * MatrixXd::Identity(3,3) * _dt;
+            F.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() - R_w_x * _dt;
+            F.block<3, 3>(3, 12) = -1.0 * Eigen::MatrixXd::Identity(3,3) * _dt;
             F.block<3, 3>(6, 3) = -0.5 * delta_q.toRotationMatrix() * R_a_0_x * _dt + 
-                                  -0.5 * result_delta_q.toRotationMatrix() * R_a_1_x * (Matrix3d::Identity() - R_w_x * _dt) * _dt;
-            F.block<3, 3>(6, 6) = Matrix3d::Identity();
+                                  -0.5 * result_delta_q.toRotationMatrix() * R_a_1_x * (Eigen::Matrix3d::Identity() - R_w_x * _dt) * _dt;
+            F.block<3, 3>(6, 6) = Eigen::Matrix3d::Identity();
             F.block<3, 3>(6, 9) = -0.5 * (delta_q.toRotationMatrix() + result_delta_q.toRotationMatrix()) * _dt;
             F.block<3, 3>(6, 12) = -0.5 * result_delta_q.toRotationMatrix() * R_a_1_x * _dt * -_dt;
-            F.block<3, 3>(9, 9) = Matrix3d::Identity();
-            F.block<3, 3>(12, 12) = Matrix3d::Identity();
+            F.block<3, 3>(9, 9) = Eigen::Matrix3d::Identity();
+            F.block<3, 3>(12, 12) = Eigen::Matrix3d::Identity();
             //cout<<"A"<<endl<<A<<endl;
 
-            MatrixXd V = MatrixXd::Zero(15,18);
+            Eigen::MatrixXd V = Eigen::MatrixXd::Zero(15,18);
             V.block<3, 3>(0, 0) =  0.25 * delta_q.toRotationMatrix() * _dt * _dt;
             V.block<3, 3>(0, 3) =  0.25 * -result_delta_q.toRotationMatrix() * R_a_1_x  * _dt * _dt * 0.5 * _dt;
             V.block<3, 3>(0, 6) =  0.25 * result_delta_q.toRotationMatrix() * _dt * _dt;
             V.block<3, 3>(0, 9) =  V.block<3, 3>(0, 3);
-            V.block<3, 3>(3, 3) =  0.5 * MatrixXd::Identity(3,3) * _dt;
-            V.block<3, 3>(3, 9) =  0.5 * MatrixXd::Identity(3,3) * _dt;
+            V.block<3, 3>(3, 3) =  0.5 * Eigen::MatrixXd::Identity(3,3) * _dt;
+            V.block<3, 3>(3, 9) =  0.5 * Eigen::MatrixXd::Identity(3,3) * _dt;
             V.block<3, 3>(6, 0) =  0.5 * delta_q.toRotationMatrix() * _dt;
             V.block<3, 3>(6, 3) =  0.5 * -result_delta_q.toRotationMatrix() * R_a_1_x  * _dt * 0.5 * _dt;
             V.block<3, 3>(6, 6) =  0.5 * result_delta_q.toRotationMatrix() * _dt;
             V.block<3, 3>(6, 9) =  V.block<3, 3>(6, 3);
-            V.block<3, 3>(9, 12) = MatrixXd::Identity(3,3) * _dt;
-            V.block<3, 3>(12, 15) = MatrixXd::Identity(3,3) * _dt;
+            V.block<3, 3>(9, 12) = Eigen::MatrixXd::Identity(3,3) * _dt;
+            V.block<3, 3>(12, 15) = Eigen::MatrixXd::Identity(3,3) * _dt;
 
             //step_jacobian = F;
             //step_V = V;
@@ -141,11 +139,11 @@ class IntegrationBase
         dt = _dt;
         acc_1 = _acc_1;
         gyr_1 = _gyr_1;
-        Vector3d result_delta_p;
-        Quaterniond result_delta_q;
-        Vector3d result_delta_v;
-        Vector3d result_linearized_ba;
-        Vector3d result_linearized_bg;
+        Eigen::Vector3d result_delta_p;
+        Eigen::Quaterniond result_delta_q;
+        Eigen::Vector3d result_delta_v;
+        Eigen::Vector3d result_linearized_ba;
+        Eigen::Vector3d result_linearized_bg;
 
         midPointIntegration(_dt, acc_0, gyr_0, _acc_1, _gyr_1, delta_p, delta_q, delta_v,
                             linearized_ba, linearized_bg,
@@ -227,18 +225,18 @@ class IntegrationBase
     {
         result_delta_p = delta_p + delta_v * _dt + 0.5 * (delta_q * (_acc_1 - linearized_ba)) * _dt * _dt;
         result_delta_v = delta_v + delta_q * (_acc_1 - linearized_ba) * _dt;
-        Vector3d omg = _gyr_1 - linearized_bg;
+        Eigen::Vector3d omg = _gyr_1 - linearized_bg;
         omg = omg * _dt / 2;
-        Quaterniond dR(1, omg(0), omg(1), omg(2));
+        Eigen::Quaterniond dR(1, omg(0), omg(1), omg(2));
         result_delta_q = (delta_q * dR);   
         result_linearized_ba = linearized_ba;
         result_linearized_bg = linearized_bg;         
 
         if(update_jacobian)
         {
-            Vector3d w_x = _gyr_1 - linearized_bg;
-            Vector3d a_x = _acc_1 - linearized_ba;
-            Matrix3d R_w_x, R_a_x;
+            Eigen::Vector3d w_x = _gyr_1 - linearized_bg;
+            Eigen::Vector3d a_x = _acc_1 - linearized_ba;
+            Eigen::Matrix3d R_w_x, R_a_x;
 
             R_w_x<<0, -w_x(2), w_x(1),
                 w_x(2), 0, -w_x(0),
@@ -247,23 +245,23 @@ class IntegrationBase
                 a_x(2), 0, -a_x(0),
                 -a_x(1), a_x(0), 0;
 
-            MatrixXd A = MatrixXd::Zero(15, 15);
+            Eigen::MatrixXd A = Eigen::MatrixXd::Zero(15, 15);
             // one step euler 0.5
             A.block<3, 3>(0, 3) = 0.5 * (-1 * delta_q.toRotationMatrix()) * R_a_x * _dt;
-            A.block<3, 3>(0, 6) = MatrixXd::Identity(3,3);
+            A.block<3, 3>(0, 6) = Eigen::MatrixXd::Identity(3,3);
             A.block<3, 3>(0, 9) = 0.5 * (-1 * delta_q.toRotationMatrix()) * _dt;
             A.block<3, 3>(3, 3) = -R_w_x;
-            A.block<3, 3>(3, 12) = -1 * MatrixXd::Identity(3,3);
+            A.block<3, 3>(3, 12) = -1 * Eigen::MatrixXd::Identity(3,3);
             A.block<3, 3>(6, 3) = (-1 * delta_q.toRotationMatrix()) * R_a_x;
             A.block<3, 3>(6, 9) = (-1 * delta_q.toRotationMatrix());
             //cout<<"A"<<endl<<A<<endl;
 
-            MatrixXd U = MatrixXd::Zero(15,12);
+            Eigen::MatrixXd U = Eigen::MatrixXd::Zero(15,12);
             U.block<3, 3>(0, 0) =  0.5 * delta_q.toRotationMatrix() * _dt;
-            U.block<3, 3>(3, 3) =  MatrixXd::Identity(3,3);
+            U.block<3, 3>(3, 3) =  Eigen::MatrixXd::Identity(3,3);
             U.block<3, 3>(6, 0) =  delta_q.toRotationMatrix();
-            U.block<3, 3>(9, 6) = MatrixXd::Identity(3,3);
-            U.block<3, 3>(12, 9) = MatrixXd::Identity(3,3);
+            U.block<3, 3>(9, 6) = Eigen::MatrixXd::Identity(3,3);
+            U.block<3, 3>(12, 9) = Eigen::MatrixXd::Identity(3,3);
 
             // put outside
             Eigen::Matrix<double, 12, 12> noise = Eigen::Matrix<double, 12, 12>::Zero();
@@ -273,8 +271,8 @@ class IntegrationBase
             noise.block<3, 3>(9, 9) =  (GYR_W * GYR_W) * Eigen::Matrix3d::Identity();
 
             //write F directly
-            MatrixXd F, V;
-            F = (MatrixXd::Identity(15,15) + _dt * A);
+            Eigen::MatrixXd F, V;
+            F = (Eigen::MatrixXd::Identity(15,15) + _dt * A);
             V = _dt * U;
             step_jacobian = F;
             step_V = V;
@@ -290,23 +288,23 @@ class IntegrationBase
                             const Eigen::Vector3d &delta_p, const Eigen::Quaterniond &delta_q, const Eigen::Vector3d &delta_v,
                             const Eigen::Vector3d &linearized_ba, const Eigen::Vector3d &linearized_bg)
     {
-        Vector3d result_delta_p;
-        Quaterniond result_delta_q;
-        Vector3d result_delta_v;
-        Vector3d result_linearized_ba;
-        Vector3d result_linearized_bg;
+        Eigen::Vector3d result_delta_p;
+        Eigen::Quaterniond result_delta_q;
+        Eigen::Vector3d result_delta_v;
+        Eigen::Vector3d result_linearized_ba;
+        Eigen::Vector3d result_linearized_bg;
         midPointIntegration(_dt, _acc_0, _gyr_0, _acc_1, _gyr_1, delta_p, delta_q, delta_v,
                             linearized_ba, linearized_bg,
                             result_delta_p, result_delta_q, result_delta_v,
                             result_linearized_ba, result_linearized_bg, 0);
 
-        Vector3d turb_delta_p;
-        Quaterniond turb_delta_q;
-        Vector3d turb_delta_v;
-        Vector3d turb_linearized_ba;
-        Vector3d turb_linearized_bg;
+        Eigen::Vector3d turb_delta_p;
+        Eigen::Quaterniond turb_delta_q;
+        Eigen::Vector3d turb_delta_v;
+        Eigen::Vector3d turb_linearized_ba;
+        Eigen::Vector3d turb_linearized_bg;
 
-        Vector3d turb(0.0001, -0.003, 0.003);
+        Eigen::Vector3d turb(0.0001, -0.003, 0.003);
 
         midPointIntegration(_dt, _acc_0, _gyr_0, _acc_1, _gyr_1, delta_p + turb, delta_q, delta_v,
                             linearized_ba, linearized_bg,
@@ -324,7 +322,7 @@ class IntegrationBase
         cout << "bg diff " << (turb_linearized_bg - result_linearized_bg).transpose() << endl;
         cout << "bg jacob diff " << (step_jacobian.block<3, 3>(12, 0) * turb).transpose() << endl;
 
-        midPointIntegration(_dt, _acc_0, _gyr_0, _acc_1, _gyr_1, delta_p, delta_q * Quaterniond(1, turb(0) / 2, turb(1) / 2, turb(2) / 2), delta_v,
+        midPointIntegration(_dt, _acc_0, _gyr_0, _acc_1, _gyr_1, delta_p, delta_q * Eigen::Quaterniond(1, turb(0) / 2, turb(1) / 2, turb(2) / 2), delta_v,
                             linearized_ba, linearized_bg,
                             turb_delta_p, turb_delta_q, turb_delta_v,
                             turb_linearized_ba, turb_linearized_bg, 0);

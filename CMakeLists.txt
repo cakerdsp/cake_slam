@@ -32,6 +32,22 @@ find_package(camera_models REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(livox_ros_driver2 REQUIRED)
+find_package(OpenMP REQUIRED)
+
+if(NOT TARGET QHULL::QHULL)
+    # 如果系统找到了 Qhull 但没定义这个别名，我们手动建立链接
+    add_library(QHULL::QHULL UNKNOWN IMPORTED)
+    set_target_properties(QHULL::QHULL PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${QHULL_INCLUDE_DIRS}"
+        IMPORTED_LOCATION "${QHULL_LIBRARIES}"
+    )
+    # 针对 Ubuntu 22.04 的特殊处理：如果上面的变量为空，尝试直接链接系统库
+    if("${QHULL_LIBRARIES}" STREQUAL "")
+        set_target_properties(QHULL::QHULL PROPERTIES
+            IMPORTED_LOCATION "/usr/lib/x86_64-linux-gnu/libqhull_r.so"
+        )
+    endif()
+endif()
 
 include_directories(
   include
@@ -92,10 +108,17 @@ ament_target_dependencies(cake_slam_core
   Sophus
   livox_ros_driver2
 )
-target_link_libraries(cake_slam_core ${PCL_LIBRARIES} ${CERES_LIBRARIES} ${OpenCV_LIBS})
+target_link_libraries(cake_slam_core
+  PUBLIC
+    OpenMP::OpenMP_CXX
+  PRIVATE
+    ${PCL_LIBRARIES}
+    ${CERES_LIBRARIES}
+    ${OpenCV_LIBS}
+)
 
 if(TARGET Sophus::Sophus)
-  target_link_libraries(cake_slam_core Sophus::Sophus)
+  target_link_libraries(cake_slam_core PUBLIC Sophus::Sophus)
 endif()
 
 add_executable(cake_slam_node src/slam_node.cpp)

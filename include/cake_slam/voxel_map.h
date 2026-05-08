@@ -281,7 +281,7 @@ public:
   void StateEstimation(StatesGroup &state_propagat);
   // 将机体系点云变换到世界系。
   void TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
-                      pcl::PointCloud<pcl::PointXYZI>::Ptr &trans_cloud);
+                      PointCloudXYZI::Ptr &trans_cloud);
 
   // 用当前帧点云构建初始体素地图。
   void BuildVoxelMap();

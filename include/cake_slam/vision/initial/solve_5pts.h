@@ -17,8 +17,7 @@ using namespace std;
 #include <opencv2/opencv.hpp>
 //#include <opencv2/core/eigen.hpp>
 #include <eigen3/Eigen/Dense>
-using namespace Eigen;
-
+#include <rcutils/logging_macros.h>
 // #include <ros/console.h>
 
 
@@ -31,7 +30,7 @@ class MotionEstimator
 {
   public:
 
-    bool solveRelativeRT(const vector<pair<Vector3d, Vector3d>> &corres, Matrix3d &R, Vector3d &T);
+    bool solveRelativeRT(const vector<pair<Eigen::Vector3d, Eigen::Vector3d>> &corres, Eigen::Matrix3d &R, Eigen::Vector3d &T);
 
   private:
     double testTriangulation(const vector<cv::Point2f> &l,

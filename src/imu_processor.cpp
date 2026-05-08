@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "cake_slam/imu_processor.h"
+#include <omp.h>
 #include <rcpputils/asserts.hpp>
 
 // 比较逐点时间，保证去畸变前能够按扫描内时间顺序处理点云。

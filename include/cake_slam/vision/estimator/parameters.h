@@ -10,6 +10,7 @@
 #pragma once
 
 #include <rclcpp/rclcpp.hpp>
+#include <rcutils/logging_macros.h>
 #include <vector>
 #include <eigen3/Eigen/Dense>
 #include "../utility/utility.h"
@@ -65,7 +66,7 @@ extern int STEREO;
 extern int USE_IMU;
 extern int MULTIPLE_THREAD;
 // pts_gt for debug purpose;
-extern map<int, Eigen::Vector3d> pts_gt;
+extern std::map<int, Eigen::Vector3d> pts_gt;
 
 extern std::string IMAGE0_TOPIC, IMAGE1_TOPIC;
 extern std::string FISHEYE_MASK;

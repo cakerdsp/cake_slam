@@ -18,7 +18,7 @@ using namespace std;
 #include <opencv2/opencv.hpp>
 
 #include <eigen3/Eigen/Dense>
-using namespace Eigen;
+#include <rcutils/logging_macros.h>
 // #include <ros/console.h>
 
 
@@ -32,9 +32,9 @@ class InitialEXRotation
 {
 public:
 	InitialEXRotation();
-    bool CalibrationExRotation(vector<pair<Vector3d, Vector3d>> corres, Quaterniond delta_q_imu, Matrix3d &calib_ric_result);
+    bool CalibrationExRotation(vector<pair<Eigen::Vector3d, Eigen::Vector3d>> corres, Eigen::Quaterniond delta_q_imu, Eigen::Matrix3d &calib_ric_result);
 private:
-	Matrix3d solveRelativeR(const vector<pair<Vector3d, Vector3d>> &corres);
+	Eigen::Matrix3d solveRelativeR(const vector<pair<Eigen::Vector3d, Eigen::Vector3d>> &corres);
 
     double testTriangulation(const vector<cv::Point2f> &l,
                              const vector<cv::Point2f> &r,
@@ -44,10 +44,10 @@ private:
                     cv::Mat_<double> &t1, cv::Mat_<double> &t2);
     int frame_count;
 
-    vector< Matrix3d > Rc;
-    vector< Matrix3d > Rimu;
-    vector< Matrix3d > Rc_g;
-    Matrix3d ric;
+    vector< Eigen::Matrix3d > Rc;
+    vector< Eigen::Matrix3d > Rimu;
+    vector< Eigen::Matrix3d > Rc_g;
+    Eigen::Matrix3d ric;
 };
 
 

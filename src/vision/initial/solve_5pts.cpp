@@ -202,7 +202,7 @@ namespace cv {
 
 
 // 从两帧归一化点对应中恢复相对旋转和平移方向。
-bool MotionEstimator::solveRelativeRT(const vector<pair<Vector3d, Vector3d>> &corres, Matrix3d &Rotation, Vector3d &Translation)
+bool MotionEstimator::solveRelativeRT(const vector<pair<Eigen::Vector3d, Eigen::Vector3d>> &corres, Eigen::Matrix3d &Rotation, Eigen::Vector3d &Translation)
 {
     (void)corres;
     Rotation.setIdentity();

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <eigen3/Eigen/Dense>
+#include <rcutils/logging_macros.h>
 #include <rcpputils/asserts.hpp>
 
 #include "cake_slam/common_lib.h"
@@ -26,8 +27,6 @@
 #include "parameters.h"
 
 using namespace std;
-using namespace Eigen;
-
 #define ROS_INFO RCUTILS_LOG_INFO
 #define ROS_WARN RCUTILS_LOG_WARN
 #define ROS_DEBUG RCUTILS_LOG_DEBUG
@@ -70,9 +69,9 @@ public:
     }
 
     double cur_td = 0.0;              ///< Observation time delay [s].
-    Vector3d point, pointRight;       ///< Normalized camera coordinates.
-    Vector2d uv, uvRight;             ///< Pixel coordinates [pixel].
-    Vector2d velocity, velocityRight; ///< Pixel velocity [pixel/s].
+    Eigen::Vector3d point, pointRight;       ///< Normalized camera coordinates.
+    Eigen::Vector2d uv, uvRight;             ///< Pixel coordinates [pixel].
+    Eigen::Vector2d velocity, velocityRight; ///< Pixel velocity [pixel/s].
     bool is_stereo = false;
 };
 
@@ -118,7 +117,7 @@ public:
     FeatureManager();
 
     /** @brief Set camera-to-IMU rotations R_I_C for all cameras. */
-    void setRic(Matrix3d _ric[]);
+    void setRic(Eigen::Matrix3d _ric[]);
 
     /** @brief Clear all tracked features and pending priors. */
     void clearState();
@@ -129,20 +128,20 @@ public:
 
     int getFeatureCount();
     bool addFeatureCheckParallax(int frame_count,
-                                 const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image,
+                                 const std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image,
                                  double td);
-    vector<pair<Vector3d, Vector3d>> getCorresponding(int frame_count_l, int frame_count_r);
-    void setDepth(const VectorXd &x);
+    vector<pair<Eigen::Vector3d, Eigen::Vector3d>> getCorresponding(int frame_count_l, int frame_count_r);
+    void setDepth(const Eigen::VectorXd &x);
     void removeFailures();
     void clearDepth();
-    VectorXd getDepthVector();
-    void triangulate(int frameCnt, StatesGroup states_[], Vector3d tic[], Matrix3d ric[]);
+    Eigen::VectorXd getDepthVector();
+    void triangulate(int frameCnt, StatesGroup states_[], Eigen::Vector3d tic[], Eigen::Matrix3d ric[]);
     void triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0,
                           Eigen::Matrix<double, 3, 4> &Pose1,
                           Eigen::Vector2d &point0,
                           Eigen::Vector2d &point1,
                           Eigen::Vector3d &point_3d);
-    void initFramePoseByPnP(int frameCnt, StatesGroup states_[], Vector3d tic[], Matrix3d ric[]);
+    void initFramePoseByPnP(int frameCnt, StatesGroup states_[], Eigen::Vector3d tic[], Eigen::Matrix3d ric[]);
     bool solvePoseByPnP(Eigen::Matrix3d &R_initial, Eigen::Vector3d &P_initial,
                         vector<cv::Point2f> &pts2D, vector<cv::Point3f> &pts3D);
     void removeBackShiftDepth(Eigen::Matrix3d marg_R, Eigen::Vector3d marg_P,
@@ -160,7 +159,7 @@ public:
 private:
     double compensatedParallax2(const FeaturePerId &it_per_id, int frame_count);
 
-    Matrix3d ric[2];
+    Eigen::Matrix3d ric[2];
     std::unordered_map<int, cake_slam::LidarDepthPrior> pending_lidar_depth_priors_;
 };
 

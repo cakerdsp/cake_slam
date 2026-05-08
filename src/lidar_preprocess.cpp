@@ -12,6 +12,8 @@ which is included as part of this source code package.
 
 #include "cake_slam/lidar_preprocess.h"
 
+#include <omp.h>
+
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
 

@@ -9,6 +9,7 @@
 
 #pragma once
 #include <rcpputils/asserts.hpp>
+#include <rcutils/logging_macros.h>
 #include <iostream>
 #include <eigen3/Eigen/Dense>
 
