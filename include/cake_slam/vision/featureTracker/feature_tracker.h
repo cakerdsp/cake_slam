@@ -119,6 +119,9 @@ public:
     double distance(cv::Point2f &pt1, cv::Point2f &pt2);
     void removeOutliers(set<int> &removePtsIds);
     cv::Mat getTrackImage();
+    cv::Mat getFeatureDebugImage() const;
+    int getLastFeatureCount() const;
+    int getLastDepthFeatureCount() const;
 
     /** @brief Check image border and valid-domain mask membership. */
     bool inBorder(const cv::Point2f &pt);
@@ -132,9 +135,13 @@ public:
     /** @brief Remove LiDAR prior metadata for tracks that disappeared. */
     void pruneLidarTracks();
 
+    /** @brief Draw feature/depth association diagnostics for the latest frame. */
+    void drawFeatureDebugImage(const std::map<int, cv::Point2f> &previous_points);
+
     int row = 0;
     int col = 0;
     cv::Mat imTrack;
+    cv::Mat feature_debug_image;
     cv::Mat mask;
     cv::Mat fisheye_mask;
     cv::Mat prev_img, cur_img;
@@ -155,6 +162,8 @@ public:
     bool stereo_cam = false;
     int n_id = 0;
     bool hasPrediction = false;
+    int last_feature_count = 0;
+    int last_depth_feature_count = 0;
 
     vector<cake_slam::LidarVisualCandidate> pending_lidar_candidates;
     std::unordered_map<int, cake_slam::LidarDepthPrior> active_lidar_priors;

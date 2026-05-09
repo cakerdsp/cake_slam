@@ -13,6 +13,7 @@
 #include <cv_bridge/cv_bridge.h>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <image_transport/image_transport.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -116,6 +117,7 @@ private:
   void publishTf(double stamp);
   void publishClouds(double stamp);
   void publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar);
+  void publishFeatureImage(double stamp);
   void publishVisualSubmap(double stamp);
   void imuPropagationTimer();
   void propagateImuOnce(StatesGroup &state, double dt, const Eigen::Vector3d &acc,
@@ -198,6 +200,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_colored_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_visual_submap_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_effect_;
+  image_transport::Publisher pub_feature_image_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   rclcpp::TimerBase::SharedPtr imu_prop_timer_;
 };

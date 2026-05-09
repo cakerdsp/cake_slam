@@ -493,6 +493,8 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     if(SHOW_TRACK)
         drawTrack(cur_img, rightImg, ids, cur_pts, cur_right_pts, prevLeftPtsMap);
 
+    drawFeatureDebugImage(prevLeftPtsMap);
+
     prev_img = cur_img;
     prev_pts = cur_pts;
     prev_un_pts = cur_un_pts;
@@ -643,6 +645,61 @@ void FeatureTracker::pruneLidarTracks()
         else
             ++it;
     }
+}
+
+void FeatureTracker::drawFeatureDebugImage(const std::map<int, cv::Point2f> &previous_points)
+{
+    if (cur_img.empty())
+    {
+        feature_debug_image.release();
+        last_feature_count = 0;
+        last_depth_feature_count = 0;
+        return;
+    }
+
+    if (cur_img.channels() == 1)
+        cv::cvtColor(cur_img, feature_debug_image, cv::COLOR_GRAY2BGR);
+    else if (cur_img.channels() == 3)
+        feature_debug_image = cur_img.clone();
+    else
+        cv::cvtColor(cur_img, feature_debug_image, cv::COLOR_GRAY2BGR);
+
+    last_feature_count = static_cast<int>(cur_pts.size());
+    last_depth_feature_count = 0;
+
+    for (size_t i = 0; i < cur_pts.size() && i < ids.size(); ++i)
+    {
+        const int id = ids[i];
+        const auto prior_it = active_lidar_priors.find(id);
+        const bool has_lidar_depth =
+            prior_it != active_lidar_priors.end() && prior_it->second.valid;
+        if (has_lidar_depth)
+            last_depth_feature_count++;
+
+        const auto prev_it = previous_points.find(id);
+        if (prev_it != previous_points.end())
+        {
+            cv::line(feature_debug_image, prev_it->second, cur_pts[i],
+                     cv::Scalar(255, 200, 0), 1, cv::LINE_AA);
+        }
+
+        if (has_lidar_depth)
+            cv::circle(feature_debug_image, cur_pts[i], 3, cv::Scalar(0, 255, 0), -1, cv::LINE_AA);
+        else
+            cv::circle(feature_debug_image, cur_pts[i], 3, cv::Scalar(0, 0, 255), 1, cv::LINE_AA);
+    }
+
+    const double ratio = last_feature_count > 0
+                             ? static_cast<double>(last_depth_feature_count) / last_feature_count
+                             : 0.0;
+    char text[128];
+    std::snprintf(text, sizeof(text), "features: %d  lidar-depth: %d (%.1f%%)",
+                  last_feature_count, last_depth_feature_count, ratio * 100.0);
+    cv::rectangle(feature_debug_image, cv::Point(0, 0), cv::Point(430, 28),
+                  cv::Scalar(0, 0, 0), -1);
+    cv::putText(feature_debug_image, text, cv::Point(8, 20),
+                cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255, 255, 255), 1,
+                cv::LINE_AA);
 }
 
 // 读取所有相机模型文件。
@@ -871,6 +928,21 @@ void FeatureTracker::removeOutliers(set<int> &removePtsIds)
 cv::Mat FeatureTracker::getTrackImage()
 {
     return imTrack;
+}
+
+cv::Mat FeatureTracker::getFeatureDebugImage() const
+{
+    return feature_debug_image.clone();
+}
+
+int FeatureTracker::getLastFeatureCount() const
+{
+    return last_feature_count;
+}
+
+int FeatureTracker::getLastDepthFeatureCount() const
+{
+    return last_depth_feature_count;
 }
 
 const cv::Mat &FeatureTracker::validMask() const

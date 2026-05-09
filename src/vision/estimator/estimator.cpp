@@ -1589,6 +1589,66 @@ const cv::Mat &Estimator::getUndistortedValidMask() const
     return featureTracker.validMask();
 }
 
+cv::Mat Estimator::getFeatureDebugImage() const
+{
+    return featureTracker.getFeatureDebugImage();
+}
+
+int Estimator::getLastTrackedFeatureCount() const
+{
+    return featureTracker.getLastFeatureCount();
+}
+
+int Estimator::getLastDepthFeatureCount() const
+{
+    return featureTracker.getLastDepthFeatureCount();
+}
+
+bool Estimator::buildVinsFallbackInitialLandmarksDeadCode(std::map<int, Eigen::Vector3d> &sfm_tracked_points)
+{
+    // Dead-code fallback hook: keep the original VINS-Fusion GlobalSFM landmark
+    // bootstrap available for a future LiDAR-degeneration policy, without
+    // changing the active LIO-prior initialization path.
+    sfm_tracked_points.clear();
+    if (frame_count < WINDOW_SIZE)
+        return false;
+
+    std::vector<Eigen::Quaterniond> Q(frame_count + 1);
+    std::vector<Eigen::Vector3d> T(frame_count + 1);
+    std::vector<SFMFeature> sfm_f;
+    sfm_f.reserve(f_manager.feature.size());
+
+    for (auto &it_per_id : f_manager.feature)
+    {
+        int imu_j = it_per_id.start_frame - 1;
+        SFMFeature tmp_feature;
+        tmp_feature.state = false;
+        tmp_feature.id = it_per_id.feature_id;
+        for (auto &it_per_frame : it_per_id.feature_per_frame)
+        {
+            imu_j++;
+            Eigen::Vector3d pts_j = it_per_frame.point;
+            tmp_feature.observation.push_back(
+                make_pair(imu_j, Eigen::Vector2d{pts_j.x(), pts_j.y()}));
+        }
+        sfm_f.push_back(tmp_feature);
+    }
+
+    Eigen::Matrix3d relative_R;
+    Eigen::Vector3d relative_T;
+    int l = 0;
+    if (!relativePose(relative_R, relative_T, l))
+        return false;
+
+    GlobalSFM sfm;
+    if (!sfm.construct(frame_count + 1, Q.data(), T.data(), l,
+                       relative_R, relative_T, sfm_f, sfm_tracked_points))
+    {
+        return false;
+    }
+    return !sfm_tracked_points.empty();
+}
+
 // 基于当前滑窗中的运动趋势，为前端预测下一帧特征位置。
 void Estimator::predictPtsInNextFrame()
 {

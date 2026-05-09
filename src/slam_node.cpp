@@ -8,6 +8,7 @@
 
 #include <opencv2/imgproc.hpp>
 #include <sensor_msgs/image_encodings.hpp>
+#include <std_msgs/msg/header.hpp>
 
 #include "cake_slam/vision/estimator/parameters.h"
 
@@ -148,6 +149,7 @@ void SlamNode::createPublishers()
   pub_path_ = create_publisher<nav_msgs::msg::Path>("/path", 10);
   pub_mavros_pose_ = create_publisher<geometry_msgs::msg::PoseStamped>("/mavros/vision_pose/pose", 10);
   pub_imu_prop_odom_ = create_publisher<nav_msgs::msg::Odometry>("/cake_slam/imu_propagate", 1000);
+  pub_feature_image_ = image_transport::create_publisher(this, "/cake_slam/feature_image");
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 }
 
@@ -624,11 +626,28 @@ void SlamNode::handleVIO()
     }
     vio_->inputImage(measure.vio_time, measure.img,
                      pending_lidar_visual_candidates_, pending_lio_pose_prior_);
+    publishFeatureImage(measure.vio_time);
     pending_lidar_visual_candidates_.clear();
     pending_lio_pose_prior_ = LioPosePrior();
     last_vio_update_time_ = measure.vio_time;
     if (vio_->solver_flag == Estimator::NON_LINEAR) {
-      state_ = vio_->getLatestState();
+      const StatesGroup lio_state_before_vio = state_;
+      const StatesGroup vio_state = vio_->getLatestState();
+      const Eigen::Matrix3d dR = lio_state_before_vio.rot_end.transpose() * vio_state.rot_end;
+      const double cos_angle = std::clamp((dR.trace() - 1.0) * 0.5, -1.0, 1.0);
+      constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
+      const double rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
+      const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
+      RCLCPP_INFO_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "VIO feedback: stamp=%.6f pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d "
+          "lio_pos=(%.3f %.3f %.3f) vio_pos=(%.3f %.3f %.3f)",
+          measure.vio_time, pos_delta, rot_delta_deg, vio_->getLastTrackedFeatureCount(),
+          vio_->getLastDepthFeatureCount(), lio_state_before_vio.pos_end.x(),
+          lio_state_before_vio.pos_end.y(), lio_state_before_vio.pos_end.z(),
+          vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
+
+      state_ = vio_state;
       lio_.SetState(state_);
       latest_ekf_state_ = state_;
       latest_ekf_time_ = measure.vio_time;
@@ -1133,6 +1152,34 @@ void SlamNode::publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &clou
   msg.header.stamp = secToStamp(stamp);
   msg.header.frame_id = config_.frame.world;
   pub_cloud_colored_->publish(msg);
+}
+
+void SlamNode::publishFeatureImage(double stamp)
+{
+  if (!vio_) {
+    return;
+  }
+
+  cv::Mat debug_image = vio_->getFeatureDebugImage();
+  if (debug_image.empty()) {
+    return;
+  }
+  if (debug_image.channels() == 1) {
+    cv::cvtColor(debug_image, debug_image, cv::COLOR_GRAY2BGR);
+  }
+
+  std_msgs::msg::Header header;
+  header.stamp = secToStamp(stamp);
+  header.frame_id = config_.frame.camera;
+  auto msg = cv_bridge::CvImage(header, sensor_msgs::image_encodings::BGR8, debug_image).toImageMsg();
+  pub_feature_image_.publish(*msg);
+
+  const int total = vio_->getLastTrackedFeatureCount();
+  const int with_depth = vio_->getLastDepthFeatureCount();
+  const double ratio = total > 0 ? static_cast<double>(with_depth) / total : 0.0;
+  RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                       "Feature image: stamp=%.6f tracked=%d lidar_depth=%d depth_ratio=%.3f size=%dx%d",
+                       stamp, total, with_depth, ratio, debug_image.cols, debug_image.rows);
 }
 
 void SlamNode::publishVisualSubmap(double stamp)
