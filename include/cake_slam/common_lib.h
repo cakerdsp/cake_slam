@@ -50,7 +50,8 @@ enum SLAM_MODE
 {
   ONLY_LO = 0,
   ONLY_LIO = 1,
-  LIVO = 2
+  LIVO = 2,
+  ONLY_VIO = 3
 };
 enum EKF_STATE
 {

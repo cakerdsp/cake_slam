@@ -179,7 +179,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img,
         featureFrame = featureTracker.trackImage(t, _img);
     else
         featureFrame = featureTracker.trackImage(t, _img, _img1);
-    //printf("featureTracker time: %f\n", featureTrackerTime.toc());
+    const double feature_tracker_ms = featureTrackerTime.toc();
 
     if (SHOW_TRACK)
     {
@@ -187,30 +187,30 @@ void Estimator::inputImage(double t, const cv::Mat &_img,
         pubTrackImage(imgTrack, t);
     }
 
+    VisionFeaturePacket packet;
+    packet.timestamp = t;
+    packet.features = featureFrame;
+    packet.lidar_depth_priors = featureTracker.takeLidarDepthPriors();
+    packet.lio_pose_prior = lio_pose_prior;
+
+    ROS_INFO("[VIO frontend time] stamp=%.6f track=%.3f ms features=%zu lidar_depth=%zu lidar_candidates=%zu threaded=%d",
+             t, feature_tracker_ms, featureFrame.size(), packet.lidar_depth_priors.size(),
+             lidar_candidates.size(), MULTIPLE_THREAD);
+
     if(MULTIPLE_THREAD)
     {
-        VisionFeaturePacket packet;
-        packet.timestamp = t;
-        packet.features = featureFrame;
-        packet.lidar_depth_priors = featureTracker.takeLidarDepthPriors();
-        packet.lio_pose_prior = lio_pose_prior;
         mBuf.lock();
         featureBuf.push(packet);
         mBuf.unlock();
     }
     else
     {
-        VisionFeaturePacket packet;
-        packet.timestamp = t;
-        packet.features = featureFrame;
-        packet.lidar_depth_priors = featureTracker.takeLidarDepthPriors();
-        packet.lio_pose_prior = lio_pose_prior;
         mBuf.lock();
         featureBuf.push(packet);
         mBuf.unlock();
         TicToc processTime;
         processMeasurements();
-        printf("process time: %f\n", processTime.toc());
+        ROS_INFO("[VIO process time] stamp=%.6f process=%.3f ms", t, processTime.toc());
     }
 }
 
@@ -332,7 +332,9 @@ void Estimator::processMeasurements()
             // cout << "4" << endl;
 
             mProcess.lock();
+            TicToc processImageTime;
             processImage(feature);
+            const double process_image_ms = processImageTime.toc();
             prevTime = curTime;
 
             // cout << "5" << endl;
@@ -359,6 +361,9 @@ void Estimator::processMeasurements()
             // cout << "5-5" << endl;
             pubTF(*this, header);
             // cout << "5-6" << endl;
+            ROS_INFO("[VIO backend time] stamp=%.6f image_process=%.3f ms imu=%zu solver_flag=%d frame_count=%d",
+                     feature.timestamp, process_image_ms, imuVector.size(),
+                     static_cast<int>(solver_flag), frame_count);
             mProcess.unlock();
 
 
@@ -654,7 +659,7 @@ bool Estimator::initialStructure()
     //check imu observibility
     {
         std::map<double, ImageFrame>::iterator frame_it;
-        Eigen::Vector3d sum_g;
+        Eigen::Vector3d sum_g = Eigen::Vector3d::Zero();
         for (frame_it = all_image_frame.begin(), frame_it++; frame_it != all_image_frame.end(); frame_it++)
         {
             double dt = frame_it->second.pre_integration->sum_dt;

@@ -204,11 +204,45 @@ namespace cv {
 // 从两帧归一化点对应中恢复相对旋转和平移方向。
 bool MotionEstimator::solveRelativeRT(const vector<pair<Eigen::Vector3d, Eigen::Vector3d>> &corres, Eigen::Matrix3d &Rotation, Eigen::Vector3d &Translation)
 {
-    (void)corres;
-    Rotation.setIdentity();
-    Translation.setZero();
-    ROS_WARN("2D-2D epipolar initialization is disabled; Cake-SLAM uses LIO pose/depth priors.");
-    return false;
+    if (corres.size() < 15)
+    {
+        return false;
+    }
+
+    vector<cv::Point2f> ll;
+    vector<cv::Point2f> rr;
+    ll.reserve(corres.size());
+    rr.reserve(corres.size());
+    for (const auto &corr : corres)
+    {
+        ll.emplace_back(corr.first(0), corr.first(1));
+        rr.emplace_back(corr.second(0), corr.second(1));
+    }
+
+    cv::Mat mask;
+    cv::Mat E = cv::findFundamentalMat(ll, rr, cv::FM_RANSAC, 0.3 / 460.0, 0.99, mask);
+    if (E.empty())
+    {
+        return false;
+    }
+
+    cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);
+    cv::Mat rot;
+    cv::Mat trans;
+    const int inlier_cnt = cv::recoverPose(E, ll, rr, cameraMatrix, rot, trans, mask);
+
+    Eigen::Matrix3d R;
+    Eigen::Vector3d T;
+    for (int i = 0; i < 3; i++)
+    {
+        T(i) = trans.at<double>(i, 0);
+        for (int j = 0; j < 3; j++)
+            R(i, j) = rot.at<double>(i, j);
+    }
+
+    Rotation = R.transpose();
+    Translation = -R.transpose() * T;
+    return inlier_cnt > 12;
 }
 
 

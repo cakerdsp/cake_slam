@@ -64,17 +64,23 @@ void SlamNode::loadConfiguration()
   use_image_ = config_.common.image_enable && !config_.vision.image_topic.empty();
   use_imu_ = config_.imu.enable && !config_.imu.topic.empty();
 
-  if (!use_lidar_) {
-    RCLCPP_FATAL(get_logger(), "cake_slam currently requires LiDAR input in the main fusion node.");
-    throw std::runtime_error("LiDAR input is required");
+  if (!use_lidar_ && !use_image_) {
+    RCLCPP_FATAL(get_logger(), "No enabled odometry input: enable LiDAR or image input in the config.");
+    throw std::runtime_error("cake_slam requires LiDAR or image input");
+  }
+  if (!use_lidar_ && use_image_ && !use_imu_) {
+    RCLCPP_FATAL(get_logger(), "Pure visual mode currently requires IMU input.");
+    throw std::runtime_error("pure visual mode requires IMU input");
   }
 
-  if (use_image_) {
+  if (use_lidar_ && use_image_) {
     slam_mode_ = LIVO;
-  } else if (use_imu_) {
+  } else if (use_lidar_ && use_imu_) {
     slam_mode_ = ONLY_LIO;
-  } else {
+  } else if (use_lidar_) {
     slam_mode_ = ONLY_LO;
+  } else {
+    slam_mode_ = ONLY_VIO;
   }
 
   RCLCPP_INFO(get_logger(), "Loaded config: lidar=%d image=%d imu=%d mode=%d",
@@ -83,27 +89,37 @@ void SlamNode::loadConfiguration()
 
 void SlamNode::configureModules()
 {
-  // LiDAR 预处理独立放在主程序中，和 FAST-LIVO2 一样先把 ROS 点云转成项目点类型。
-  preprocess_.reset(new Preprocess());
-  preprocess_->set(config_.lidar.feature_extract, config_.lidar.type, config_.lidar.blind,
-                   config_.lidar.point_filter_num);
-  preprocess_->N_SCANS = config_.lidar.scan_line;
-  preprocess_->SCAN_RATE = config_.lidar.scan_rate;
-  preprocess_->blind = config_.lidar.blind;
-  preprocess_->blind_sqr = config_.lidar.blind * config_.lidar.blind;
+  if (use_lidar_) {
+    // LiDAR 预处理独立放在主程序中，和 FAST-LIVO2 一样先把 ROS 点云转成项目点类型。
+    preprocess_.reset(new Preprocess());
+    preprocess_->set(config_.lidar.feature_extract, config_.lidar.type, config_.lidar.blind,
+                     config_.lidar.point_filter_num);
+    preprocess_->N_SCANS = config_.lidar.scan_line;
+    preprocess_->SCAN_RATE = config_.lidar.scan_rate;
+    preprocess_->blind = config_.lidar.blind;
+    preprocess_->blind_sqr = config_.lidar.blind * config_.lidar.blind;
 
-  // LIO 内部会配置 ImuProcess、体素地图和下采样器。
-  lio_.Configure(config_);
-  loadExtrinsicsForMain();
-  lidar_visual_selector_.Configure(config_);
-  lidar_visual_selector_.SetExtrinsics(lidar_to_imu_R_, lidar_to_imu_t_,
-                                       lidar_to_camera_R_, lidar_to_camera_t_);
+    // LIO 内部会配置 ImuProcess、体素地图和下采样器。
+    lio_.Configure(config_);
+    loadExtrinsicsForMain();
+    if (use_image_) {
+      lidar_visual_selector_.Configure(config_);
+      lidar_visual_selector_.SetExtrinsics(lidar_to_imu_R_, lidar_to_imu_t_,
+                                           lidar_to_camera_R_, lidar_to_camera_t_);
+    }
+  }
 
   // 视觉后端完全走 VINS-Fusion 风格：
   // setParameter() 会读取 readParameters() 写好的全局变量，包括相机内参文件路径、IMU 噪声、外参等。
   if (use_image_) {
     vio_ = std::make_unique<Estimator>();
     vio_->setParameter();
+    if (!use_lidar_) {
+      RCLCPP_INFO(get_logger(),
+                  "Image config: topic=%s target=%dx%d image_time_offset=%.6f td=%.6f cam0_calib=%s",
+                  config_.vision.image_topic.c_str(), config_.vision.image_width, config_.vision.image_height,
+                  config_.common.image_time_offset, config_.time_offset.td, config_.vision.cam0_calib.c_str());
+    }
   }
 }
 
@@ -113,14 +129,16 @@ void SlamNode::createSubscriptions()
   qos.keep_last(static_cast<size_t>(std::max(1, config_.common.max_buffer_size)));
 
   // LiDAR 支持 Livox CustomMsg 和标准 PointCloud2 两种入口。
-  if (config_.lidar.type == AVIA) {
-    sub_livox_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
-        config_.lidar.topic, qos,
-        std::bind(&SlamNode::livoxPointCloudCallback, this, std::placeholders::_1));
-  } else {
-    sub_cloud_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        config_.lidar.topic, qos,
-        std::bind(&SlamNode::standardPointCloudCallback, this, std::placeholders::_1));
+  if (use_lidar_) {
+    if (config_.lidar.type == AVIA) {
+      sub_livox_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
+          config_.lidar.topic, qos,
+          std::bind(&SlamNode::livoxPointCloudCallback, this, std::placeholders::_1));
+    } else {
+      sub_cloud_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+          config_.lidar.topic, qos,
+          std::bind(&SlamNode::standardPointCloudCallback, this, std::placeholders::_1));
+    }
   }
 
   if (use_imu_) {
@@ -209,9 +227,13 @@ void SlamNode::imuCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
     last_imu_time_ = -1.0;
   }
 
-  // 方案 1：同一条 IMU 同时入 LIO 队列和 VIO 队列，由两个消费者各自 pop。
-  imu_lio_buffer_.push_back(sample);
-  imu_vio_buffer_.push_back(sample);
+  // 同一条 IMU 按已启用的消费者分别入队；纯视觉模式不再占用 LIO 队列。
+  if (use_lidar_) {
+    imu_lio_buffer_.push_back(sample);
+  }
+  if (use_image_) {
+    imu_vio_buffer_.push_back(sample);
+  }
   if (ekf_finish_once_) {
     imu_prop_buffer_.push_back(sample);
     newest_imu_ = sample;
@@ -360,6 +382,8 @@ bool SlamNode::syncPackages(FusionMeasureGroup &meas)
       return syncLioOnly(meas);
     case ONLY_LO:
       return syncLoOnly(meas);
+    case ONLY_VIO:
+      return syncVioOnly(meas);
     default:
       return false;
   }
@@ -450,6 +474,49 @@ bool SlamNode::syncLivo(FusionMeasureGroup &meas)
     default:
       return false;
   }
+}
+
+bool SlamNode::syncVioOnly(FusionMeasureGroup &meas)
+{
+  std::lock_guard<std::mutex> lock(buffer_mutex_);
+  if (image_buffer_.empty() || (use_imu_ && imu_vio_buffer_.empty())) {
+    return false;
+  }
+
+  const double image_time = image_buffer_.front().stamp;
+  const double imu_cut_time = image_time + config_.time_offset.td;
+  if (use_imu_ && imu_cut_time > last_imu_time_) {
+    return false;
+  }
+  if (last_vio_update_time_ > 0.0 && image_time <= last_vio_update_time_) {
+    image_buffer_.pop_front();
+    return false;
+  }
+
+  FusionMeasure m;
+  m.vio_time = image_time;
+  m.lio_time = -1.0;
+  m.img = image_buffer_.front().mono;
+
+  while (!imu_vio_buffer_.empty() && imu_vio_buffer_.front().stamp < imu_cut_time) {
+    m.imu.push_back(imu_vio_buffer_.front());
+    imu_vio_buffer_.pop_front();
+  }
+  if (use_imu_ && !imu_vio_buffer_.empty()) {
+    m.imu.push_back(imu_vio_buffer_.front());
+    imu_vio_buffer_.pop_front();
+  }
+
+  RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "VIO-only sync image: image=%.6f imu_cut=%.6f imu_count=%zu vio_imu_queue=%zu image_queue=%zu",
+      image_time, imu_cut_time, m.imu.size(), imu_vio_buffer_.size(), image_buffer_.size());
+  image_buffer_.pop_front();
+
+  meas.measures.clear();
+  meas.measures.push_back(m);
+  meas.lio_vio_flg = VIO;
+  return true;
 }
 
 bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_time)
@@ -556,7 +623,11 @@ bool SlamNode::buildVioMeasure(FusionMeasureGroup &meas)
   m.img = image_buffer_.front().mono;
 
   // VIO 使用独立 IMU 队列，保留 VINS-Fusion 两帧图像间预积分所需的原始测量。
-  while (!imu_vio_buffer_.empty() && imu_vio_buffer_.front().stamp <= imu_cut_time) {
+  while (!imu_vio_buffer_.empty() && imu_vio_buffer_.front().stamp < imu_cut_time) {
+    m.imu.push_back(imu_vio_buffer_.front());
+    imu_vio_buffer_.pop_front();
+  }
+  if (use_imu_ && !imu_vio_buffer_.empty()) {
     m.imu.push_back(imu_vio_buffer_.front());
     imu_vio_buffer_.pop_front();
   }
@@ -581,6 +652,7 @@ void SlamNode::handleLIO()
     return;
   }
 
+  const auto t_lio_start = std::chrono::steady_clock::now();
   handleFirstFrame();
   lio_.SetState(state_);
 
@@ -603,6 +675,15 @@ void SlamNode::handleLIO()
   publishPath(update_time);
   publishTf(update_time);
   publishMavrosPose(update_time);
+
+  const auto t_lio_end = std::chrono::steady_clock::now();
+  const double lio_ms = std::chrono::duration<double, std::milli>(t_lio_end - t_lio_start).count();
+  RCLCPP_INFO(get_logger(),
+              "[LIO time] stamp=%.6f total=%.3f ms imu=%zu cur_pts=%zu next_pts=%zu lidar_depth_candidates=%zu",
+              update_time, lio_ms, measures_.measures.back().imu.size(),
+              measures_.pcl_proc_cur ? measures_.pcl_proc_cur->size() : 0,
+              measures_.pcl_proc_next ? measures_.pcl_proc_next->size() : 0,
+              pending_lidar_visual_candidates_.size());
 }
 
 void SlamNode::handleVIO()
@@ -613,7 +694,10 @@ void SlamNode::handleVIO()
     return;
   }
 
+  const auto t_vio_start = std::chrono::steady_clock::now();
   const FusionMeasure &measure = measures_.measures.back();
+  const size_t lidar_candidate_count = pending_lidar_visual_candidates_.size();
+  const bool has_lio_prior = use_lidar_ && pending_lio_pose_prior_.valid;
 
   // VINS-Fusion 风格入口：先送 IMU，再送单目图像。
   // inputImage 内部会调用 featureTracker.trackImage，外部不负责提特征。
@@ -631,24 +715,34 @@ void SlamNode::handleVIO()
     pending_lio_pose_prior_ = LioPosePrior();
     last_vio_update_time_ = measure.vio_time;
     if (vio_->solver_flag == Estimator::NON_LINEAR) {
-      const StatesGroup lio_state_before_vio = state_;
       const StatesGroup vio_state = vio_->getLatestState();
-      const Eigen::Matrix3d dR = lio_state_before_vio.rot_end.transpose() * vio_state.rot_end;
-      const double cos_angle = std::clamp((dR.trace() - 1.0) * 0.5, -1.0, 1.0);
-      constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
-      const double rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
-      const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
-      RCLCPP_INFO_THROTTLE(
-          get_logger(), *get_clock(), 2000,
-          "VIO feedback: stamp=%.6f pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d "
-          "lio_pos=(%.3f %.3f %.3f) vio_pos=(%.3f %.3f %.3f)",
-          measure.vio_time, pos_delta, rot_delta_deg, vio_->getLastTrackedFeatureCount(),
-          vio_->getLastDepthFeatureCount(), lio_state_before_vio.pos_end.x(),
-          lio_state_before_vio.pos_end.y(), lio_state_before_vio.pos_end.z(),
-          vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
+      if (use_lidar_) {
+        const StatesGroup lio_state_before_vio = state_;
+        const Eigen::Matrix3d dR = lio_state_before_vio.rot_end.transpose() * vio_state.rot_end;
+        const double cos_angle = std::clamp((dR.trace() - 1.0) * 0.5, -1.0, 1.0);
+        constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
+        const double rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
+        const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "VIO feedback: stamp=%.6f pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d "
+            "lio_pos=(%.3f %.3f %.3f) vio_pos=(%.3f %.3f %.3f)",
+            measure.vio_time, pos_delta, rot_delta_deg, vio_->getLastTrackedFeatureCount(),
+            vio_->getLastDepthFeatureCount(), lio_state_before_vio.pos_end.x(),
+            lio_state_before_vio.pos_end.y(), lio_state_before_vio.pos_end.z(),
+            vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
+      } else {
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "VIO-only state: stamp=%.6f tracked=%d lidar_depth=%d pos=(%.3f %.3f %.3f)",
+            measure.vio_time, vio_->getLastTrackedFeatureCount(), vio_->getLastDepthFeatureCount(),
+            vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
+      }
 
       state_ = vio_state;
-      lio_.SetState(state_);
+      if (use_lidar_) {
+        lio_.SetState(state_);
+      }
       latest_ekf_state_ = state_;
       latest_ekf_time_ = measure.vio_time;
       state_update_flag_ = true;
@@ -660,6 +754,14 @@ void SlamNode::handleVIO()
       publishVisualSubmap(measure.vio_time);
     }
   }
+
+  const auto t_vio_end = std::chrono::steady_clock::now();
+  const double vio_ms = std::chrono::duration<double, std::milli>(t_vio_end - t_vio_start).count();
+  RCLCPP_INFO(get_logger(),
+              "[VIO time] stamp=%.6f total=%.3f ms imu=%zu tracked=%d lidar_depth=%d lidar_candidates=%zu lio_prior=%d mode=%d",
+              measure.vio_time, vio_ms, measure.imu.size(), vio_->getLastTrackedFeatureCount(),
+              vio_->getLastDepthFeatureCount(), lidar_candidate_count, static_cast<int>(has_lio_prior),
+              static_cast<int>(slam_mode_));
 }
 
 void SlamNode::clearAllBuffersLocked()

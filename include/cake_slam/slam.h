@@ -84,6 +84,7 @@ private:
   bool syncLioOnly(FusionMeasureGroup &meas);
   bool syncLoOnly(FusionMeasureGroup &meas);
   bool syncLivo(FusionMeasureGroup &meas);
+  bool syncVioOnly(FusionMeasureGroup &meas);
   bool buildLioMeasureToTime(FusionMeasureGroup &meas, double update_time);
   bool buildVioMeasure(FusionMeasureGroup &meas);
 
