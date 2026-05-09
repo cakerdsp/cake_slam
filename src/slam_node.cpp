@@ -788,8 +788,9 @@ cv::Mat SlamNode::resizeImageToConfig(const cv::Mat &image, const char *image_ki
     return image.clone();
   }
 
+  auto clock_ptr = std::const_pointer_cast<rclcpp::Clock>(this->get_clock());
   RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 5000,
+      get_logger(), *clock_ptr, 5000,
       "Resizing %s image from %dx%d to configured %dx%d. Make sure cam0_calib uses the same target size.",
       image_kind, image.cols, image.rows, target_width, target_height);
 
