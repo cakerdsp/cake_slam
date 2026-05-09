@@ -55,8 +55,8 @@ map:
 vision:
   image_topic: "/left_camera/image"
   cam0_calib: "fast_livo2_avia_cam0.yaml"
-  image_height: 1024
-  image_width: 1280
+  image_height: 512
+  image_width: 640
   max_cnt: 250
   min_dist: 30
   fisheye_mask: ""

@@ -102,6 +102,7 @@ private:
   static builtin_interfaces::msg::Time secToStamp(double stamp);
   cv::Mat monoImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &msg) const;
   cv::Mat colorImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &msg) const;
+  cv::Mat resizeImageToConfig(const cv::Mat &image, const char *image_kind) const;
   void loadExtrinsicsForMain();
   LioPosePrior makeLioPosePrior(double stamp) const;
   void buildLidarVisualCandidates(double stamp);

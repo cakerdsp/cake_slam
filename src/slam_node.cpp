@@ -6,6 +6,7 @@
 #include <functional>
 #include <stdexcept>
 
+#include <opencv2/imgproc.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 
 #include "cake_slam/vision/estimator/parameters.h"
@@ -517,6 +518,12 @@ bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_tim
     lidar_time_buffer_.pop_front();
   }
 
+  RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "LIVO sync LIO cut: last_lio=%.6f image=%.6f dt=%.6f imu_last=%.6f cur_pts=%zu next_pts=%zu lidar_queue=%zu image_queue=%zu",
+      meas.last_lio_update_time, update_time, update_time - meas.last_lio_update_time, last_imu_time_,
+      meas.pcl_proc_cur->size(), meas.pcl_proc_next->size(), lidar_buffer_.size(), image_buffer_.size());
+
   meas.measures.clear();
   meas.measures.push_back(m);
   meas.lio_vio_flg = LIO;
@@ -551,6 +558,10 @@ bool SlamNode::buildVioMeasure(FusionMeasureGroup &meas)
     m.imu.push_back(imu_vio_buffer_.front());
     imu_vio_buffer_.pop_front();
   }
+  RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "LIVO sync VIO image: image=%.6f imu_cut=%.6f lio_prior=%.6f imu_count=%zu vio_imu_queue=%zu image_queue=%zu",
+      image_time, imu_cut_time, meas.last_lio_update_time, m.imu.size(), imu_vio_buffer_.size(), image_buffer_.size());
   image_buffer_.pop_front();
 
   meas.measures.clear();
@@ -745,7 +756,7 @@ cv::Mat SlamNode::monoImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr
   } else {
     ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::MONO8);
   }
-  return ptr->image.clone();
+  return resizeImageToConfig(ptr->image, "mono");
 }
 
 cv::Mat SlamNode::colorImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &msg) const
@@ -757,11 +768,34 @@ cv::Mat SlamNode::colorImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPt
     cv_bridge::CvImageConstPtr rgb = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::RGB8);
     cv::Mat bgr;
     cv::cvtColor(rgb->image, bgr, cv::COLOR_RGB2BGR);
-    return bgr;
+    return resizeImageToConfig(bgr, "color");
   } else {
     ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
   }
-  return ptr->image.clone();
+  return resizeImageToConfig(ptr->image, "color");
+}
+
+cv::Mat SlamNode::resizeImageToConfig(const cv::Mat &image, const char *image_kind) const
+{
+  if (image.empty()) {
+    return image.clone();
+  }
+
+  const int target_width = config_.vision.image_width;
+  const int target_height = config_.vision.image_height;
+  if (target_width <= 0 || target_height <= 0 ||
+      (image.cols == target_width && image.rows == target_height)) {
+    return image.clone();
+  }
+
+  RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "Resizing %s image from %dx%d to configured %dx%d. Make sure cam0_calib uses the same target size.",
+      image_kind, image.cols, image.rows, target_width, target_height);
+
+  cv::Mat resized;
+  cv::resize(image, resized, cv::Size(target_width, target_height), 0.0, 0.0, cv::INTER_LINEAR);
+  return resized;
 }
 
 void SlamNode::loadExtrinsicsForMain()
@@ -782,6 +816,23 @@ void SlamNode::loadExtrinsicsForMain()
   if (config_.extrinsic.camera_T.size() >= 3) {
     lidar_to_camera_t_ << config_.extrinsic.camera_T[0], config_.extrinsic.camera_T[1], config_.extrinsic.camera_T[2];
   }
+
+  RCLCPP_INFO(get_logger(),
+              "Main extrinsics: R_I_L=[%.6f %.6f %.6f; %.6f %.6f %.6f; %.6f %.6f %.6f], t_I_L=[%.6f %.6f %.6f]",
+              lidar_to_imu_R_(0, 0), lidar_to_imu_R_(0, 1), lidar_to_imu_R_(0, 2),
+              lidar_to_imu_R_(1, 0), lidar_to_imu_R_(1, 1), lidar_to_imu_R_(1, 2),
+              lidar_to_imu_R_(2, 0), lidar_to_imu_R_(2, 1), lidar_to_imu_R_(2, 2),
+              lidar_to_imu_t_.x(), lidar_to_imu_t_.y(), lidar_to_imu_t_.z());
+  RCLCPP_INFO(get_logger(),
+              "Main extrinsics: R_C_L=[%.6f %.6f %.6f; %.6f %.6f %.6f; %.6f %.6f %.6f], t_C_L=[%.6f %.6f %.6f]",
+              lidar_to_camera_R_(0, 0), lidar_to_camera_R_(0, 1), lidar_to_camera_R_(0, 2),
+              lidar_to_camera_R_(1, 0), lidar_to_camera_R_(1, 1), lidar_to_camera_R_(1, 2),
+              lidar_to_camera_R_(2, 0), lidar_to_camera_R_(2, 1), lidar_to_camera_R_(2, 2),
+              lidar_to_camera_t_.x(), lidar_to_camera_t_.y(), lidar_to_camera_t_.z());
+  RCLCPP_INFO(get_logger(),
+              "Image config: topic=%s target=%dx%d image_time_offset=%.6f td=%.6f cam0_calib=%s",
+              config_.vision.image_topic.c_str(), config_.vision.image_width, config_.vision.image_height,
+              config_.common.image_time_offset, config_.time_offset.td, config_.vision.cam0_calib.c_str());
 }
 
 LioPosePrior SlamNode::makeLioPosePrior(double stamp) const
@@ -842,10 +893,10 @@ void SlamNode::buildLidarVisualCandidates(double /*stamp*/)
       source_cloud, state_, latest_sync_mono_image_, vio_->getUndistortedValidMask(), camera);
 
   const auto &stats = lidar_visual_selector_.lastStats();
-  RCLCPP_DEBUG(get_logger(),
-               "LiDAR visual candidates: input=%d depth=%d image=%d z=%d texture=%d mask=%d",
-               stats.input_points, stats.positive_depth, stats.in_image, stats.zbuffer_kept,
-               stats.texture_kept, stats.mask_kept);
+  RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                       "LiDAR visual candidates: input=%d depth=%d image=%d z=%d texture=%d mask=%d image_size=%dx%d",
+                       stats.input_points, stats.positive_depth, stats.in_image, stats.zbuffer_kept,
+                       stats.texture_kept, stats.mask_kept, latest_sync_mono_image_.cols, latest_sync_mono_image_.rows);
 }
 
 Eigen::Vector3d SlamNode::lidarToWorld(const Eigen::Vector3d &point_lidar) const
@@ -1015,45 +1066,66 @@ void SlamNode::publishClouds(double stamp)
 
 void SlamNode::publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar)
 {
-  // Project each LiDAR point with T_C_L into the synchronized color image. Valid
-  // projections sample image RGB; invalid projections keep the default gray.
+  // Project each LiDAR point with T_C_L into the synchronized color image.
+  // Only valid colored projections are published, matching FAST-LIVO2's RGB cloud
+  // behavior and avoiding gray filler points that hide calibration errors.
   if (!pub_cloud_colored_ || !cloud_lidar || cloud_lidar->empty()) {
     return;
   }
 
   const auto camera = vio_ ? vio_->getCameraModel() : camodocal::CameraConstPtr();
   const bool can_color = camera && !latest_sync_color_image_.empty();
+  if (!can_color) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                         "Skip colored cloud: camera=%d color_image_empty=%d",
+                         camera ? 1 : 0, latest_sync_color_image_.empty() ? 1 : 0);
+    return;
+  }
 
   PointCloudXYZRGB colored;
   colored.reserve(cloud_lidar->size());
+  size_t positive_depth = 0;
+  size_t in_image = 0;
   for (const auto &pt : cloud_lidar->points) {
     const Eigen::Vector3d p_lidar(pt.x, pt.y, pt.z);
+    const Eigen::Vector3d p_cam = lidar_to_camera_R_ * p_lidar + lidar_to_camera_t_;
+    if (p_cam.z() <= config_.vision.min_lidar_depth) {
+      continue;
+    }
+    positive_depth++;
+
+    Eigen::Vector2d uv;
+    camera->spaceToPlane(p_cam, uv);
+    const int u = static_cast<int>(std::round(uv.x()));
+    const int v = static_cast<int>(std::round(uv.y()));
+    if (u < 0 || v < 0 || u >= latest_sync_color_image_.cols || v >= latest_sync_color_image_.rows) {
+      continue;
+    }
+    in_image++;
+
+    const cv::Vec3b bgr = latest_sync_color_image_.at<cv::Vec3b>(v, u);
     PointTypeRGB out;
     const Eigen::Vector3d p_world = lidarToWorld(p_lidar);
     out.x = static_cast<float>(p_world.x());
     out.y = static_cast<float>(p_world.y());
     out.z = static_cast<float>(p_world.z());
-    out.r = 160;
-    out.g = 160;
-    out.b = 160;
-
-    if (can_color) {
-      const Eigen::Vector3d p_cam = lidar_to_camera_R_ * p_lidar + lidar_to_camera_t_;
-      if (p_cam.z() > 0.05) {
-        Eigen::Vector2d uv;
-        camera->spaceToPlane(p_cam, uv);
-        const int u = static_cast<int>(std::round(uv.x()));
-        const int v = static_cast<int>(std::round(uv.y()));
-        if (u >= 0 && v >= 0 && u < latest_sync_color_image_.cols && v < latest_sync_color_image_.rows) {
-          const cv::Vec3b bgr = latest_sync_color_image_.at<cv::Vec3b>(v, u);
-          out.r = bgr[2];
-          out.g = bgr[1];
-          out.b = bgr[0];
-        }
-      }
-    }
+    out.r = bgr[2];
+    out.g = bgr[1];
+    out.b = bgr[0];
     colored.push_back(out);
   }
+  if (colored.empty()) {
+    RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Colored cloud empty: input=%zu positive_depth=%zu in_image=%zu image_size=%dx%d. Check image scale/intrinsics/extrinsics/time offset.",
+        cloud_lidar->size(), positive_depth, in_image, latest_sync_color_image_.cols, latest_sync_color_image_.rows);
+    return;
+  }
+
+  RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                       "Colored cloud: input=%zu positive_depth=%zu in_image=%zu published=%zu image_size=%dx%d",
+                       cloud_lidar->size(), positive_depth, in_image, colored.size(),
+                       latest_sync_color_image_.cols, latest_sync_color_image_.rows);
 
   sensor_msgs::msg::PointCloud2 msg;
   pcl::toROSMsg(colored, msg);
