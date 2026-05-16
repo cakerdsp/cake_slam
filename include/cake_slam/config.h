@@ -100,6 +100,7 @@ struct VisionConfig
   int image_width = 640;             ///< Image columns [pixel].
 
   bool lidar_depth_enable = true;          ///< Use LiDAR projections as visual seeds.
+  bool lidar_prior_feature_enable = true;  ///< Insert LiDAR-prior visual points into VIO.
   bool optimize_lidar_inv_depth = true;    ///< Optimize LiDAR-seeded inverse depth.
   int max_lidar_features = 250;            ///< Per-frame LiDAR visual seed cap.
   double min_lidar_depth = 0.2;            ///< Minimum camera-frame depth [m].

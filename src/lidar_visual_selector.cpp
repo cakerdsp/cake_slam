@@ -44,7 +44,8 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::Select(
   // 5. spatially suppress the survivors before handing them to LK tracking.
   last_stats_ = LidarVisualSelectorStats();
   std::vector<LidarVisualCandidate> selected;
-  if (!vision_.lidar_depth_enable || !cloud_lidar || cloud_lidar->empty() || gray.empty() || !camera) {
+  if (!vision_.lidar_depth_enable || !vision_.lidar_prior_feature_enable ||
+      !cloud_lidar || cloud_lidar->empty() || gray.empty() || !camera) {
     return selected;
   }
 

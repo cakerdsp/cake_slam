@@ -405,7 +405,7 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Class: rviz_default_plugins/ThirdPersonFollower
+      Class: rviz_default_plugins/Orbit
       Distance: 95.42935180664062
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
@@ -422,8 +422,8 @@ Visualization Manager:
       Name: Current View
       Near Clip Distance: 0.009999999776482582
       Pitch: 0.5397965908050537
-      Target Frame: body
-      Value: ThirdPersonFollower (rviz_default_plugins)
+      Target Frame: world
+      Value: Orbit (rviz_default_plugins)
       Yaw: 3.5300073623657227
     Saved: ~
 Window Geometry:

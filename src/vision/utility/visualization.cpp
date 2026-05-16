@@ -24,6 +24,7 @@ nav_msgs::msg::Path path;
 rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_keyframe_pose;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud>::SharedPtr pub_keyframe_point;
 rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_extrinsic;
+std::shared_ptr<tf2_ros::TransformBroadcaster> pub_tf_broadcaster;
 
 rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_image_track;
 
@@ -47,6 +48,7 @@ void registerPub(rclcpp::Node::SharedPtr n)
     pub_keyframe_pose = n->create_publisher<nav_msgs::msg::Odometry>("keyframe_pose", 10);
     pub_keyframe_point = n->create_publisher<sensor_msgs::msg::PointCloud>("keyframe_point", 10);
     pub_extrinsic = n->create_publisher<nav_msgs::msg::Odometry>("extrinsic", 10);
+    pub_tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(n);
     pub_image_track = n->create_publisher<sensor_msgs::msg::Image>("image_track", 1);
 
     cameraposevisual.setScale(0.1);
@@ -138,7 +140,7 @@ void printStatistics(const Estimator &estimator, double t)
     last_path = estimator.states_[WINDOW_SIZE].pos_end;
     ROS_DEBUG("sum of path %f", sum_of_path);
     if (ESTIMATE_TD)
-        ROS_INFO("td %f", estimator.td);
+        CAKE_INFO("td %f", estimator.td);
 }
 
 // 发布当前优化后的主里程计与轨迹。
@@ -341,87 +343,40 @@ void pubPointCloud(const Estimator &estimator, const std_msgs::msg::Header &head
 // 发布世界系到 body/camera 的 TF。
 void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
 {
-    return; // tmp.
-
-
-    cout << "tf 1" << endl;
-    if( estimator.solver_flag != Estimator::NON_LINEAR)
+    if (!pub_tf_broadcaster || estimator.solver_flag != Estimator::NON_LINEAR)
         return;
 
-    std::shared_ptr<tf2_ros::TransformBroadcaster> br;
     geometry_msgs::msg::TransformStamped transform, transform_cam;
 
-    tf2::Quaternion q;
     // body frame
-    Eigen::Vector3d correct_t;
-    Eigen::Quaterniond correct_q;
-    
-    cout << "tf 2" << endl;
-    correct_t = estimator.states_[WINDOW_SIZE].pos_end;
-    correct_q = estimator.states_[WINDOW_SIZE].rot_end;
-
-    cout << "tf 3" << endl;
-
-    
-    cout << header.stamp.sec + header.stamp.nanosec * (1e-9) << endl;
-    cout << correct_t << endl;
-    cout << correct_q.w() << " " << correct_q.x() << " " << correct_q.y() << " " << correct_q.z() << endl;
-
-
-    // transform.header.stamp = header.stamp;
+    const Eigen::Vector3d correct_t = estimator.states_[WINDOW_SIZE].pos_end;
+    const Eigen::Quaterniond correct_q(estimator.states_[WINDOW_SIZE].rot_end);
+    transform.header.stamp = header.stamp;
     transform.header.frame_id = WORLD_FRAME_ID;
     transform.child_frame_id = BODY_FRAME_ID;
-
     transform.transform.translation.x = correct_t(0);
     transform.transform.translation.y = correct_t(1);
     transform.transform.translation.z = correct_t(2);
-
-    cout << "tf 4" << endl;
-
-
-    q.setW(correct_q.w());
-    q.setX(correct_q.x());
-    q.setY(correct_q.y());
-    q.setZ(correct_q.z());
-    transform.transform.rotation.x = q.x();
-    transform.transform.rotation.y = q.y();
-    transform.transform.rotation.z = q.z();
-    transform.transform.rotation.w = q.w();
-
-    cout << "tf 5" << endl;
-
-    br->sendTransform(transform);
-
-
-    cout << "tf 6" << endl;
-
-
+    transform.transform.rotation.x = correct_q.x();
+    transform.transform.rotation.y = correct_q.y();
+    transform.transform.rotation.z = correct_q.z();
+    transform.transform.rotation.w = correct_q.w();
+    pub_tf_broadcaster->sendTransform(transform);
 
     // camera frame
     transform_cam.header.stamp = header.stamp;
     transform_cam.header.frame_id = BODY_FRAME_ID;
     transform_cam.child_frame_id = CAMERA_FRAME_ID;
-
-
     transform_cam.transform.translation.x = estimator.tic[0].x();
     transform_cam.transform.translation.y = estimator.tic[0].y();
     transform_cam.transform.translation.z = estimator.tic[0].z();
+    const Eigen::Quaterniond q_ic(estimator.ric[0]);
+    transform_cam.transform.rotation.x = q_ic.x();
+    transform_cam.transform.rotation.y = q_ic.y();
+    transform_cam.transform.rotation.z = q_ic.z();
+    transform_cam.transform.rotation.w = q_ic.w();
+    pub_tf_broadcaster->sendTransform(transform_cam);
 
-    q.setW(Eigen::Quaterniond(estimator.ric[0]).w());
-    q.setX(Eigen::Quaterniond(estimator.ric[0]).x());
-    q.setY(Eigen::Quaterniond(estimator.ric[0]).y());
-    q.setZ(Eigen::Quaterniond(estimator.ric[0]).z());
-
-    transform_cam.transform.rotation.x = q.x();
-    transform_cam.transform.rotation.y = q.y();
-    transform_cam.transform.rotation.z = q.z();
-    transform_cam.transform.rotation.w = q.w();
-
-    // br->sendTransform(transform_cam);
-
-    cout << "tf 7" << endl;
-
-    
     nav_msgs::msg::Odometry odometry;
     odometry.header = header;
     odometry.header.frame_id = WORLD_FRAME_ID;
@@ -434,10 +389,8 @@ void pubTF(const Estimator &estimator, const std_msgs::msg::Header &header)
     odometry.pose.pose.orientation.z = tmp_q.z();
     odometry.pose.pose.orientation.w = tmp_q.w();
 
-    cout << "tf 8" << endl;
-    pub_extrinsic->publish(odometry);
-    cout << "tf 9" << endl;
-
+    if (pub_extrinsic)
+        pub_extrinsic->publish(odometry);
 }
 
 

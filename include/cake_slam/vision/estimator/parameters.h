@@ -22,9 +22,11 @@
 #include <fstream>
 #include <map>
 
+#include "cake_slam/utils/logging.h"
+
 using namespace std;
 
-#define ROS_INFO RCUTILS_LOG_INFO
+#define ROS_INFO CAKE_INFO
 #define ROS_WARN RCUTILS_LOG_WARN
 #define ROS_ERROR RCUTILS_LOG_ERROR
 
@@ -79,6 +81,7 @@ extern int MIN_DIST;
 extern int SHOW_TRACK;
 extern int FLOW_BACK;
 extern int LIDAR_DEPTH_ENABLE;
+extern int LIDAR_PRIOR_FEATURE_ENABLE;
 extern int LIDAR_INV_DEPTH_OPTIMIZE;
 extern double LIDAR_PRIOR_REPROJ_THRESHOLD;
 extern double MIN_INV_DEPTH_VAR;

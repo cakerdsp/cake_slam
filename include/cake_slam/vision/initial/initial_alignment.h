@@ -21,9 +21,10 @@
 #include <rclcpp/rclcpp.hpp>
 #include <map>
 #include "../estimator/feature_manager.h"
+#include "cake_slam/utils/logging.h"
 using namespace std;
 
-#define ROS_INFO RCUTILS_LOG_INFO
+#define ROS_INFO CAKE_INFO
 #define ROS_WARN RCUTILS_LOG_WARN
 #define ROS_DEBUG RCUTILS_LOG_DEBUG
 #define ROS_ERROR RCUTILS_LOG_ERROR

@@ -216,7 +216,7 @@ void MarginalizationInfo::marginalize()
     }
 
     n = pos - m;
-    //ROS_INFO("marginalization, pos: %d, m: %d, n: %d, size: %d", pos, m, n, (int)parameter_block_idx.size());
+    // CAKE_INFO("marginalization, pos: %d, m: %d, n: %d, size: %d", pos, m, n, (int)parameter_block_idx.size());
     if(m == 0)
     {
         valid = false;
@@ -253,7 +253,7 @@ void MarginalizationInfo::marginalize()
             b.segment(idx_i, size_i) += jacobian_i.transpose() * it->residuals;
         }
     }
-    ROS_INFO("summing up costs %f ms", t_summing.toc());
+    CAKE_INFO("summing up costs %f ms", t_summing.toc());
     */
     //multi thread
 
@@ -289,7 +289,7 @@ void MarginalizationInfo::marginalize()
         b += threadsstruct[i].b;
     }
     //ROS_DEBUG("thread summing up costs %f ms", t_thread_summing.toc());
-    //ROS_INFO("A diff %f , b diff %f ", (A - tmp_A).sum(), (b - tmp_b).sum());
+    // CAKE_INFO("A diff %f , b diff %f ", (A - tmp_A).sum(), (b - tmp_b).sum());
 
 
     // Symmetrize Amm before eigen decomposition; numerical marginalization can

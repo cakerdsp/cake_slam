@@ -157,6 +157,19 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     col = cur_img.cols;
     cv::Mat rightImg = _img1;
     current_lidar_priors.clear();
+    last_prev_track_count = static_cast<int>(prev_pts.size());
+    last_tracked_after_flow_count = 0;
+    last_prev_lidar_track_count = 0;
+    last_tracked_lidar_count = 0;
+    last_rejected_by_lio_prior_count = 0;
+    last_added_lidar_count = 0;
+    last_added_visual_count = 0;
+    last_pending_lidar_candidate_count = static_cast<int>(pending_lidar_candidates.size());
+    for (const int id : ids)
+    {
+        if (active_lidar_priors.find(id) != active_lidar_priors.end())
+            last_prev_lidar_track_count++;
+    }
     /*
     {
         cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
@@ -310,6 +323,12 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
         reduceVector(ids, status);
         reduceVector(track_cnt, status);
         pruneLidarTracks();
+        last_tracked_after_flow_count = static_cast<int>(cur_pts.size());
+        for (const int id : ids)
+        {
+            if (active_lidar_priors.find(id) != active_lidar_priors.end())
+                last_tracked_lidar_count++;
+        }
         // ROS_DEBUG("temporal optical flow costs: %fms", t_o.toc());
         
         //printf("track cnt %d\n", (int)ids.size());
@@ -328,9 +347,11 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
         ROS_DEBUG("detect feature begins");
         
         int n_max_cnt = MAX_CNT - static_cast<int>(cur_pts.size());
-        if (LIDAR_DEPTH_ENABLE && n_max_cnt > 0 && !pending_lidar_candidates.empty())
+        if (LIDAR_DEPTH_ENABLE && LIDAR_PRIOR_FEATURE_ENABLE &&
+            n_max_cnt > 0 && !pending_lidar_candidates.empty())
         {
             const int added_lidar = addLidarCandidatePoints(n_max_cnt);
+            last_added_lidar_count = added_lidar;
             n_max_cnt = MAX_CNT - static_cast<int>(cur_pts.size());
             ROS_DEBUG("add LiDAR visual candidates: %d", added_lidar);
         }
@@ -388,6 +409,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
 
         ROS_DEBUG("add feature begins");
         TicToc t_a;
+        last_added_visual_count = static_cast<int>(n_pts.size());
         addPoints();
         // ROS_DEBUG("selectFeature costs: %fms", t_a.toc());
         // printf("selectFeature costs: %fms\n", t_a.toc());
@@ -585,6 +607,7 @@ void FeatureTracker::rejectWithLioPrior(vector<uchar> &status)
         if (p_cam.z() <= 0.05)
         {
             status[i] = 0;
+            last_rejected_by_lio_prior_count++;
             continue;
         }
 
@@ -592,8 +615,10 @@ void FeatureTracker::rejectWithLioPrior(vector<uchar> &status)
         m_camera[0]->spaceToPlane(p_cam, uv);
         const double dx = static_cast<double>(cur_pts[i].x) - uv.x();
         const double dy = static_cast<double>(cur_pts[i].y) - uv.y();
-        if (dx * dx + dy * dy > threshold_sq)
+        if (dx * dx + dy * dy > threshold_sq) {
             status[i] = 0;
+            last_rejected_by_lio_prior_count++;
+        }
     }
 }
 
@@ -716,7 +741,7 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
         if (calib_file[i].empty())
             throw std::runtime_error("FeatureTracker camera calibration path is empty");
 
-        ROS_INFO("reading paramerter of camera %s", calib_file[i].c_str());
+        CAKE_INFO("reading paramerter of camera %s", calib_file[i].c_str());
         camodocal::CameraPtr camera = CameraFactory::instance()->generateCameraFromYamlFile(calib_file[i]);
         if (!camera)
             throw std::runtime_error("FeatureTracker failed to load camera calibration: " + calib_file[i]);

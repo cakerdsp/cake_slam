@@ -25,6 +25,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 
 #include "cake_slam/common_lib.h"
@@ -119,6 +120,7 @@ private:
   void publishPath(double stamp);
   void publishMavrosPose(double stamp);
   void publishTf(double stamp);
+  void publishStaticTf();
   void publishClouds(double stamp);
   void publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar);
   void publishFeatureImage(double stamp);
@@ -158,6 +160,8 @@ private:
   Eigen::Vector3d lidar_to_imu_t_ = Eigen::Vector3d::Zero();         ///< t_I_L [m].
   Eigen::Matrix3d lidar_to_camera_R_ = Eigen::Matrix3d::Identity();  ///< R_C_L.
   Eigen::Vector3d lidar_to_camera_t_ = Eigen::Vector3d::Zero();      ///< t_C_L [m].
+  Eigen::Matrix3d camera_to_imu_R_ = Eigen::Matrix3d::Identity();    ///< R_I_C.
+  Eigen::Vector3d camera_to_imu_t_ = Eigen::Vector3d::Zero();        ///< t_I_C [m].
 
   // Raw input buffers and decoded buffers.
   std::mutex buffer_mutex_;
@@ -206,6 +210,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_effect_;
   image_transport::Publisher pub_feature_image_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
   rclcpp::TimerBase::SharedPtr imu_prop_timer_;
 };
 

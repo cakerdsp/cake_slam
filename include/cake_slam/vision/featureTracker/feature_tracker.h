@@ -38,10 +38,11 @@
 #include "../estimator/parameters.h"
 #include "../utility/tic_toc.h"
 #include "cake_slam/lidar_visual_types.h"
+#include "cake_slam/utils/logging.h"
 
 using namespace std;
 using namespace camodocal;
-#define ROS_INFO RCUTILS_LOG_INFO
+#define ROS_INFO CAKE_INFO
 #define ROS_WARN RCUTILS_LOG_WARN
 #define ROS_DEBUG RCUTILS_LOG_DEBUG
 #define ROS_ERROR RCUTILS_LOG_ERROR
@@ -125,6 +126,14 @@ public:
     cv::Mat getFeatureDebugImage() const;
     int getLastFeatureCount() const;
     int getLastDepthFeatureCount() const;
+    int getLastPrevTrackCount() const { return last_prev_track_count; }
+    int getLastTrackedAfterFlowCount() const { return last_tracked_after_flow_count; }
+    int getLastPrevLidarTrackCount() const { return last_prev_lidar_track_count; }
+    int getLastTrackedLidarCount() const { return last_tracked_lidar_count; }
+    int getLastRejectedByLioPriorCount() const { return last_rejected_by_lio_prior_count; }
+    int getLastAddedLidarCount() const { return last_added_lidar_count; }
+    int getLastAddedVisualCount() const { return last_added_visual_count; }
+    int getLastPendingLidarCandidateCount() const { return last_pending_lidar_candidate_count; }
 
     /** @brief Check image border and valid-domain mask membership. */
     bool inBorder(const cv::Point2f &pt);
@@ -167,6 +176,14 @@ public:
     bool hasPrediction = false;
     int last_feature_count = 0;
     int last_depth_feature_count = 0;
+    int last_prev_track_count = 0;
+    int last_tracked_after_flow_count = 0;
+    int last_prev_lidar_track_count = 0;
+    int last_tracked_lidar_count = 0;
+    int last_rejected_by_lio_prior_count = 0;
+    int last_added_lidar_count = 0;
+    int last_added_visual_count = 0;
+    int last_pending_lidar_candidate_count = 0;
 
     vector<cake_slam::LidarVisualCandidate> pending_lidar_candidates;
     std::unordered_map<int, cake_slam::LidarDepthPrior> active_lidar_priors;

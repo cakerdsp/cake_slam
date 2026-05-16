@@ -52,6 +52,7 @@ int MIN_DIST;
 int SHOW_TRACK;
 int FLOW_BACK;
 int LIDAR_DEPTH_ENABLE;
+int LIDAR_PRIOR_FEATURE_ENABLE;
 int LIDAR_INV_DEPTH_OPTIMIZE;
 double LIDAR_PRIOR_REPROJ_THRESHOLD;
 double MIN_INV_DEPTH_VAR;
@@ -208,7 +209,7 @@ T readParam(rclcpp::Node::SharedPtr n, std::string name)
     T ans;
     if (n->get_parameter(name, ans))
     {
-        ROS_INFO("Loaded %s: ", name);
+        CAKE_INFO("Loaded %s: ", name);
         std::cout << ans << std::endl;
     }
     else
@@ -251,6 +252,11 @@ void readParameters(std::string config_file)
     SHOW_TRACK = readOrDefault<int>(fsSettings, "vision.show_track", 0);
     FLOW_BACK = readOrDefault<int>(fsSettings, "vision.flow_back", 0);
     LIDAR_DEPTH_ENABLE = readOrDefault<int>(fsSettings, "vision.lidar_depth_enable", 1);
+    LIDAR_PRIOR_FEATURE_ENABLE = readOrDefault<int>(fsSettings, "vision.lidar_prior_feature_enable",
+                                                    readOrDefault<int>(fsSettings, "vision.lidar_prior_enable",
+                                                                       LIDAR_DEPTH_ENABLE));
+    LIDAR_PRIOR_FEATURE_ENABLE = readOrDefault<int>(fsSettings, "vision.radar_prior_feature_enable",
+                                                    LIDAR_PRIOR_FEATURE_ENABLE);
     LIDAR_INV_DEPTH_OPTIMIZE = readOrDefault<int>(fsSettings, "vision.optimize_lidar_inv_depth", 1);
     LIDAR_PRIOR_REPROJ_THRESHOLD = readOrDefault<double>(fsSettings, "vision.lio_prior_reproj_threshold", 3.0);
     MIN_INV_DEPTH_VAR = readOrDefault<double>(fsSettings, "vision.min_inv_depth_var", 1e-6);
@@ -313,11 +319,11 @@ void readParameters(std::string config_file)
         Eigen::Vector3d t_ic = Eigen::Vector3d::Zero();
         if (readBodyToCameraExtrinsic(fsSettings, R_ic, t_ic))
         {
-            ROS_INFO("load VINS camera-to-IMU extrinsic from extrinsic.body_T_cam0");
+            CAKE_INFO("load VINS camera-to-IMU extrinsic from extrinsic.body_T_cam0");
         }
         else if (readFastLivoExtrinsic(fsSettings, R_ic, t_ic))
         {
-            ROS_INFO("compose VINS camera-to-IMU extrinsic from FAST-LIVO2 lidar/camera extrinsics");
+            CAKE_INFO("compose VINS camera-to-IMU extrinsic from FAST-LIVO2 lidar/camera extrinsics");
         }
         else
         {
@@ -368,13 +374,13 @@ void readParameters(std::string config_file)
     TD = readOrDefault<double>(fsSettings, "time_offset.td", 0.0);
     ESTIMATE_TD = readOrDefault<int>(fsSettings, "time_offset.estimate_td", 0);
     if (ESTIMATE_TD)
-        ROS_INFO("Unsynchronized sensors, online estimate time offset, initial td: %f", TD);
+        CAKE_INFO("Unsynchronized sensors, online estimate time offset, initial td: %f", TD);
     else
-        ROS_INFO("Synchronized sensors, fix time offset: %f", TD);
+        CAKE_INFO("Synchronized sensors, fix time offset: %f", TD);
 
     ROW = readOrDefault<int>(fsSettings, "vision.image_height", 480);
     COL = readOrDefault<int>(fsSettings, "vision.image_width", 640);
-    ROS_INFO("ROW: %d COL: %d ", ROW, COL);
+    CAKE_INFO("ROW: %d COL: %d ", ROW, COL);
 
     // 没有 IMU 时，不允许再估计相机-IMU 外参和时间延迟。
     if(!USE_IMU)
@@ -392,7 +398,7 @@ void readParameters(std::string config_file)
     readIfPresent(fsSettings, "frame.camera", CAMERA_FRAME_ID);
     CAMERA_FRAME_ID.empty()? CAMERA_FRAME_ID = "camera" : CAMERA_FRAME_ID;
     
-    ROS_INFO("frame_ids: world=%s body=%s camera=%s", WORLD_FRAME_ID.c_str(),
+    CAKE_INFO("frame_ids: world=%s body=%s camera=%s", WORLD_FRAME_ID.c_str(),
              BODY_FRAME_ID.c_str(), CAMERA_FRAME_ID.c_str());
 
     fsSettings.release();

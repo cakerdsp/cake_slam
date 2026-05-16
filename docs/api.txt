@@ -51,7 +51,7 @@ Config keys (summary)
 - vision.show_track, vision.flow_back, vision.multiple_thread
 - vision.max_solver_time, vision.max_num_iterations, vision.keyframe_parallax
 - vision.estimate_extrinsic, vision.cam0_calib, vision.image_height, vision.image_width
-- vision.lidar_depth_enable, vision.optimize_lidar_inv_depth, vision.max_lidar_features
+- vision.lidar_depth_enable, vision.lidar_prior_feature_enable, vision.optimize_lidar_inv_depth, vision.max_lidar_features
 - vision.min_lidar_depth, vision.max_lidar_depth, vision.z_buffer_cell_size
 - vision.z_buffer_depth_tolerance, vision.shi_tomasi_min_score, vision.lidar_mask_radius
 - vision.lio_prior_reproj_threshold, vision.lidar_depth_std, vision.min_inv_depth_var

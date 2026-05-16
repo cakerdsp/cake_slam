@@ -32,6 +32,7 @@
 #include "cake_slam/common_lib.h"
 #include "cake_slam/imu_processor.h"
 #include "cake_slam/lidar_visual_types.h"
+#include "cake_slam/utils/logging.h"
 #include "../factor/imu_factor.h"
 #include "../factor/marginalization_factor.h"
 #include "../factor/pose_local_parameterization.h"
@@ -46,7 +47,7 @@
 #include "feature_manager.h"
 #include "parameters.h"
 
-#define ROS_INFO RCUTILS_LOG_INFO
+#define ROS_INFO CAKE_INFO
 #define ROS_WARN RCUTILS_LOG_WARN
 #define ROS_ERROR RCUTILS_LOG_ERROR
 
@@ -145,6 +146,15 @@ public:
 
     /** @brief Return latest LiDAR-depth-associated feature count. */
     int getLastDepthFeatureCount() const;
+
+    int getLastPrevTrackCount() const;
+    int getLastTrackedAfterFlowCount() const;
+    int getLastPrevLidarTrackCount() const;
+    int getLastTrackedLidarCount() const;
+    int getLastRejectedByLioPriorCount() const;
+    int getLastAddedLidarCount() const;
+    int getLastAddedVisualCount() const;
+    int getLastPendingLidarCandidateCount() const;
 
     /**
      * @brief Preserve VINS-Fusion GlobalSFM landmark bootstrap for a future fallback path.

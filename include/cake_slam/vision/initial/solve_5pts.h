@@ -21,10 +21,11 @@ using namespace std;
 //#include <opencv2/core/eigen.hpp>
 #include <eigen3/Eigen/Dense>
 #include <rcutils/logging_macros.h>
+#include "cake_slam/utils/logging.h"
 // #include <ros/console.h>
 
 
-#define ROS_INFO RCUTILS_LOG_INFO
+#define ROS_INFO CAKE_INFO
 #define ROS_WARN RCUTILS_LOG_WARN
 #define ROS_DEBUG RCUTILS_LOG_DEBUG
 #define ROS_ERROR RCUTILS_LOG_ERROR

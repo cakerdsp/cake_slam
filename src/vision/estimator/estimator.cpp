@@ -19,7 +19,7 @@
 // 这里只初始化容器和默认状态，不进行参数读取。
 Estimator::Estimator()
 {
-    ROS_INFO("init begins");
+    CAKE_INFO("init begins");
     initThreadFlag = false;
     tmp_pre_integration = nullptr;
     last_marginalization_info = nullptr;
@@ -196,7 +196,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img,
     packet.lidar_depth_priors = featureTracker.takeLidarDepthPriors();
     packet.lio_pose_prior = lio_pose_prior;
 
-    ROS_INFO("[VIO frontend time] stamp=%.6f track=%.3f ms features=%zu lidar_depth=%zu lidar_candidates=%zu threaded=%d",
+    CAKE_INFO("[VIO frontend time] stamp=%.6f track=%.3f ms features=%zu lidar_depth=%zu lidar_candidates=%zu threaded=%d",
              t, feature_tracker_ms, featureFrame.size(), packet.lidar_depth_priors.size(),
              lidar_candidates.size(), MULTIPLE_THREAD);
 
@@ -213,7 +213,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img,
         mBuf.unlock();
         TicToc processTime;
         processMeasurements();
-        ROS_INFO("[VIO process time] stamp=%.6f process=%.3f ms", t, processTime.toc());
+        CAKE_INFO("[VIO process time] stamp=%.6f process=%.3f ms", t, processTime.toc());
     }
 }
 
@@ -364,7 +364,7 @@ void Estimator::processMeasurements()
             // cout << "5-5" << endl;
             pubTF(*this, header);
             // cout << "5-6" << endl;
-            ROS_INFO("[VIO backend time] stamp=%.6f image_process=%.3f ms imu=%zu solver_flag=%d frame_count=%d",
+            CAKE_INFO("[VIO backend time] stamp=%.6f image_process=%.3f ms imu=%zu solver_flag=%d frame_count=%d",
                      feature.timestamp, process_image_ms, imuVector.size(),
                      static_cast<int>(solver_flag), frame_count);
             mProcess.unlock();
@@ -498,7 +498,7 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
 
     if(ESTIMATE_EXTRINSIC == 2)
     {
-        ROS_INFO("calibrating extrinsic param, rotation movement is needed");
+        CAKE_INFO("calibrating extrinsic param, rotation movement is needed");
         if (frame_count != 0)
         {
             vector<pair<Eigen::Vector3d, Eigen::Vector3d>> corres = f_manager.getCorresponding(frame_count - 1, frame_count);
@@ -524,7 +524,7 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
             updateLatestStates();
             solver_flag = NON_LINEAR;
             slideWindow();
-            ROS_INFO("LIO-prior initialization finish!");
+            CAKE_INFO("LIO-prior initialization finish!");
             return;
         }
 
@@ -545,7 +545,7 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
                     updateLatestStates();
                     solver_flag = NON_LINEAR;
                     slideWindow();
-                    ROS_INFO("Initialization finish!");
+                    CAKE_INFO("Initialization finish!");
                 }
                 else
                     slideWindow();
@@ -576,7 +576,7 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
                 updateLatestStates();
                 solver_flag = NON_LINEAR;
                 slideWindow();
-                ROS_INFO("Initialization finish!");
+                CAKE_INFO("Initialization finish!");
             }
         }
 
@@ -593,7 +593,7 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
                 updateLatestStates();
                 solver_flag = NON_LINEAR;
                 slideWindow();
-                ROS_INFO("Initialization finish!");
+                CAKE_INFO("Initialization finish!");
             }
         }
 
@@ -618,7 +618,7 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
         // optimization
         TicToc t_solve;
         optimization();
-        ROS_INFO("solver costs: %f [ms]", t_solve.toc());
+        CAKE_INFO("solver costs: %f [ms]", t_solve.toc());
 
         set<int> removeIndex;
         outliersRejection(removeIndex);
@@ -683,7 +683,7 @@ bool Estimator::initialStructure()
         //ROS_WARN("IMU variation %f!", var);
         if(var < 0.25)
         {
-            ROS_INFO("IMU excitation not enouth!");
+            CAKE_INFO("IMU excitation not enouth!");
             //return false;
         }
     }
@@ -711,7 +711,7 @@ bool Estimator::initialStructure()
     int l;
     if (!relativePose(relative_R, relative_T, l))
     {
-        ROS_INFO("Not enough features or parallax; Move device around");
+        CAKE_INFO("Not enough features or parallax; Move device around");
         return false;
     }
     GlobalSFM sfm;
@@ -796,7 +796,7 @@ bool Estimator::initialStructure()
         return true;
     else
     {
-        ROS_INFO("misalign visual structure with IMU");
+        CAKE_INFO("misalign visual structure with IMU");
         return false;
     }
 
@@ -1044,35 +1044,35 @@ bool Estimator::failureDetection()
     return false;
     if (f_manager.last_track_num < 2)
     {
-        ROS_INFO(" little feature %d", f_manager.last_track_num);
+        CAKE_INFO(" little feature %d", f_manager.last_track_num);
         //return true;
     }
     if (states_[WINDOW_SIZE].bias_a.norm() > 2.5)
     {
-        ROS_INFO(" big IMU acc bias estimation %f", states_[WINDOW_SIZE].bias_a.norm());
+        CAKE_INFO(" big IMU acc bias estimation %f", states_[WINDOW_SIZE].bias_a.norm());
         return true;
     }
     if (states_[WINDOW_SIZE].bias_g.norm() > 1.0)
     {
-        ROS_INFO(" big IMU gyr bias estimation %f", states_[WINDOW_SIZE].bias_g.norm());
+        CAKE_INFO(" big IMU gyr bias estimation %f", states_[WINDOW_SIZE].bias_g.norm());
         return true;
     }
     /*
     if (tic(0) > 1)
     {
-        ROS_INFO(" big extri param estimation %d", tic(0) > 1);
+        CAKE_INFO(" big extri param estimation %d", tic(0) > 1);
         return true;
     }
     */
     Eigen::Vector3d tmp_P = states_[WINDOW_SIZE].pos_end;
     if ((tmp_P - last_P).norm() > 5)
     {
-        //ROS_INFO(" big translation");
+        // CAKE_INFO(" big translation");
         //return true;
     }
     if (abs(tmp_P.z() - last_P.z()) > 1)
     {
-        //ROS_INFO(" big z translation");
+        // CAKE_INFO(" big z translation");
         //return true;
     }
     Eigen::Matrix3d tmp_R = states_[WINDOW_SIZE].rot_end;
@@ -1082,7 +1082,7 @@ bool Estimator::failureDetection()
     delta_angle = acos(delta_Q.w()) * 2.0 / 3.14 * 180.0;
     if (delta_angle > 50)
     {
-        ROS_INFO(" big delta_angle ");
+        CAKE_INFO(" big delta_angle ");
         //return true;
     }
     return false;
@@ -1116,12 +1116,12 @@ void Estimator::optimization()
         problem.AddParameterBlock(para_Ex_Pose[i], SIZE_POSE, local_parameterization);
         if ((ESTIMATE_EXTRINSIC && frame_count == WINDOW_SIZE && states_[0].vel_end.norm() > 0.2) || openExEstimation)
         {
-            //ROS_INFO("estimate extinsic param");
+            // CAKE_INFO("estimate extinsic param");
             openExEstimation = 1;
         }
         else
         {
-            //ROS_INFO("fix extinsic param");
+            // CAKE_INFO("fix extinsic param");
             problem.SetParameterBlockConstant(para_Ex_Pose[i]);
         }
     }
@@ -1610,6 +1610,46 @@ int Estimator::getLastTrackedFeatureCount() const
 int Estimator::getLastDepthFeatureCount() const
 {
     return featureTracker.getLastDepthFeatureCount();
+}
+
+int Estimator::getLastPrevTrackCount() const
+{
+    return featureTracker.getLastPrevTrackCount();
+}
+
+int Estimator::getLastTrackedAfterFlowCount() const
+{
+    return featureTracker.getLastTrackedAfterFlowCount();
+}
+
+int Estimator::getLastPrevLidarTrackCount() const
+{
+    return featureTracker.getLastPrevLidarTrackCount();
+}
+
+int Estimator::getLastTrackedLidarCount() const
+{
+    return featureTracker.getLastTrackedLidarCount();
+}
+
+int Estimator::getLastRejectedByLioPriorCount() const
+{
+    return featureTracker.getLastRejectedByLioPriorCount();
+}
+
+int Estimator::getLastAddedLidarCount() const
+{
+    return featureTracker.getLastAddedLidarCount();
+}
+
+int Estimator::getLastAddedVisualCount() const
+{
+    return featureTracker.getLastAddedVisualCount();
+}
+
+int Estimator::getLastPendingLidarCandidateCount() const
+{
+    return featureTracker.getLastPendingLidarCandidateCount();
 }
 
 bool Estimator::buildVinsFallbackInitialLandmarksDeadCode(std::map<int, Eigen::Vector3d> &sfm_tracked_points)

@@ -26,11 +26,12 @@
 
 #include "cake_slam/common_lib.h"
 #include "cake_slam/lidar_visual_types.h"
+#include "cake_slam/utils/logging.h"
 #include "../utility/tic_toc.h"
 #include "parameters.h"
 
 using namespace std;
-#define ROS_INFO RCUTILS_LOG_INFO
+#define ROS_INFO CAKE_INFO
 #define ROS_WARN RCUTILS_LOG_WARN
 #define ROS_DEBUG RCUTILS_LOG_DEBUG
 #define ROS_ERROR RCUTILS_LOG_ERROR

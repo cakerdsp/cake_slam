@@ -22,10 +22,11 @@
 
 #include "../utility/utility.h"
 #include "../utility/tic_toc.h"
+#include "cake_slam/utils/logging.h"
 
 const int NUM_THREADS = 4;
 
-#define ROS_INFO RCUTILS_LOG_INFO
+#define ROS_INFO CAKE_INFO
 #define ROS_WARN RCUTILS_LOG_WARN
 #define ROS_ERROR RCUTILS_LOG_ERROR
 

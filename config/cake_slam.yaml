@@ -63,6 +63,7 @@ vision:
   keyframe_parallax: 10.0
   estimate_extrinsic: 0
   lidar_depth_enable: 1
+  lidar_prior_feature_enable: 1
   optimize_lidar_inv_depth: 1
   max_lidar_features: 250
   min_lidar_depth: 0.2

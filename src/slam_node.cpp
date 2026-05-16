@@ -13,6 +13,7 @@
 #include <sensor_msgs/image_encodings.hpp>
 #include <std_msgs/msg/header.hpp>
 
+#include "cake_slam/utils/logging.h"
 #include "cake_slam/vision/estimator/parameters.h"
 
 using namespace std::chrono_literals;
@@ -88,13 +89,17 @@ void SlamNode::loadConfiguration()
     slam_mode_ = ONLY_VIO;
   }
 
-  RCLCPP_INFO(get_logger(), "Loaded config: lidar=%d image=%d imu=%d mode=%d",
-              use_lidar_, use_image_, use_imu_, static_cast<int>(slam_mode_));
+  CAKE_INFO("Loaded config: lidar=%d image=%d imu=%d mode=%d frame.world=%s frame.body=%s frame.lidar=%s frame.camera=%s",
+            use_lidar_, use_image_, use_imu_, static_cast<int>(slam_mode_),
+            config_.frame.world.c_str(), config_.frame.body.c_str(),
+            config_.frame.lidar.c_str(), config_.frame.camera.c_str());
 }
 
 // 配置 LIO/VIO 模块与外参设置。
 void SlamNode::configureModules()
 {
+  loadExtrinsicsForMain();
+
   if (use_lidar_) {
     // LiDAR 预处理独立放在主程序中，和 FAST-LIVO2 一样先把 ROS 点云转成项目点类型。
     preprocess_.reset(new Preprocess());
@@ -107,7 +112,6 @@ void SlamNode::configureModules()
 
     // LIO 内部会配置 ImuProcess、体素地图和下采样器。
     lio_.Configure(config_);
-    loadExtrinsicsForMain();
     if (use_image_) {
       lidar_visual_selector_.Configure(config_);
       lidar_visual_selector_.SetExtrinsics(lidar_to_imu_R_, lidar_to_imu_t_,
@@ -121,10 +125,9 @@ void SlamNode::configureModules()
     vio_ = std::make_unique<Estimator>();
     vio_->setParameter();
     if (!use_lidar_) {
-      RCLCPP_INFO(get_logger(),
-                  "Image config: topic=%s target=%dx%d image_time_offset=%.6f td=%.6f cam0_calib=%s",
-                  config_.vision.image_topic.c_str(), config_.vision.image_width, config_.vision.image_height,
-                  config_.common.image_time_offset, config_.time_offset.td, config_.vision.cam0_calib.c_str());
+      CAKE_INFO("Image config: topic=%s target=%dx%d image_time_offset=%.6f td=%.6f cam0_calib=%s",
+                config_.vision.image_topic.c_str(), config_.vision.image_width, config_.vision.image_height,
+                config_.common.image_time_offset, config_.time_offset.td, config_.vision.cam0_calib.c_str());
     }
   }
 }
@@ -177,6 +180,8 @@ void SlamNode::createPublishers()
   pub_imu_prop_odom_ = create_publisher<nav_msgs::msg::Odometry>("/cake_slam/imu_propagate", 1000);
   pub_feature_image_ = image_transport::create_publisher(this, "/cake_slam/feature_image");
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+  static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
+  publishStaticTf();
 }
 
 // 启动数据同步与主处理线程。
@@ -520,8 +525,8 @@ bool SlamNode::syncVioOnly(FusionMeasureGroup &meas)
     imu_vio_buffer_.pop_front();
   }
 
-  RCLCPP_INFO_THROTTLE(
-      get_logger(), *get_clock(), 2000,
+  CAKE_INFO_THROTTLE_MS(
+      2000,
       "VIO-only sync image: image=%.6f imu_cut=%.6f imu_count=%zu vio_imu_queue=%zu image_queue=%zu",
       image_time, imu_cut_time, m.imu.size(), imu_vio_buffer_.size(), image_buffer_.size());
   image_buffer_.pop_front();
@@ -601,8 +606,8 @@ bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_tim
     lidar_time_buffer_.pop_front();
   }
 
-  RCLCPP_INFO_THROTTLE(
-      get_logger(), *get_clock(), 2000,
+  CAKE_INFO_THROTTLE_MS(
+      2000,
       "LIVO sync LIO cut: last_lio=%.6f image=%.6f dt=%.6f imu_last=%.6f cur_pts=%zu next_pts=%zu lidar_queue=%zu image_queue=%zu",
       meas.last_lio_update_time, update_time, update_time - meas.last_lio_update_time, last_imu_time_,
       meas.pcl_proc_cur->size(), meas.pcl_proc_next->size(), lidar_buffer_.size(), image_buffer_.size());
@@ -646,8 +651,8 @@ bool SlamNode::buildVioMeasure(FusionMeasureGroup &meas)
     m.imu.push_back(imu_vio_buffer_.front());
     imu_vio_buffer_.pop_front();
   }
-  RCLCPP_INFO_THROTTLE(
-      get_logger(), *get_clock(), 2000,
+  CAKE_INFO_THROTTLE_MS(
+      2000,
       "LIVO sync VIO image: image=%.6f imu_cut=%.6f lio_prior=%.6f imu_count=%zu vio_imu_queue=%zu image_queue=%zu",
       image_time, imu_cut_time, meas.last_lio_update_time, m.imu.size(), imu_vio_buffer_.size(), image_buffer_.size());
   image_buffer_.pop_front();
@@ -675,14 +680,19 @@ void SlamNode::handleLIO()
   // LioCore 内部会复制测量包，因此主程序同步上下文中的 last_lio_update_time
   // 需要在这里显式推进，后续 LIVO 点云切割才有正确起点。
   const double update_time = measures_.measures.back().lio_time;
+  const auto t_lio_process_start = std::chrono::steady_clock::now();
   lio_.ProcessMeasurement(measures_);
   measures_.last_lio_update_time = update_time;
   state_ = lio_.GetState();
   gravityAlignment();
   latest_ekf_state_ = state_;
   latest_ekf_time_ = update_time;
+  const auto t_lio_process_end = std::chrono::steady_clock::now();
+
   pending_lio_pose_prior_ = makeLioPosePrior(update_time);
   buildLidarVisualCandidates(update_time);
+  const auto t_lio_prior_end = std::chrono::steady_clock::now();
+
   state_update_flag_ = true;
   ekf_finish_once_ = true;
 
@@ -693,13 +703,24 @@ void SlamNode::handleLIO()
   publishMavrosPose(update_time);
 
   const auto t_lio_end = std::chrono::steady_clock::now();
-  const double lio_ms = std::chrono::duration<double, std::milli>(t_lio_end - t_lio_start).count();
-  RCLCPP_INFO(get_logger(),
-              "[LIO time] stamp=%.6f total=%.3f ms imu=%zu cur_pts=%zu next_pts=%zu lidar_depth_candidates=%zu",
-              update_time, lio_ms, measures_.measures.back().imu.size(),
-              measures_.pcl_proc_cur ? measures_.pcl_proc_cur->size() : 0,
-              measures_.pcl_proc_next ? measures_.pcl_proc_next->size() : 0,
-              pending_lidar_visual_candidates_.size());
+  static int lio_time_count = 0;
+  static double lio_average_total = 0.0;
+  const double process_sec = std::chrono::duration<double>(t_lio_process_end - t_lio_process_start).count();
+  const double prior_sec = std::chrono::duration<double>(t_lio_prior_end - t_lio_process_end).count();
+  const double publish_sec = std::chrono::duration<double>(t_lio_end - t_lio_prior_end).count();
+  const double total_sec = std::chrono::duration<double>(t_lio_end - t_lio_start).count();
+  lio_time_count++;
+  lio_average_total += (total_sec - lio_average_total) / static_cast<double>(lio_time_count);
+  PrintTimeTable("LIO Mapping Time", BOLDCYAN,
+                 {{"IESKF+VoxelMap", process_sec},
+                  {"BuildVisualPrior", prior_sec},
+                  {"PublishOutputs", publish_sec}},
+                 total_sec, lio_average_total);
+  CAKE_INFO("LIO summary: stamp=%.6f imu=%zu cur_pts=%zu next_pts=%zu lidar_prior_candidates=%zu",
+            update_time, measures_.measures.back().imu.size(),
+            measures_.pcl_proc_cur ? measures_.pcl_proc_cur->size() : 0,
+            measures_.pcl_proc_next ? measures_.pcl_proc_next->size() : 0,
+            pending_lidar_visual_candidates_.size());
 }
 
 // 执行一次 VIO 更新并回写融合状态。
@@ -721,6 +742,9 @@ void SlamNode::handleVIO()
   for (const auto &imu : measure.imu) {
     vio_->inputImuSample(imu);
   }
+  const auto t_vio_imu_end = std::chrono::steady_clock::now();
+  auto t_vio_image_end = t_vio_imu_end;
+  auto t_vio_publish_end = t_vio_imu_end;
   if (!measure.img.empty()) {
     if (last_vio_update_time_ < 0.0) {
       vio_->initFirstPose(state_.pos_end, state_.rot_end);
@@ -728,6 +752,7 @@ void SlamNode::handleVIO()
     vio_->inputImage(measure.vio_time, measure.img,
                      pending_lidar_visual_candidates_, pending_lio_pose_prior_);
     publishFeatureImage(measure.vio_time);
+    t_vio_image_end = std::chrono::steady_clock::now();
     pending_lidar_visual_candidates_.clear();
     pending_lio_pose_prior_ = LioPosePrior();
     last_vio_update_time_ = measure.vio_time;
@@ -740,8 +765,8 @@ void SlamNode::handleVIO()
         constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
         const double rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
         const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
-        RCLCPP_INFO_THROTTLE(
-            get_logger(), *get_clock(), 2000,
+        CAKE_INFO_THROTTLE_MS(
+            2000,
             "VIO feedback: stamp=%.6f pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d "
             "lio_pos=(%.3f %.3f %.3f) vio_pos=(%.3f %.3f %.3f)",
             measure.vio_time, pos_delta, rot_delta_deg, vio_->getLastTrackedFeatureCount(),
@@ -749,8 +774,8 @@ void SlamNode::handleVIO()
             lio_state_before_vio.pos_end.y(), lio_state_before_vio.pos_end.z(),
             vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
       } else {
-        RCLCPP_INFO_THROTTLE(
-            get_logger(), *get_clock(), 2000,
+        CAKE_INFO_THROTTLE_MS(
+            2000,
             "VIO-only state: stamp=%.6f tracked=%d lidar_depth=%d pos=(%.3f %.3f %.3f)",
             measure.vio_time, vio_->getLastTrackedFeatureCount(), vio_->getLastDepthFeatureCount(),
             vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
@@ -769,16 +794,38 @@ void SlamNode::handleVIO()
       publishTf(measure.vio_time);
       publishMavrosPose(measure.vio_time);
       publishVisualSubmap(measure.vio_time);
+      t_vio_publish_end = std::chrono::steady_clock::now();
     }
   }
 
   const auto t_vio_end = std::chrono::steady_clock::now();
-  const double vio_ms = std::chrono::duration<double, std::milli>(t_vio_end - t_vio_start).count();
-  RCLCPP_INFO(get_logger(),
-              "[VIO time] stamp=%.6f total=%.3f ms imu=%zu tracked=%d lidar_depth=%d lidar_candidates=%zu lio_prior=%d mode=%d",
-              measure.vio_time, vio_ms, measure.imu.size(), vio_->getLastTrackedFeatureCount(),
-              vio_->getLastDepthFeatureCount(), lidar_candidate_count, static_cast<int>(has_lio_prior),
-              static_cast<int>(slam_mode_));
+  if (t_vio_publish_end < t_vio_image_end) {
+    t_vio_publish_end = t_vio_image_end;
+  }
+  static int vio_time_count = 0;
+  static double vio_average_total = 0.0;
+  const double imu_sec = std::chrono::duration<double>(t_vio_imu_end - t_vio_start).count();
+  const double image_sec = std::chrono::duration<double>(t_vio_image_end - t_vio_imu_end).count();
+  const double publish_sec = std::chrono::duration<double>(t_vio_publish_end - t_vio_image_end).count();
+  const double total_sec = std::chrono::duration<double>(t_vio_end - t_vio_start).count();
+  vio_time_count++;
+  vio_average_total += (total_sec - vio_average_total) / static_cast<double>(vio_time_count);
+  PrintTimeTable("VIO Time", BOLDGREEN,
+                 {{"InputIMU", imu_sec},
+                  {"TrackAndOptimize", image_sec},
+                  {"PublishOutputs", publish_sec}},
+                 total_sec, vio_average_total);
+  CAKE_INFO("VIO summary: stamp=%.6f imu=%zu tracked=%d lidar_depth=%d lidar_candidates=%zu lio_prior=%d mode=%d",
+            measure.vio_time, measure.imu.size(), vio_->getLastTrackedFeatureCount(),
+            vio_->getLastDepthFeatureCount(), lidar_candidate_count, static_cast<int>(has_lio_prior),
+            static_cast<int>(slam_mode_));
+  CAKE_INFO_THROTTLE_MS(
+      2000,
+      "VIO feature tracking: prev=%d tracked_after_flow=%d prev_lidar=%d tracked_lidar=%d lio_prior_reject=%d added_lidar=%d added_visual=%d pending_lidar_candidates=%d",
+      vio_->getLastPrevTrackCount(), vio_->getLastTrackedAfterFlowCount(),
+      vio_->getLastPrevLidarTrackCount(), vio_->getLastTrackedLidarCount(),
+      vio_->getLastRejectedByLioPriorCount(), vio_->getLastAddedLidarCount(),
+      vio_->getLastAddedVisualCount(), vio_->getLastPendingLidarCandidateCount());
 }
 
 void SlamNode::clearAllBuffersLocked()
@@ -956,22 +1003,36 @@ void SlamNode::loadExtrinsicsForMain()
     lidar_to_camera_t_ << config_.extrinsic.camera_T[0], config_.extrinsic.camera_T[1], config_.extrinsic.camera_T[2];
   }
 
-  RCLCPP_INFO(get_logger(),
-              "Main extrinsics: R_I_L=[%.6f %.6f %.6f; %.6f %.6f %.6f; %.6f %.6f %.6f], t_I_L=[%.6f %.6f %.6f]",
-              lidar_to_imu_R_(0, 0), lidar_to_imu_R_(0, 1), lidar_to_imu_R_(0, 2),
-              lidar_to_imu_R_(1, 0), lidar_to_imu_R_(1, 1), lidar_to_imu_R_(1, 2),
-              lidar_to_imu_R_(2, 0), lidar_to_imu_R_(2, 1), lidar_to_imu_R_(2, 2),
-              lidar_to_imu_t_.x(), lidar_to_imu_t_.y(), lidar_to_imu_t_.z());
-  RCLCPP_INFO(get_logger(),
-              "Main extrinsics: R_C_L=[%.6f %.6f %.6f; %.6f %.6f %.6f; %.6f %.6f %.6f], t_C_L=[%.6f %.6f %.6f]",
-              lidar_to_camera_R_(0, 0), lidar_to_camera_R_(0, 1), lidar_to_camera_R_(0, 2),
-              lidar_to_camera_R_(1, 0), lidar_to_camera_R_(1, 1), lidar_to_camera_R_(1, 2),
-              lidar_to_camera_R_(2, 0), lidar_to_camera_R_(2, 1), lidar_to_camera_R_(2, 2),
-              lidar_to_camera_t_.x(), lidar_to_camera_t_.y(), lidar_to_camera_t_.z());
-  RCLCPP_INFO(get_logger(),
-              "Image config: topic=%s target=%dx%d image_time_offset=%.6f td=%.6f cam0_calib=%s",
-              config_.vision.image_topic.c_str(), config_.vision.image_width, config_.vision.image_height,
-              config_.common.image_time_offset, config_.time_offset.td, config_.vision.cam0_calib.c_str());
+  if (config_.extrinsic.body_T_cam0.size() >= 16) {
+    const auto &T = config_.extrinsic.body_T_cam0;
+    camera_to_imu_R_ << T[0], T[1], T[2],
+                        T[4], T[5], T[6],
+                        T[8], T[9], T[10];
+    camera_to_imu_t_ << T[3], T[7], T[11];
+  } else {
+    camera_to_imu_R_ = lidar_to_imu_R_ * lidar_to_camera_R_.transpose();
+    camera_to_imu_t_ = lidar_to_imu_t_ - camera_to_imu_R_ * lidar_to_camera_t_;
+  }
+
+  CAKE_INFO("Main extrinsics: R_I_L=[%.6f %.6f %.6f; %.6f %.6f %.6f; %.6f %.6f %.6f], t_I_L=[%.6f %.6f %.6f]",
+            lidar_to_imu_R_(0, 0), lidar_to_imu_R_(0, 1), lidar_to_imu_R_(0, 2),
+            lidar_to_imu_R_(1, 0), lidar_to_imu_R_(1, 1), lidar_to_imu_R_(1, 2),
+            lidar_to_imu_R_(2, 0), lidar_to_imu_R_(2, 1), lidar_to_imu_R_(2, 2),
+            lidar_to_imu_t_.x(), lidar_to_imu_t_.y(), lidar_to_imu_t_.z());
+  CAKE_INFO("Main extrinsics: R_C_L=[%.6f %.6f %.6f; %.6f %.6f %.6f; %.6f %.6f %.6f], t_C_L=[%.6f %.6f %.6f]",
+            lidar_to_camera_R_(0, 0), lidar_to_camera_R_(0, 1), lidar_to_camera_R_(0, 2),
+            lidar_to_camera_R_(1, 0), lidar_to_camera_R_(1, 1), lidar_to_camera_R_(1, 2),
+            lidar_to_camera_R_(2, 0), lidar_to_camera_R_(2, 1), lidar_to_camera_R_(2, 2),
+            lidar_to_camera_t_.x(), lidar_to_camera_t_.y(), lidar_to_camera_t_.z());
+  CAKE_INFO("Main extrinsics: R_I_C=[%.6f %.6f %.6f; %.6f %.6f %.6f; %.6f %.6f %.6f], t_I_C=[%.6f %.6f %.6f]",
+            camera_to_imu_R_(0, 0), camera_to_imu_R_(0, 1), camera_to_imu_R_(0, 2),
+            camera_to_imu_R_(1, 0), camera_to_imu_R_(1, 1), camera_to_imu_R_(1, 2),
+            camera_to_imu_R_(2, 0), camera_to_imu_R_(2, 1), camera_to_imu_R_(2, 2),
+            camera_to_imu_t_.x(), camera_to_imu_t_.y(), camera_to_imu_t_.z());
+  CAKE_INFO("Image config: topic=%s target=%dx%d image_time_offset=%.6f td=%.6f cam0_calib=%s lidar_prior_feature_enable=%d",
+            config_.vision.image_topic.c_str(), config_.vision.image_width, config_.vision.image_height,
+            config_.common.image_time_offset, config_.time_offset.td, config_.vision.cam0_calib.c_str(),
+            config_.vision.lidar_prior_feature_enable ? 1 : 0);
 }
 
 LioPosePrior SlamNode::makeLioPosePrior(double stamp) const
@@ -1015,7 +1076,8 @@ void SlamNode::buildLidarVisualCandidates(double /*stamp*/)
   // Project the latest LIO cloud into the synchronized image and keep only
   // candidates that pass valid-mask, z-buffer, texture, and spacing checks.
   pending_lidar_visual_candidates_.clear();
-  if (!use_image_ || !vio_ || !config_.vision.lidar_depth_enable || latest_sync_mono_image_.empty()) {
+  if (!use_image_ || !vio_ || !config_.vision.lidar_depth_enable ||
+      !config_.vision.lidar_prior_feature_enable || latest_sync_mono_image_.empty()) {
     return;
   }
 
@@ -1032,10 +1094,11 @@ void SlamNode::buildLidarVisualCandidates(double /*stamp*/)
       source_cloud, state_, latest_sync_mono_image_, vio_->getUndistortedValidMask(), camera);
 
   const auto &stats = lidar_visual_selector_.lastStats();
-  RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
-                       "LiDAR visual candidates: input=%d depth=%d image=%d z=%d texture=%d mask=%d image_size=%dx%d",
-                       stats.input_points, stats.positive_depth, stats.in_image, stats.zbuffer_kept,
-                       stats.texture_kept, stats.mask_kept, latest_sync_mono_image_.cols, latest_sync_mono_image_.rows);
+  CAKE_INFO_THROTTLE_MS(
+      2000,
+      "LiDAR visual candidates: input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d image_size=%dx%d",
+      stats.input_points, stats.positive_depth, stats.in_image, stats.zbuffer_kept,
+      stats.texture_kept, stats.mask_kept, latest_sync_mono_image_.cols, latest_sync_mono_image_.rows);
 }
 
 Eigen::Vector3d SlamNode::lidarToWorld(const Eigen::Vector3d &point_lidar) const
@@ -1051,7 +1114,7 @@ void SlamNode::handleFirstFrame()
   }
   first_lidar_time_ = measures_.last_lio_update_time;
   first_frame_handled_ = true;
-  RCLCPP_INFO(get_logger(), "First LiDAR frame time: %.6f", first_lidar_time_);
+  CAKE_INFO("First LiDAR frame time: %.6f", first_lidar_time_);
 }
 
 void SlamNode::gravityAlignment()
@@ -1069,7 +1132,7 @@ void SlamNode::gravityAlignment()
   state_.gravity = R * state_.gravity;
   lio_.SetState(state_);
   gravity_align_finished_ = true;
-  RCLCPP_INFO(get_logger(), "Gravity alignment finished.");
+  CAKE_INFO("Gravity alignment finished.");
 }
 
 void SlamNode::publishOdometry(double stamp)
@@ -1153,6 +1216,51 @@ void SlamNode::publishTf(double stamp)
   tf.transform.rotation.z = q.z();
   tf.transform.rotation.w = q.w();
   tf_broadcaster_->sendTransform(tf);
+}
+
+void SlamNode::publishStaticTf()
+{
+  if (!static_tf_broadcaster_) {
+    return;
+  }
+
+  std::vector<geometry_msgs::msg::TransformStamped> transforms;
+  const auto stamp = now();
+
+  const auto make_transform =
+      [stamp](const std::string &parent, const std::string &child,
+              const Eigen::Matrix3d &R_parent_child,
+              const Eigen::Vector3d &t_parent_child) {
+        geometry_msgs::msg::TransformStamped tf;
+        tf.header.stamp = stamp;
+        tf.header.frame_id = parent;
+        tf.child_frame_id = child;
+        tf.transform.translation.x = t_parent_child.x();
+        tf.transform.translation.y = t_parent_child.y();
+        tf.transform.translation.z = t_parent_child.z();
+        const Eigen::Quaterniond q(R_parent_child);
+        tf.transform.rotation.x = q.x();
+        tf.transform.rotation.y = q.y();
+        tf.transform.rotation.z = q.z();
+        tf.transform.rotation.w = q.w();
+        return tf;
+      };
+
+  if (!config_.frame.lidar.empty() && config_.frame.lidar != config_.frame.body) {
+    transforms.push_back(make_transform(config_.frame.body, config_.frame.lidar,
+                                        lidar_to_imu_R_, lidar_to_imu_t_));
+  }
+  if (!config_.frame.camera.empty() && config_.frame.camera != config_.frame.body) {
+    transforms.push_back(make_transform(config_.frame.body, config_.frame.camera,
+                                        camera_to_imu_R_, camera_to_imu_t_));
+  }
+
+  if (!transforms.empty()) {
+    static_tf_broadcaster_->sendTransform(transforms);
+    CAKE_INFO("Static TF published: world=%s body=%s lidar=%s camera=%s",
+              config_.frame.world.c_str(), config_.frame.body.c_str(),
+              config_.frame.lidar.c_str(), config_.frame.camera.c_str());
+  }
 }
 
 void SlamNode::publishRawCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar)
@@ -1261,10 +1369,11 @@ void SlamNode::publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &clou
     return;
   }
 
-  RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
-                       "Colored cloud: input=%zu positive_depth=%zu in_image=%zu published=%zu image_size=%dx%d",
-                       cloud_lidar->size(), positive_depth, in_image, colored.size(),
-                       latest_sync_color_image_.cols, latest_sync_color_image_.rows);
+  CAKE_INFO_THROTTLE_MS(
+      2000,
+      "Colored cloud: input=%zu positive_depth=%zu in_image=%zu published=%zu image_size=%dx%d",
+      cloud_lidar->size(), positive_depth, in_image, colored.size(),
+      latest_sync_color_image_.cols, latest_sync_color_image_.rows);
 
   sensor_msgs::msg::PointCloud2 msg;
   pcl::toROSMsg(colored, msg);
@@ -1296,9 +1405,10 @@ void SlamNode::publishFeatureImage(double stamp)
   const int total = vio_->getLastTrackedFeatureCount();
   const int with_depth = vio_->getLastDepthFeatureCount();
   const double ratio = total > 0 ? static_cast<double>(with_depth) / total : 0.0;
-  RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
-                       "Feature image: stamp=%.6f tracked=%d lidar_depth=%d depth_ratio=%.3f size=%dx%d",
-                       stamp, total, with_depth, ratio, debug_image.cols, debug_image.rows);
+  CAKE_INFO_THROTTLE_MS(
+      2000,
+      "Feature image: stamp=%.6f tracked=%d lidar_depth=%d depth_ratio=%.3f size=%dx%d",
+      stamp, total, with_depth, ratio, debug_image.cols, debug_image.rows);
 }
 
 void SlamNode::publishVisualSubmap(double stamp)

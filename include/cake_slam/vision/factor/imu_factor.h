@@ -19,10 +19,11 @@
 #include "../utility/utility.h"
 #include "../estimator/parameters.h"
 #include "integration_base.h"
+#include "cake_slam/utils/logging.h"
 
 #include <ceres/ceres.h>
 
-#define ROS_INFO RCUTILS_LOG_INFO
+#define ROS_INFO CAKE_INFO
 #define ROS_WARN RCUTILS_LOG_WARN
 #define ROS_ERROR RCUTILS_LOG_ERROR
 
