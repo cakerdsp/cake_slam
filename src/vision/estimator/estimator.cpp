@@ -574,7 +574,7 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
                                              R_i * pre_integrations[i]->delta_p -
                                              0.5 * g * dt * dt;
                         states_[i].vel_end = states_[i - 1].vel_end +
-                                             R_i * pre_integrations[i]->delta_v -
+                                             R_i * pre_integrations[i]->delta_v +
                                              g * dt;
                     }
 
