@@ -519,6 +519,7 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
     {
         if (frame_count == WINDOW_SIZE && lio_pose_priors_[frame_count].valid)
         {
+            std::printf(BOLDYELLOW "| %-29s | %-27s |" RESET "\n", "VIO Init Path", "LIO prior");
             f_manager.triangulate(frame_count, states_, tic, ric);
             optimization();
             updateLatestStates();
@@ -533,6 +534,7 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
         {
             if (frame_count == WINDOW_SIZE)
             {
+                std::printf(BOLDYELLOW "| %-29s | %-27s |" RESET "\n", "VIO Init Path", "VINS initialStructure");
                 bool result = false;
                 if(ESTIMATE_EXTRINSIC != 2 && (header - initial_timestamp) > 0.1)
                 {
