@@ -112,7 +112,7 @@ void Estimator::clearState()
         prior = cake_slam::LioPosePrior();
     for (auto &prior : lio_full_priors_)
         prior = cake_slam::LioFullStatePrior();
-    lio_full_state_initialized_ = false;
+    lio_full_state_init_attempted_ = false;
 
     failure_occur = 0;
 
@@ -528,46 +528,73 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
 
     if (solver_flag == INITIAL)
     {
-        if (frame_count == WINDOW_SIZE && !lio_full_state_initialized_)
+        if (frame_count == WINDOW_SIZE && !lio_full_state_init_attempted_)
         {
-            int valid_full_priors = 0;
-            for (int i = 0; i <= WINDOW_SIZE; ++i)
+            lio_full_state_init_attempted_ = true;
+            auto &anchor_prior = lio_full_priors_[0];
+            if (!anchor_prior.valid || std::abs(anchor_prior.timestamp - Headers[0]) > 0.01)
             {
-                auto &prior = lio_full_priors_[i];
-                if (!prior.valid || std::abs(prior.timestamp - Headers[i]) > 0.01)
-                {
-                    prior.valid = false;
-                    continue;
-                }
-                states_[i].rot_end = prior.R_WB;
-                states_[i].pos_end = prior.p_WB;
-                states_[i].vel_end = prior.v_WB;
-                states_[i].bias_a = prior.ba;
-                states_[i].bias_g = prior.bg;
-                valid_full_priors++;
+                anchor_prior.valid = false;
             }
-            if (valid_full_priors > 0)
+            if (anchor_prior.valid)
             {
-                std::printf(BOLDYELLOW "| %-29s | %-27s |" RESET "\n", "VIO Init Path", "LIO full-state prior");
-                CAKE_INFO("LIO full-state initialization: valid_window_priors=%d/%d", valid_full_priors, WINDOW_SIZE + 1);
-                if (USE_IMU)
+                bool imu_propagation_ok = USE_IMU;
+                for (int i = 1; i <= WINDOW_SIZE; ++i)
                 {
+                    if (!pre_integrations[i] || pre_integrations[i]->sum_dt <= 0.0)
+                    {
+                        imu_propagation_ok = false;
+                        break;
+                    }
+                }
+
+                if (imu_propagation_ok)
+                {
+                    std::printf(BOLDYELLOW "| %-29s | %-27s |" RESET "\n", "VIO Init Path", "LIO full-state prior");
+                    CAKE_INFO("LIO full-state initialization: anchor=0 stamp=%.6f window_stamp=%.6f",
+                              anchor_prior.timestamp, Headers[0]);
+
+                    states_[0].rot_end = anchor_prior.R_WB;
+                    states_[0].pos_end = anchor_prior.p_WB;
+                    states_[0].vel_end = Eigen::Vector3d::Zero();
+                    states_[0].bias_a = anchor_prior.ba;
+                    states_[0].bias_g = anchor_prior.bg;
+
                     for (int i = 1; i <= WINDOW_SIZE; ++i)
                     {
-                        if (pre_integrations[i])
-                            pre_integrations[i]->repropagate(states_[i - 1].bias_a, states_[i - 1].bias_g);
+                        states_[i].bias_a = states_[0].bias_a;
+                        states_[i].bias_g = states_[0].bias_g;
+                        pre_integrations[i]->repropagate(states_[i - 1].bias_a, states_[i - 1].bias_g);
+
+                        const double dt = pre_integrations[i]->sum_dt;
+                        const Eigen::Matrix3d R_i = states_[i - 1].rot_end;
+                        states_[i].rot_end = R_i * pre_integrations[i]->delta_q.toRotationMatrix();
+                        states_[i].pos_end = states_[i - 1].pos_end +
+                                             states_[i - 1].vel_end * dt +
+                                             R_i * pre_integrations[i]->delta_p -
+                                             0.5 * g * dt * dt;
+                        states_[i].vel_end = states_[i - 1].vel_end +
+                                             R_i * pre_integrations[i]->delta_v -
+                                             g * dt;
                     }
+                }
+
+                if (!imu_propagation_ok)
+                {
+                    CAKE_INFO("LIO full-state initialization fallback: invalid IMU preintegration in full window.");
+                }
+                else
+                {
                     if (tmp_pre_integration)
                         tmp_pre_integration->repropagate(states_[frame_count].bias_a, states_[frame_count].bias_g);
+                    f_manager.triangulate(frame_count, states_, tic, ric);
+                    optimization();
+                    updateLatestStates();
+                    solver_flag = NON_LINEAR;
+                    slideWindow();
+                    CAKE_INFO("LIO full-state initialization finish!");
+                    return;
                 }
-                f_manager.triangulate(frame_count, states_, tic, ric);
-                optimization();
-                updateLatestStates();
-                solver_flag = NON_LINEAR;
-                lio_full_state_initialized_ = true;
-                slideWindow();
-                CAKE_INFO("LIO full-state initialization finish!");
-                return;
             }
         }
 

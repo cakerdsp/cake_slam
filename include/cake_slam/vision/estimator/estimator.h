@@ -261,7 +261,7 @@ public:
     IntegrationBase *tmp_pre_integration = nullptr;
     cake_slam::LioPosePrior lio_pose_priors_[WINDOW_SIZE + 1];
     cake_slam::LioFullStatePrior lio_full_priors_[WINDOW_SIZE + 1];
-    bool lio_full_state_initialized_ = false;
+    bool lio_full_state_init_attempted_ = false;
     Eigen::Vector3d initP = Eigen::Vector3d::Zero();
     Eigen::Matrix3d initR = Eigen::Matrix3d::Identity();
 
