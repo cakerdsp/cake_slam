@@ -553,6 +553,10 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
                     std::printf(BOLDYELLOW "| %-29s | %-27s |" RESET "\n", "VIO Init Path", "LIO full-state prior");
                     CAKE_INFO("LIO full-state initialization: anchor=0 stamp=%.6f window_stamp=%.6f",
                               anchor_prior.timestamp, Headers[0]);
+                    std::printf(BOLDYELLOW "| %-29s | ba_z=% .6f bg_z=% .6f |" RESET "\n",
+                                "LIO Full Bias",
+                                anchor_prior.ba.z(),
+                                anchor_prior.bg.z());
 
                     states_[0].rot_end = anchor_prior.R_WB;
                     states_[0].pos_end = anchor_prior.p_WB;

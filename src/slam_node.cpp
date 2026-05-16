@@ -232,6 +232,7 @@ void SlamNode::imuCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
 
   ImuSample sample = ImuSampleFromMsg(msg);
   sample.stamp -= config_.common.imu_time_offset;
+  std::printf("CRITICAL DEBUG: IMU acc z = %.6f\n", sample.acc.z());
 
   // 可选兼容某些驱动的整秒跳变修正，逻辑保持和 FAST-LIVO2 主程序一致。
   if (config_.common.ros_driver_bug_fix && last_lidar_time_ > 0.0) {
