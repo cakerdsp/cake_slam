@@ -577,6 +577,16 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
                                              R_i * pre_integrations[i]->delta_v -
                                              g * dt;
                     }
+
+                std::printf(BOLDYELLOW "| %-29s | z0=% .4f zN=% .4f v0z=% .4f vNz=% .4f |" RESET "\n",
+                            "VIO Init Pre-Opt",
+                            states_[0].pos_end.z(),
+                            states_[WINDOW_SIZE].pos_end.z(),
+                            states_[0].vel_end.z(),
+                            states_[WINDOW_SIZE].vel_end.z());
+                std::printf(BOLDYELLOW "| %-29s | g=% .3f % .3f % .3f |" RESET "\n",
+                            "VIO Init Gravity",
+                            g.x(), g.y(), g.z());
                 }
 
                 if (!imu_propagation_ok)
@@ -589,6 +599,12 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
                         tmp_pre_integration->repropagate(states_[frame_count].bias_a, states_[frame_count].bias_g);
                     f_manager.triangulate(frame_count, states_, tic, ric);
                     optimization();
+                    std::printf(BOLDYELLOW "| %-29s | z0=% .4f zN=% .4f v0z=% .4f vNz=% .4f |" RESET "\n",
+                                "VIO Init Post-Opt",
+                                states_[0].pos_end.z(),
+                                states_[WINDOW_SIZE].pos_end.z(),
+                                states_[0].vel_end.z(),
+                                states_[WINDOW_SIZE].vel_end.z());
                     updateLatestStates();
                     solver_flag = NON_LINEAR;
                     slideWindow();
