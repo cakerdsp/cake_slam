@@ -7,6 +7,9 @@
  * you may not use this file except in compliance with the License.
  *******************************************************/
 
+// 模块功能：SE(3) 位姿局部参数化实现，
+// 支持优化中的 Plus/Minus 与雅可比计算。
+
 #include "pose_local_parameterization.h"
 
 // 在位姿流形上执行 x (+) delta。

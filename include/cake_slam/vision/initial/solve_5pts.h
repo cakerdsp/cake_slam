@@ -11,6 +11,9 @@
 
 #pragma once
 
+// 模块功能：五点法相对位姿求解器接口，
+// 为视觉初始化与相对运动估计提供基础工具。
+
 #include <vector>
 using namespace std;
 

@@ -1,3 +1,6 @@
+// 模块功能：LiDAR-视觉候选特征选择实现，
+// 将点云投影到图像并筛选可跟踪种子。
+
 #include "cake_slam/lidar_visual_selector.h"
 
 #include <algorithm>

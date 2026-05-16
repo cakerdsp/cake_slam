@@ -9,6 +9,9 @@
 
 #pragma once
 
+// 模块功能：视觉估计结果的 ROS 可视化发布接口，
+// 负责轨迹、里程计、点云与关键帧等话题输出。
+
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/header.hpp>
 #include <std_msgs/msg/float32.hpp>

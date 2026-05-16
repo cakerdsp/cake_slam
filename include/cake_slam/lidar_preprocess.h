@@ -10,6 +10,9 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
+// 模块功能：LiDAR 点云预处理与特征提取接口定义，
+// 包含去畸变、滤波与几何特征分类所需的数据结构与参数。
+
 #ifndef PREPROCESS_H_
 #define PREPROCESS_H_
 
@@ -138,6 +141,7 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(Pandar128_ros::Point,
                                   (float, x, x)(float, y, y)(float, z, z)(float, timestamp, timestamp))
 /*****************/
 
+// 预处理器：负责解析各雷达格式点云，并输出统一特征点云。
 class Preprocess
 {
 public:

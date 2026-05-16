@@ -9,6 +9,9 @@
 
 #pragma once
 
+// 模块功能：视觉/惯导数学工具集合，
+// 提供四元数与矩阵运算的常用辅助函数。
+
 #include <cmath>
 #include <cassert>
 #include <cstring>

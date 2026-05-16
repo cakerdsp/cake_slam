@@ -9,6 +9,9 @@
  * Author: Qin Tong (qintonguav@gmail.com)
  *******************************************************/
 
+// 模块功能：外参旋转初始化实现，
+// 通过视觉与 IMU 相对旋转估计初始外参。
+
 #include "initial_ex_rotation.h"
 
 // 视觉-IMU 旋转外参初始化器。

@@ -7,6 +7,9 @@
  * you may not use this file except in compliance with the License.
  *******************************************************/
 
+// 模块功能：视觉后端估计器实现，
+// 负责滑窗优化、状态更新与 LiDAR 先验融合。
+
 #include "estimator.h"
 #include "cake_slam/vision/utility/visualization.h"
 #include "cake_slam/vision/factor/inverse_depth_prior_factor.h"

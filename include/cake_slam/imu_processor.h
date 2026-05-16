@@ -10,6 +10,9 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
+// 模块功能：IMU 处理与点云去畸变接口定义，提供传播、初始化与偏置估计等能力，
+// 支撑 LIO 主流程对 IMU 与 LiDAR 数据的紧耦合融合。
+
 #ifndef IMU_PROCESSING_H
 #define IMU_PROCESSING_H
 

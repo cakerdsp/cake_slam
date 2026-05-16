@@ -7,6 +7,9 @@
  * you may not use this file except in compliance with the License.
  *******************************************************/
 
+// 模块功能：特征管理器实现，
+// 负责特征生命周期管理与可优化特征筛选。
+
 #include "feature_manager.h"
 #include "cake_slam/common_lib.h"
 

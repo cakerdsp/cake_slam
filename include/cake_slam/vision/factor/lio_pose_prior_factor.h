@@ -1,5 +1,8 @@
 #pragma once
 
+// 模块功能：LIO 位姿先验因子接口，
+// 将 LiDAR-IMU 估计的位姿与协方差注入视觉优化。
+
 #include <ceres/ceres.h>
 #include <Eigen/Dense>
 

@@ -9,6 +9,9 @@
 
 #pragma once
 
+// 模块功能：IMU 预积分基础类定义，负责积分、重传播与协方差更新，
+// 为 IMU 因子提供稳定的预积分量。
+
 #include "../utility/utility.h"
 #include "../estimator/parameters.h"
 

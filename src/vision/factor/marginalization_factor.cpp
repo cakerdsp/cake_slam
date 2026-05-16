@@ -7,6 +7,9 @@
  * you may not use this file except in compliance with the License.
  *******************************************************/
 
+// 模块功能：滑窗边缘化实现，
+// 计算与维护被移除状态对应的先验约束。
+
 #include "marginalization_factor.h"
 
 // 对一个残差块求值，并缓存残差和雅可比。

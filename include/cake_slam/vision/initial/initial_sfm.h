@@ -10,6 +10,9 @@
  *******************************************************/
 
 #pragma once 
+
+// 模块功能：视觉初始化的全局 SFM 接口，
+// 恢复多帧相机位姿与稀疏三维结构。
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
 #include <eigen3/Eigen/Dense>

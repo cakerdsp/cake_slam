@@ -9,6 +9,9 @@
 
 #pragma once
 
+// 模块功能：滑窗边缘化因子与数据结构定义，
+// 负责构建先验并维护被移除状态的约束。
+
 #include <rclcpp/rclcpp.hpp>
 #include <rcutils/logging_macros.h>
 // #include <ros/console.h>

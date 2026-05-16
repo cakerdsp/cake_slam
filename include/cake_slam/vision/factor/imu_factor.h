@@ -8,6 +8,9 @@
  *******************************************************/
 
 #pragma once
+
+// 模块功能：IMU 预积分因子定义，用于滑窗优化中连接相邻状态，
+// 提供残差计算与雅可比构建。
 #include <rcpputils/asserts.hpp>
 #include <rcutils/logging_macros.h>
 #include <iostream>

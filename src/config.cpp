@@ -1,3 +1,6 @@
+// 模块功能：配置文件读取与参数填充实现，
+// 负责从统一 YAML 中提取各模块运行参数。
+
 #include "cake_slam/config.h"
 
 #include <opencv2/core.hpp>

@@ -9,6 +9,9 @@
  * Author: Qin Tong (qintonguav@gmail.com)
  *******************************************************/
 
+// 模块功能：全局 SFM 初始化实现，
+// 负责三角化与相机位姿恢复。
+
 #include "initial_sfm.h"
 
 // 全局 SFM 初始化器。

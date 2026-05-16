@@ -1,3 +1,6 @@
+// 模块功能：ROS2 进程入口占位实现，
+// 保持最小化启动与退出流程。
+
 #include <rclcpp/rclcpp.hpp>
 
 int main(int argc, char **argv)

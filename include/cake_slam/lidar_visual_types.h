@@ -1,5 +1,8 @@
 #pragma once
 
+// 模块功能：LiDAR-视觉融合相关数据类型定义，
+// 提供位姿先验、候选点与深度先验等结构体以支持前端与因子构建。
+
 #include <Eigen/Dense>
 #include <opencv2/core.hpp>
 

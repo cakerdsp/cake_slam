@@ -1,5 +1,8 @@
 #pragma once
 
+// 模块功能：统一 IMU 采样数据结构与消息转换工具，
+// 为 LIO/VIO 前后端提供一致的惯导输入格式。
+
 #include <eigen3/Eigen/Dense>
 #include <sensor_msgs/msg/imu.hpp>
 #include <rclcpp/rclcpp.hpp>

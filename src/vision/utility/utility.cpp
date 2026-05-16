@@ -7,6 +7,9 @@
  * you may not use this file except in compliance with the License.
  *******************************************************/
 
+// 模块功能：视觉/惯导数学工具实现，
+// 提供旋转与四元数的辅助计算。
+
 #include "utility.h"
 
 // 根据重力向量构造“世界 z 轴与重力对齐”的旋转矩阵。

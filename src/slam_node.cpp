@@ -1,3 +1,6 @@
+// 模块功能：系统融合节点实现，
+// 负责数据订阅、同步、模块调度与结果发布。
+
 #include "cake_slam/slam.h"
 
 #include <algorithm>
@@ -27,6 +30,7 @@ SlamNode::~SlamNode()
   stopSyncProcessThread();
 }
 
+// 初始化节点：加载配置、创建模块与启动同步线程。
 void SlamNode::initialize()
 {
   // 初始化顺序保持和 FAST-LIVO2 主程序接近：
@@ -42,6 +46,7 @@ void SlamNode::initialize()
   startSyncProcessThread();
 }
 
+// 读取统一配置文件，并决定当前运行模式。
 void SlamNode::loadConfiguration()
 {
   // 主程序只从 ROS 参数拿配置文件路径，具体 LiDAR/IMU/视觉参数统一从该 yaml 读取。
@@ -87,6 +92,7 @@ void SlamNode::loadConfiguration()
               use_lidar_, use_image_, use_imu_, static_cast<int>(slam_mode_));
 }
 
+// 配置 LIO/VIO 模块与外参设置。
 void SlamNode::configureModules()
 {
   if (use_lidar_) {
@@ -123,6 +129,7 @@ void SlamNode::configureModules()
   }
 }
 
+// 创建传感器订阅者并绑定回调。
 void SlamNode::createSubscriptions()
 {
   rclcpp::SensorDataQoS qos;
@@ -155,6 +162,7 @@ void SlamNode::createSubscriptions()
   }
 }
 
+// 创建核心输出话题发布器。
 void SlamNode::createPublishers()
 {
   pub_cloud_raw_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_raw", 100);
@@ -171,6 +179,7 @@ void SlamNode::createPublishers()
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 }
 
+// 启动数据同步与主处理线程。
 void SlamNode::startSyncProcessThread()
 {
   sync_thread_running_.store(true);
@@ -180,6 +189,7 @@ void SlamNode::startSyncProcessThread()
   }
 }
 
+// 停止同步线程并回收资源。
 void SlamNode::stopSyncProcessThread()
 {
   sync_thread_running_.store(false);
@@ -256,6 +266,7 @@ void SlamNode::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg)
   buffer_cv_.notify_one();
 }
 
+// 同步线程主循环：解码、对齐并驱动 LIO/VIO 更新。
 void SlamNode::syncProcessLoop()
 {
   // Heavy work lives in this worker thread. ROS callbacks only enqueue raw
@@ -292,6 +303,7 @@ void SlamNode::syncProcessLoop()
   }
 }
 
+// 取出原始消息并完成解码/预处理。
 void SlamNode::drainRawInputBuffers()
 {
   // Pop raw messages under the mutex, then decode/preprocess them outside the
@@ -373,6 +385,7 @@ void SlamNode::enqueueImagePacket(ImagePacket &&packet)
   buffer_cv_.notify_one();
 }
 
+// 根据运行模式选择同步策略。
 bool SlamNode::syncPackages(FusionMeasureGroup &meas)
 {
   switch (slam_mode_) {
@@ -519,6 +532,7 @@ bool SlamNode::syncVioOnly(FusionMeasureGroup &meas)
   return true;
 }
 
+// 将 LiDAR 点云切到指定时刻，构建一包 LIO 测量。
 bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_time)
 {
   // Slice LiDAR data at the selected image timestamp. Points after update_time
@@ -599,6 +613,7 @@ bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_tim
   return true;
 }
 
+// 构建单次 VIO 测量包并同步 IMU。
 bool SlamNode::buildVioMeasure(FusionMeasureGroup &meas)
 {
   // Consume the image that defined the preceding LIO cut time. VIO has its own
@@ -644,6 +659,7 @@ bool SlamNode::buildVioMeasure(FusionMeasureGroup &meas)
   return true;
 }
 
+// 执行一次 LIO 更新并输出里程计/点云。
 void SlamNode::handleLIO()
 {
   // Sequential update stage 1: run LIO, publish state/cloud outputs, and prepare
@@ -686,6 +702,7 @@ void SlamNode::handleLIO()
               pending_lidar_visual_candidates_.size());
 }
 
+// 执行一次 VIO 更新并回写融合状态。
 void SlamNode::handleVIO()
 {
   // Sequential update stage 2: feed IMU samples, LiDAR visual candidates, and

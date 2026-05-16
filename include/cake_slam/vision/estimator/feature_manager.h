@@ -9,6 +9,9 @@
 #ifndef FEATURE_MANAGER_H
 #define FEATURE_MANAGER_H
 
+// 模块功能：视觉特征管理器接口，维护特征生命周期、观测缓存与
+// 深度先验融合，支持滑窗优化构建。
+
 #include <algorithm>
 #include <list>
 #include <map>

@@ -1,3 +1,6 @@
+// 模块功能：逆深度先验因子实现，
+// 将 LiDAR 深度先验转化为优化残差。
+
 #include "inverse_depth_prior_factor.h"
 
 #include "cake_slam/vision/estimator/parameters.h"

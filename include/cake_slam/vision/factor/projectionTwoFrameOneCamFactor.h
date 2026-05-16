@@ -11,6 +11,9 @@
 
 #pragma once
 
+// 模块功能：单目两帧重投影因子定义，
+// 为滑窗优化提供跨帧特征观测约束。
+
 #include <rcpputils/asserts.hpp>
 #include <ceres/ceres.h>
 #include <Eigen/Dense>

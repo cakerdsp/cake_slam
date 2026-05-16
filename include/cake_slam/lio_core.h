@@ -1,5 +1,8 @@
 #pragma once
 
+// 模块功能：LIO 核心处理接口，组织 IMU 传播、点云去畸变、
+// 体素地图匹配与状态更新等关键流程。
+
 #include <memory>
 #include <vector>
 

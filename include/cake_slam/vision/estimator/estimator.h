@@ -8,6 +8,9 @@
 
 #pragma once
 
+// 模块功能：视觉后端估计器接口定义，组织滑窗优化、状态更新与
+// LiDAR 先验融合，输出 VIO/LIO 结果与诊断信息。
+
 #include <mutex>
 #include <map>
 #include <queue>

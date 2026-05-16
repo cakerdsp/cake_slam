@@ -7,6 +7,9 @@
  * you may not use this file except in compliance with the License.
  *******************************************************/
 
+// 模块功能：视觉估计器参数定义与默认值存放处，
+// 供配置加载后统一赋值与共享。
+
 #include "parameters.h"
 
 double INIT_DEPTH;

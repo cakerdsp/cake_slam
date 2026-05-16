@@ -9,6 +9,9 @@
 
 #pragma once
 
+// 模块功能：相机位姿可视化工具类，
+// 封装轨迹与关键帧的 Marker 构建与发布。
+
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/color_rgba.hpp>
 #include <visualization_msgs/msg/marker.hpp>

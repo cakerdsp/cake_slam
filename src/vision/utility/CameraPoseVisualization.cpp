@@ -7,6 +7,9 @@
  * you may not use this file except in compliance with the License.
  *******************************************************/
 
+// 模块功能：相机位姿可视化实现，
+// 构造并发布相机金字塔与轨迹标记。
+
 #include "CameraPoseVisualization.h"
 
 const Eigen::Vector3d CameraPoseVisualization::imlt = Eigen::Vector3d(-1.0, -0.5, 1.0);

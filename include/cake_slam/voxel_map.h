@@ -10,6 +10,9 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
+// 模块功能：体素地图与局部平面匹配接口定义，
+// 支持点云地图维护、平面拟合与残差构建。
+
 #ifndef VOXEL_MAP_H_
 #define VOXEL_MAP_H_
 
@@ -121,6 +124,7 @@ typedef struct VoxelPlane
   }
 } VoxelPlane;
 
+// 体素栅格索引，用于哈希定位八叉树节点。
 class VOXEL_LOCATION
 {
 public:
@@ -157,6 +161,7 @@ struct DS_POINT
 // 根据距离和角度误差模型计算点在机体系下的协方差。
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov);
 
+// 体素八叉树节点，维护局部平面与层级细分逻辑。
 class VoxelOctoTree
 {
 
@@ -222,6 +227,7 @@ public:
   VoxelOctoTree *Insert(const pointWithVar &pv);
 };
 
+// 体素地图管理器，负责地图构建、匹配与滑动窗口维护。
 class VoxelMapManager
 {
 public:

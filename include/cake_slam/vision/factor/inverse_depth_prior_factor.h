@@ -1,5 +1,8 @@
 #pragma once
 
+// 模块功能：视觉后端逆深度先验因子定义，
+// 将 LiDAR 推导的深度先验引入滑窗优化。
+
 #include <algorithm>
 #include <cmath>
 

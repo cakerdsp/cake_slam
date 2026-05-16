@@ -9,6 +9,9 @@
  * Author: Qin Tong (qintonguav@gmail.com)
  *******************************************************/
 
+// 模块功能：视觉-IMU 初始对齐实现，
+// 估计陀螺偏置与重力方向。
+
 #include "initial_alignment.h"
 
 void solveGyroscopeBias(std::map<double, ImageFrame> &all_image_frame, StatesGroup states_[])

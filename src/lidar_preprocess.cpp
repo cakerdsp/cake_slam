@@ -10,6 +10,9 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
+// 模块功能：LiDAR 点云预处理实现，
+// 负责去畸变、滤波与几何特征提取。
+
 #include "cake_slam/lidar_preprocess.h"
 
 #include <omp.h>

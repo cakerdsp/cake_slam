@@ -10,6 +10,9 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
+// 模块功能：体素地图与平面匹配实现，
+// 用于局部地图维护与残差构建。
+
 #include "cake_slam/voxel_map.h"
 namespace {
 int voxel_plane_id = 0;

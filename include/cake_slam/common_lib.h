@@ -10,6 +10,9 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
+// 模块功能：公共基础头文件，集中声明常用类型、宏与共享依赖，
+// 提供 LIO/VIO 各模块通用的数学、消息类型与全局枚举定义。
+
 #ifndef COMMON_LIB_H
 #define COMMON_LIB_H
 

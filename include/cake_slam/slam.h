@@ -1,5 +1,8 @@
 #pragma once
 
+// 模块功能：系统主融合节点接口定义，负责 ROS2 话题订阅、
+// 数据同步与 LIO/VIO 模块调度及结果发布。
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>

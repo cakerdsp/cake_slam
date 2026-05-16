@@ -9,6 +9,9 @@
  * Author: Qin Tong (qintonguav@gmail.com)
  *******************************************************/
 
+// 模块功能：单目两帧重投影因子实现，
+// 提供跨帧视觉观测残差与雅可比。
+
 #include "projectionTwoFrameOneCamFactor.h"
 
 Eigen::Matrix2d ProjectionTwoFrameOneCamFactor::sqrt_info;

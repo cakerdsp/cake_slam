@@ -1,5 +1,8 @@
 #pragma once
 
+// 模块功能：统一配置数据结构定义，承载系统运行所需的各类参数项，
+// 供配置加载器与各处理模块读取并共享。
+
 #include <string>
 #include <vector>
 

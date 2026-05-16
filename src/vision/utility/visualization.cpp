@@ -7,6 +7,9 @@
  * you may not use this file except in compliance with the License.
  *******************************************************/
 
+// 模块功能：视觉估计结果可视化发布实现，
+// 管理路径、点云、里程计与关键帧话题。
+
 #include "visualization.h"
 
 // using namespace ros;

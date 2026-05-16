@@ -1,5 +1,8 @@
 #pragma once
 
+// 模块功能：LiDAR-视觉种子选择器接口，负责将点云投影到图像，
+// 并筛选可供视觉跟踪与深度先验使用的候选特征。
+
 #include <vector>
 
 #include <Eigen/Dense>

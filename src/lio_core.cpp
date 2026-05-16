@@ -1,3 +1,6 @@
+// 模块功能：LIO 核心流程实现，
+// 组织 IMU 传播、点云处理与地图匹配更新。
+
 #include "cake_slam/lio_core.h"
 
 #include <cmath>
@@ -13,6 +16,7 @@ LioCore::LioCore()
   feats_down_world_.reset(new PointCloudXYZI());
 }
 
+// 配置 LIO 核心模块的外参与地图/IMU参数。
 void LioCore::Configure(const Config &config)
 {
   // 1. Read LiDAR-to-body(IMU) extrinsics, matching the FAST-LIVO2 convention.
@@ -65,6 +69,7 @@ void LioCore::Configure(const Config &config)
   downsample_filter_.setLeafSize(config.lidar.filter_size_surf, config.lidar.filter_size_surf, config.lidar.filter_size_surf);
 }
 
+// LIO 主入口：处理一次同步测量包并更新状态。
 void LioCore::ProcessMeasurement(FusionMeasureGroup &meas)
 {
   // 当前函数是 LIO 的主入口：
@@ -80,6 +85,7 @@ void LioCore::ProcessMeasurement(FusionMeasureGroup &meas)
   ProcessLio();
 }
 
+// 运行 IMU 传播与点云去畸变步骤。
 void LioCore::ProcessImu(FusionMeasureGroup &meas)
 {
   // Process2 会原位更新 state_，并把去畸变后的点云写入 feats_undistort_。
@@ -89,6 +95,7 @@ void LioCore::ProcessImu(FusionMeasureGroup &meas)
   voxel_manager_->feats_undistort_ = feats_undistort_;
 }
 
+// 下采样并生成世界系点云用于匹配。
 void LioCore::Downsample()
 {
   // 1. 先在 LiDAR/body 系下做体素下采样。
@@ -102,6 +109,7 @@ void LioCore::Downsample()
   voxel_manager_->feats_down_size_ = feats_down_body_->points.size();
 }
 
+// 地图匹配与状态更新的核心流程。
 void LioCore::ProcessLio()
 {
   // 没有点云就直接返回，避免后续匹配器处理空输入。

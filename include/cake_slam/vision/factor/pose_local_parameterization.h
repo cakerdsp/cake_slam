@@ -9,6 +9,9 @@
 
 #pragma once
 
+// 模块功能：SE(3) 位姿局部参数化接口，
+// 供 Ceres 在优化中正确处理旋转与平移增量。
+
 #include <eigen3/Eigen/Dense>
 #include <ceres/ceres.h>
 #include "../utility/utility.h"

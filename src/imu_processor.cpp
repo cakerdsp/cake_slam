@@ -10,6 +10,9 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
+// 模块功能：IMU 传播与点云去畸变实现，
+// 支撑 LIO 状态预测与偏置/重力估计。
+
 #include "cake_slam/imu_processor.h"
 #include <omp.h>
 #include <rcpputils/asserts.hpp>

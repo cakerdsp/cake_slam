@@ -1,3 +1,6 @@
+// 模块功能：LIO 位姿先验因子实现，
+// 把 IESKF 位姿与协方差转化为 Ceres 残差。
+
 #include "lio_pose_prior_factor.h"
 
 namespace cake_slam {

@@ -9,6 +9,9 @@
 
 #pragma once
 
+// 模块功能：轻量级计时器工具，
+// 用于统计模块耗时与性能分析。
+
 #include <ctime>
 #include <cstdlib>
 #include <chrono>

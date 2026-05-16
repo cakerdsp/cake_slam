@@ -8,6 +8,9 @@
 
 #pragma once
 
+// 模块功能：视觉前端特征跟踪接口，
+// 负责图像特征跟踪、质量筛选与 LiDAR 先验种子注入。
+
 // #define GPU_MODE 1
 
 #include <cstdio>

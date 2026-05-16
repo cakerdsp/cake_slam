@@ -9,6 +9,9 @@
 
 #pragma once
 
+// 模块功能：视觉估计器全局参数声明与配置项定义，
+// 由配置加载统一赋值并被各视觉模块共享。
+
 #include <rclcpp/rclcpp.hpp>
 #include <rcutils/logging_macros.h>
 #include <vector>

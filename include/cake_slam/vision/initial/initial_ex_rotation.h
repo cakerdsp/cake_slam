@@ -11,6 +11,9 @@
 
 #pragma once 
 
+// 模块功能：IMU-相机外参旋转初始化工具，
+// 用于在未知外参情况下标定初始旋转。
+
 #include <vector>
 #include "../estimator/parameters.h"
 using namespace std;

@@ -10,6 +10,9 @@
  *******************************************************/
 
 #pragma once
+
+// 模块功能：视觉-IMU 对齐初始化接口，
+// 用于估计重力方向与陀螺偏置等初始状态。
 #include <eigen3/Eigen/Dense>
 #include <iostream>
 #include <rcutils/logging_macros.h>
