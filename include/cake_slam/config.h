@@ -148,6 +148,16 @@ struct OutputConfig
   std::string path;
 };
 
+/**
+ * @brief Optional ROS topics for additional RViz diagnostics.
+ */
+struct VisualizationConfig
+{
+  std::string vio_landmarks_topic = "/cake_slam/vio/landmarks";
+  std::string vio_window_path_topic = "/cake_slam/vio/window_path";
+  std::string vio_window_poses_topic = "/cake_slam/vio/window_poses";
+};
+
 struct TimeOffsetConfig
 {
   double td = 0.0;      ///< Camera-to-IMU delay used by VIO [s].
@@ -167,6 +177,7 @@ struct Config
   ExtrinsicConfig extrinsic;
   FrameConfig frame;
   OutputConfig output;
+  VisualizationConfig visualization;
   TimeOffsetConfig time_offset;
 };
 

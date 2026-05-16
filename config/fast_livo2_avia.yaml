@@ -191,6 +191,14 @@ output:
   # 输出目录；用于保存轨迹与标定结果。
   path: "."
 
+visualization:
+  # Optimized VIO landmarks in world frame for RViz PointCloud2 display.
+  vio_landmarks_topic: "/cake_slam/vio/landmarks"
+  # Sliding-window VIO trajectory segment in world frame for RViz Path display.
+  vio_window_path_topic: "/cake_slam/vio/window_path"
+  # Sliding-window VIO body poses in world frame for RViz PoseArray display.
+  vio_window_poses_topic: "/cake_slam/vio/window_poses"
+
 time_offset:
   # 相机相对 IMU 的时间偏移 [s]；VIO 中用于对齐。
   td: 0.0

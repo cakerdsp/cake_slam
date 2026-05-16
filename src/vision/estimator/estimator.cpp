@@ -13,7 +13,10 @@
 #include "estimator.h"
 #include "cake_slam/vision/utility/visualization.h"
 #include "cake_slam/vision/factor/inverse_depth_prior_factor.h"
+#include "cake_slam/vision/factor/lio_full_state_prior_factor.h"
 #include "cake_slam/vision/factor/lio_pose_prior_factor.h"
+
+#include <cmath>
 
 // 视觉-惯导估计器构造函数。
 // 这里只初始化容器和默认状态，不进行参数读取。
@@ -107,6 +110,9 @@ void Estimator::clearState()
     f_manager.clearState();
     for (auto &prior : lio_pose_priors_)
         prior = cake_slam::LioPosePrior();
+    for (auto &prior : lio_full_priors_)
+        prior = cake_slam::LioFullStatePrior();
+    lio_full_state_initialized_ = false;
 
     failure_occur = 0;
 
@@ -170,6 +176,7 @@ Eigen::Vector3d Estimator::getCameraToImuTranslation(int camera_id) const
 void Estimator::inputImage(double t, const cv::Mat &_img,
                            const std::vector<cake_slam::LidarVisualCandidate> &lidar_candidates,
                            const cake_slam::LioPosePrior &lio_pose_prior,
+                           const cake_slam::LioFullStatePrior &lio_full_prior,
                            const cv::Mat &_img1)
 {
     inputImageCnt++;
@@ -195,10 +202,11 @@ void Estimator::inputImage(double t, const cv::Mat &_img,
     packet.features = featureFrame;
     packet.lidar_depth_priors = featureTracker.takeLidarDepthPriors();
     packet.lio_pose_prior = lio_pose_prior;
+    packet.lio_full_prior = lio_full_prior;
 
-    CAKE_INFO("[VIO frontend time] stamp=%.6f track=%.3f ms features=%zu lidar_depth=%zu lidar_candidates=%zu threaded=%d",
+    CAKE_INFO("[VIO frontend time] stamp=%.6f track=%.3f ms features=%zu lidar_depth=%zu lidar_candidates=%zu lio_full_prior=%d threaded=%d",
              t, feature_tracker_ms, featureFrame.size(), packet.lidar_depth_priors.size(),
-             lidar_candidates.size(), MULTIPLE_THREAD);
+             lidar_candidates.size(), lio_full_prior.valid ? 1 : 0, MULTIPLE_THREAD);
 
     if(MULTIPLE_THREAD)
     {
@@ -483,8 +491,11 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
     ROS_DEBUG("number of feature: %d", f_manager.getFeatureCount());
     Headers[frame_count] = header;
     lio_pose_priors_[frame_count] = packet.lio_pose_prior;
+    lio_full_priors_[frame_count] = packet.lio_full_prior;
     if (lio_pose_priors_[frame_count].valid && lio_pose_priors_[frame_count].timestamp <= 0.0)
         lio_pose_priors_[frame_count].timestamp = header;
+    if (lio_full_priors_[frame_count].valid && lio_full_priors_[frame_count].timestamp <= 0.0)
+        lio_full_priors_[frame_count].timestamp = header;
     if (lio_pose_priors_[frame_count].valid)
     {
         states_[frame_count].rot_end = lio_pose_priors_[frame_count].R_WB;
@@ -517,6 +528,49 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
 
     if (solver_flag == INITIAL)
     {
+        if (frame_count == WINDOW_SIZE && !lio_full_state_initialized_)
+        {
+            int valid_full_priors = 0;
+            for (int i = 0; i <= WINDOW_SIZE; ++i)
+            {
+                auto &prior = lio_full_priors_[i];
+                if (!prior.valid || std::abs(prior.timestamp - Headers[i]) > 0.01)
+                {
+                    prior.valid = false;
+                    continue;
+                }
+                states_[i].rot_end = prior.R_WB;
+                states_[i].pos_end = prior.p_WB;
+                states_[i].vel_end = prior.v_WB;
+                states_[i].bias_a = prior.ba;
+                states_[i].bias_g = prior.bg;
+                valid_full_priors++;
+            }
+            if (valid_full_priors > 0)
+            {
+                std::printf(BOLDYELLOW "| %-29s | %-27s |" RESET "\n", "VIO Init Path", "LIO full-state prior");
+                CAKE_INFO("LIO full-state initialization: valid_window_priors=%d/%d", valid_full_priors, WINDOW_SIZE + 1);
+                if (USE_IMU)
+                {
+                    for (int i = 1; i <= WINDOW_SIZE; ++i)
+                    {
+                        if (pre_integrations[i])
+                            pre_integrations[i]->repropagate(states_[i - 1].bias_a, states_[i - 1].bias_g);
+                    }
+                    if (tmp_pre_integration)
+                        tmp_pre_integration->repropagate(states_[frame_count].bias_a, states_[frame_count].bias_g);
+                }
+                f_manager.triangulate(frame_count, states_, tic, ric);
+                optimization();
+                updateLatestStates();
+                solver_flag = NON_LINEAR;
+                lio_full_state_initialized_ = true;
+                slideWindow();
+                CAKE_INFO("LIO full-state initialization finish!");
+                return;
+            }
+        }
+
         if (frame_count == WINDOW_SIZE && lio_pose_priors_[frame_count].valid)
         {
             std::printf(BOLDYELLOW "| %-29s | %-27s |" RESET "\n", "VIO Init Path", "LIO prior");
@@ -1156,6 +1210,11 @@ void Estimator::optimization()
         {
             problem.AddResidualBlock(cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[i]), NULL, para_Pose[i]);
         }
+        if (USE_IMU && lio_full_priors_[i].valid)
+        {
+            problem.AddResidualBlock(cake_slam::LioFullStatePriorFactor::Create(lio_full_priors_[i]), NULL,
+                                     para_Pose[i], para_SpeedBias[i]);
+        }
     }
 
     int f_m_cnt = 0;
@@ -1281,6 +1340,14 @@ void Estimator::optimization()
                 vector<int>{0});
             marginalization_info->addResidualBlockInfo(residual_block_info);
         }
+        if (USE_IMU && lio_full_priors_[0].valid)
+        {
+            ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
+                cake_slam::LioFullStatePriorFactor::Create(lio_full_priors_[0]), NULL,
+                vector<double *>{para_Pose[0], para_SpeedBias[0]},
+                vector<int>{0, 1});
+            marginalization_info->addResidualBlockInfo(residual_block_info);
+        }
 
         {
             int feature_index = -1;
@@ -1393,6 +1460,14 @@ void Estimator::optimization()
                     vector<int>{0});
                 marginalization_info->addResidualBlockInfo(residual_block_info);
             }
+            if (USE_IMU && lio_full_priors_[WINDOW_SIZE - 1].valid)
+            {
+                ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
+                    cake_slam::LioFullStatePriorFactor::Create(lio_full_priors_[WINDOW_SIZE - 1]), NULL,
+                    vector<double *>{para_Pose[WINDOW_SIZE - 1], para_SpeedBias[WINDOW_SIZE - 1]},
+                    vector<int>{0, 1});
+                marginalization_info->addResidualBlockInfo(residual_block_info);
+            }
 
             TicToc t_pre_margin;
             ROS_DEBUG("begin marginalization");
@@ -1458,6 +1533,7 @@ void Estimator::slideWindow()
             {
                 Headers[i] = Headers[i + 1];
                 lio_pose_priors_[i] = lio_pose_priors_[i + 1];
+                lio_full_priors_[i] = lio_full_priors_[i + 1];
                 states_[i].rot_end.swap(states_[i + 1].rot_end);
                 states_[i].pos_end.swap(states_[i + 1].pos_end);
                 if(USE_IMU)
@@ -1475,6 +1551,7 @@ void Estimator::slideWindow()
             }
             Headers[WINDOW_SIZE] = Headers[WINDOW_SIZE - 1];
             lio_pose_priors_[WINDOW_SIZE] = lio_pose_priors_[WINDOW_SIZE - 1];
+            lio_full_priors_[WINDOW_SIZE] = lio_full_priors_[WINDOW_SIZE - 1];
             states_[WINDOW_SIZE].pos_end = states_[WINDOW_SIZE - 1].pos_end;
             states_[WINDOW_SIZE].rot_end = states_[WINDOW_SIZE - 1].rot_end;
 
@@ -1510,6 +1587,7 @@ void Estimator::slideWindow()
         {
             Headers[frame_count - 1] = Headers[frame_count];
             lio_pose_priors_[frame_count - 1] = lio_pose_priors_[frame_count];
+            lio_full_priors_[frame_count - 1] = lio_full_priors_[frame_count];
             states_[frame_count - 1].pos_end = states_[frame_count].pos_end;
             states_[frame_count - 1].rot_end = states_[frame_count].rot_end;
 

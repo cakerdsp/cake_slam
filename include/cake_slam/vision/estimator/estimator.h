@@ -60,6 +60,7 @@ struct VisionFeaturePacket
     std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> features;
     std::unordered_map<int, cake_slam::LidarDepthPrior> lidar_depth_priors;
     cake_slam::LioPosePrior lio_pose_prior;
+    cake_slam::LioFullStatePrior lio_full_prior;
 };
 
 /**
@@ -100,11 +101,13 @@ public:
      * @param _img Mono cam0 image.
      * @param lidar_candidates LiDAR-projected visual seeds [pixel, m].
      * @param lio_pose_prior Whitened LIO pose prior for this frame [rad, m].
+     * @param lio_full_prior Whitened LIO full-state prior for this frame.
      * @param _img1 Optional right image for legacy stereo mode.
      */
     void inputImage(double t, const cv::Mat &_img,
                     const std::vector<cake_slam::LidarVisualCandidate> &lidar_candidates,
                     const cake_slam::LioPosePrior &lio_pose_prior,
+                    const cake_slam::LioFullStatePrior &lio_full_prior,
                     const cv::Mat &_img1 = cv::Mat());
 
     /** @brief Integrate one IMU sample into the current preintegration segment. */
@@ -257,6 +260,8 @@ public:
     std::map<double, ImageFrame> all_image_frame;
     IntegrationBase *tmp_pre_integration = nullptr;
     cake_slam::LioPosePrior lio_pose_priors_[WINDOW_SIZE + 1];
+    cake_slam::LioFullStatePrior lio_full_priors_[WINDOW_SIZE + 1];
+    bool lio_full_state_initialized_ = false;
     Eigen::Vector3d initP = Eigen::Vector3d::Zero();
     Eigen::Matrix3d initR = Eigen::Matrix3d::Identity();
 

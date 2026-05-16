@@ -27,6 +27,26 @@ struct LioPosePrior
 };
 
 /**
+ * @brief Full body-state prior exported by the LiDAR-inertial IESKF.
+ *
+ * The state is already in the IMU/body frame and world frame convention used
+ * by StatesGroup. Do not apply LiDAR/camera extrinsics before consuming it in
+ * the visual backend.
+ */
+struct LioFullStatePrior
+{
+  bool valid = false;
+  double timestamp = 0.0; ///< [s], ROS time.
+  Eigen::Matrix3d R_WB = Eigen::Matrix3d::Identity();
+  Eigen::Vector3d p_WB = Eigen::Vector3d::Zero();
+  Eigen::Vector3d v_WB = Eigen::Vector3d::Zero();
+  Eigen::Vector3d ba = Eigen::Vector3d::Zero();
+  Eigen::Vector3d bg = Eigen::Vector3d::Zero();
+  Eigen::Matrix<double, 15, 15> sqrt_information =
+      Eigen::Matrix<double, 15, 15>::Identity();
+};
+
+/**
  * @brief LiDAR point projected to the host image and accepted as a visual seed.
  *
  * The candidate is still a frontend object. Only pixel, inverse-depth prior,

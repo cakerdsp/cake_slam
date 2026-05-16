@@ -344,6 +344,91 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /path
       Value: true
+    - Class: rviz_common/Group
+      Displays:
+        - Alpha: 1
+          Autocompute Intensity Bounds: true
+          Autocompute Value Bounds:
+            Max Value: 2
+            Min Value: 0
+            Value: false
+          Axis: Z
+          Channel Name: intensity
+          Class: rviz_default_plugins/PointCloud2
+          Color: 85; 255; 127
+          Color Transformer: Intensity
+          Decay Time: 0
+          Enabled: true
+          Invert Rainbow: false
+          Max Color: 255; 255; 255
+          Max Intensity: 2
+          Min Color: 0; 0; 0
+          Min Intensity: 0
+          Name: VIO Landmarks
+          Position Transformer: XYZ
+          Selectable: true
+          Size (Pixels): 4
+          Size (m): 0.03
+          Style: Spheres
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /cake_slam/vio/landmarks
+          Use Fixed Frame: true
+          Use rainbow: false
+          Value: true
+        - Alpha: 1
+          Buffer Length: 1
+          Class: rviz_default_plugins/Path
+          Color: 255; 214; 51
+          Enabled: true
+          Head Diameter: 0
+          Head Length: 0
+          Length: 0.2
+          Line Style: Lines
+          Line Width: 0.03
+          Name: VIO Window Path
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 214; 51
+          Pose Style: None
+          Radius: 0.03
+          Shaft Diameter: 0.1
+          Shaft Length: 0.1
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /cake_slam/vio/window_path
+          Value: true
+        - Alpha: 1
+          Axes Length: 0.35
+          Axes Radius: 0.04
+          Class: rviz_default_plugins/PoseArray
+          Color: 255; 255; 255
+          Enabled: true
+          Head Length: 0.2
+          Head Radius: 0.05
+          Name: VIO Window Poses
+          Shaft Length: 0.35
+          Shaft Radius: 0.02
+          Shape: Axes
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /cake_slam/vio/window_poses
+          Value: true
+      Enabled: true
+      Name: VIO
     - Class: rviz_default_plugins/Image
       Enabled: true
       Max Value: 1

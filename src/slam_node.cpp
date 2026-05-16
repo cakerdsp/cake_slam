@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 
 #include <opencv2/imgproc.hpp>
@@ -173,6 +174,9 @@ void SlamNode::createPublishers()
   pub_cloud_map_ = create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 100);
   pub_cloud_colored_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_colored", 100);
   pub_cloud_visual_submap_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_visual_sub_map", 100);
+  pub_vio_landmarks_ = create_publisher<sensor_msgs::msg::PointCloud2>(config_.visualization.vio_landmarks_topic, 10);
+  pub_vio_window_path_ = create_publisher<nav_msgs::msg::Path>(config_.visualization.vio_window_path_topic, 10);
+  pub_vio_window_poses_ = create_publisher<geometry_msgs::msg::PoseArray>(config_.visualization.vio_window_poses_topic, 10);
   pub_cloud_effect_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 100);
   pub_odom_ = create_publisher<nav_msgs::msg::Odometry>("/aft_mapped_to_init", 10);
   pub_path_ = create_publisher<nav_msgs::msg::Path>("/path", 10);
@@ -690,6 +694,7 @@ void SlamNode::handleLIO()
   const auto t_lio_process_end = std::chrono::steady_clock::now();
 
   pending_lio_pose_prior_ = makeLioPosePrior(update_time);
+  recordLioFullStatePrior(update_time);
   buildLidarVisualCandidates(update_time);
   const auto t_lio_prior_end = std::chrono::steady_clock::now();
 
@@ -736,6 +741,9 @@ void SlamNode::handleVIO()
   const FusionMeasure &measure = measures_.measures.back();
   const size_t lidar_candidate_count = pending_lidar_visual_candidates_.size();
   const bool has_lio_prior = use_lidar_ && pending_lio_pose_prior_.valid;
+  const LioFullStatePrior lio_full_prior = use_lidar_ ? FindClosestLioState(measure.vio_time) : LioFullStatePrior();
+  const bool has_lio_full_prior = lio_full_prior.valid;
+  const double lio_full_prior_dt = has_lio_full_prior ? std::abs(lio_full_prior.timestamp - measure.vio_time) : -1.0;
 
   // VINS-Fusion 风格入口：先送 IMU，再送单目图像。
   // inputImage 内部会调用 featureTracker.trackImage，外部不负责提特征。
@@ -750,7 +758,7 @@ void SlamNode::handleVIO()
       vio_->initFirstPose(state_.pos_end, state_.rot_end);
     }
     vio_->inputImage(measure.vio_time, measure.img,
-                     pending_lidar_visual_candidates_, pending_lio_pose_prior_);
+                     pending_lidar_visual_candidates_, pending_lio_pose_prior_, lio_full_prior);
     publishFeatureImage(measure.vio_time);
     t_vio_image_end = std::chrono::steady_clock::now();
     pending_lidar_visual_candidates_.clear();
@@ -794,6 +802,7 @@ void SlamNode::handleVIO()
       publishTf(measure.vio_time);
       publishMavrosPose(measure.vio_time);
       publishVisualSubmap(measure.vio_time);
+      publishVioWindowVisualization(measure.vio_time);
       t_vio_publish_end = std::chrono::steady_clock::now();
     }
   }
@@ -815,9 +824,10 @@ void SlamNode::handleVIO()
                   {"TrackAndOptimize", image_sec},
                   {"PublishOutputs", publish_sec}},
                  total_sec, vio_average_total);
-  CAKE_INFO("VIO summary: stamp=%.6f imu=%zu tracked=%d lidar_depth=%d lidar_candidates=%zu lio_prior=%d mode=%d",
+  CAKE_INFO("VIO summary: stamp=%.6f imu=%zu tracked=%d lidar_depth=%d lidar_candidates=%zu lio_prior=%d lio_full_prior=%d lio_full_dt=%.6f mode=%d",
             measure.vio_time, measure.imu.size(), vio_->getLastTrackedFeatureCount(),
             vio_->getLastDepthFeatureCount(), lidar_candidate_count, static_cast<int>(has_lio_prior),
+            static_cast<int>(has_lio_full_prior), lio_full_prior_dt,
             static_cast<int>(slam_mode_));
   CAKE_INFO_THROTTLE_MS(
       2000,
@@ -889,6 +899,7 @@ void SlamNode::resetSyncStateLocked()
   latest_sync_color_image_.release();
   pending_lidar_visual_candidates_.clear();
   pending_lio_pose_prior_ = LioPosePrior();
+  lio_full_state_history_.clear();
 }
 
 double SlamNode::newestLidarEndTimeLocked() const
@@ -1069,6 +1080,67 @@ LioPosePrior SlamNode::makeLioPosePrior(double stamp) const
     }
   }
   return prior;
+}
+
+LioFullStatePrior SlamNode::makeLioFullStatePrior(double stamp) const
+{
+  LioFullStatePrior prior;
+  prior.valid = true;
+  prior.timestamp = stamp;
+
+  const StatesGroup &lio_state = lio_.GetState();
+  prior.R_WB = lio_state.rot_end;
+  prior.p_WB = lio_state.pos_end;
+  prior.v_WB = lio_state.vel_end;
+  prior.ba = lio_state.bias_a;
+  prior.bg = lio_state.bias_g;
+
+  constexpr double sigma_p = 0.01;
+  constexpr double sigma_q = 0.002;
+  constexpr double sigma_v = 0.05;
+  constexpr double sigma_ba = 0.002;
+  constexpr double sigma_bg = 0.001;
+  prior.sqrt_information.setZero();
+  for (int i = 0; i < 3; ++i) {
+    prior.sqrt_information(i, i) = 1.0 / sigma_p;
+    prior.sqrt_information(i + 3, i + 3) = 1.0 / sigma_q;
+    prior.sqrt_information(i + 6, i + 6) = 1.0 / sigma_v;
+    prior.sqrt_information(i + 9, i + 9) = 1.0 / sigma_ba;
+    prior.sqrt_information(i + 12, i + 12) = 1.0 / sigma_bg;
+  }
+  return prior;
+}
+
+void SlamNode::recordLioFullStatePrior(double stamp)
+{
+  LioFullStatePrior prior = makeLioFullStatePrior(stamp);
+  if (!lio_full_state_history_.empty() && stamp < lio_full_state_history_.back().timestamp) {
+    lio_full_state_history_.clear();
+  }
+  lio_full_state_history_.push_back(prior);
+
+  constexpr size_t kMaxLioFullStateHistory = 2000;
+  while (lio_full_state_history_.size() > kMaxLioFullStateHistory) {
+    lio_full_state_history_.pop_front();
+  }
+}
+
+LioFullStatePrior SlamNode::FindClosestLioState(double stamp) const
+{
+  LioFullStatePrior closest;
+  double best_dt = std::numeric_limits<double>::max();
+  for (const auto &prior : lio_full_state_history_) {
+    const double dt = std::abs(prior.timestamp - stamp);
+    if (dt < best_dt) {
+      best_dt = dt;
+      closest = prior;
+    }
+  }
+  if (best_dt > 0.01) {
+    closest.valid = false;
+    closest.timestamp = stamp;
+  }
+  return closest;
 }
 
 void SlamNode::buildLidarVisualCandidates(double /*stamp*/)
@@ -1443,6 +1515,77 @@ void SlamNode::publishVisualSubmap(double stamp)
   msg.header.stamp = secToStamp(stamp);
   msg.header.frame_id = config_.frame.world;
   pub_cloud_visual_submap_->publish(msg);
+}
+
+void SlamNode::publishVioWindowVisualization(double stamp)
+{
+  if (!vio_ || vio_->solver_flag != Estimator::NON_LINEAR) {
+    return;
+  }
+
+  std_msgs::msg::Header header;
+  header.stamp = secToStamp(stamp);
+  header.frame_id = config_.frame.world;
+
+  if (pub_vio_landmarks_) {
+    PointCloudXYZI cloud;
+    for (const auto &feature : vio_->f_manager.feature) {
+      const int used_num = static_cast<int>(feature.feature_per_frame.size());
+      if (used_num < 2 || feature.solve_flag != 1 || feature.estimated_depth <= 0.0) {
+        continue;
+      }
+      const int imu_i = feature.start_frame;
+      if (imu_i < 0 || imu_i > WINDOW_SIZE) {
+        continue;
+      }
+      const Eigen::Vector3d point_cam = feature.feature_per_frame[0].point * feature.estimated_depth;
+      const Eigen::Vector3d point_body = vio_->getCameraToImuRotation() * point_cam + vio_->getCameraToImuTranslation();
+      const Eigen::Vector3d point_world = vio_->states_[imu_i].rot_end * point_body + vio_->states_[imu_i].pos_end;
+
+      PointType pt;
+      pt.x = static_cast<float>(point_world.x());
+      pt.y = static_cast<float>(point_world.y());
+      pt.z = static_cast<float>(point_world.z());
+      pt.intensity = feature.has_lidar_depth_prior ? 2.0f : 1.0f;
+      cloud.push_back(pt);
+    }
+
+    sensor_msgs::msg::PointCloud2 msg;
+    pcl::toROSMsg(cloud, msg);
+    msg.header = header;
+    pub_vio_landmarks_->publish(msg);
+  }
+
+  geometry_msgs::msg::PoseArray pose_array;
+  nav_msgs::msg::Path window_path;
+  pose_array.header = header;
+  window_path.header = header;
+
+  for (int i = 0; i <= WINDOW_SIZE; ++i) {
+    geometry_msgs::msg::Pose pose;
+    pose.position.x = vio_->states_[i].pos_end.x();
+    pose.position.y = vio_->states_[i].pos_end.y();
+    pose.position.z = vio_->states_[i].pos_end.z();
+    const Eigen::Quaterniond q(vio_->states_[i].rot_end);
+    pose.orientation.x = q.x();
+    pose.orientation.y = q.y();
+    pose.orientation.z = q.z();
+    pose.orientation.w = q.w();
+    pose_array.poses.push_back(pose);
+
+    geometry_msgs::msg::PoseStamped pose_stamped;
+    pose_stamped.header = header;
+    pose_stamped.header.stamp = secToStamp(vio_->Headers[i]);
+    pose_stamped.pose = pose;
+    window_path.poses.push_back(pose_stamped);
+  }
+
+  if (pub_vio_window_poses_) {
+    pub_vio_window_poses_->publish(pose_array);
+  }
+  if (pub_vio_window_path_) {
+    pub_vio_window_path_->publish(window_path);
+  }
 }
 
 void SlamNode::propagateImuOnce(StatesGroup &state, double dt, const Eigen::Vector3d &acc, const Eigen::Vector3d &gyr) const

@@ -191,6 +191,10 @@ bool LoadConfig(const std::string &path, Config &config)
 
   readIfPresent(fs, "output.path", config.output.path);
 
+  readIfPresent(fs, "visualization.vio_landmarks_topic", config.visualization.vio_landmarks_topic);
+  readIfPresent(fs, "visualization.vio_window_path_topic", config.visualization.vio_window_path_topic);
+  readIfPresent(fs, "visualization.vio_window_poses_topic", config.visualization.vio_window_poses_topic);
+
   readIfPresent(fs, "time_offset.td", config.time_offset.td);
   readIfPresent(fs, "time_offset.estimate_td", config.time_offset.estimate_td);
 

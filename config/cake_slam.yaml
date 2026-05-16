@@ -107,6 +107,14 @@ frame:
 output:
   path: "."
 
+visualization:
+  # Optimized VIO landmarks in world frame for RViz PointCloud2 display.
+  vio_landmarks_topic: "/cake_slam/vio/landmarks"
+  # Sliding-window VIO trajectory segment in world frame for RViz Path display.
+  vio_window_path_topic: "/cake_slam/vio/window_path"
+  # Sliding-window VIO body poses in world frame for RViz PoseArray display.
+  vio_window_poses_topic: "/cake_slam/vio/window_poses"
+
 time_offset:
   td: 0.0
   estimate_td: 0

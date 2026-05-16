@@ -15,6 +15,7 @@
 
 #include <cv_bridge/cv_bridge.h>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <image_transport/image_transport.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
@@ -111,6 +112,9 @@ private:
   cv::Mat resizeImageToConfig(const cv::Mat &image, const char *image_kind) const;
   void loadExtrinsicsForMain();
   LioPosePrior makeLioPosePrior(double stamp) const;
+  LioFullStatePrior makeLioFullStatePrior(double stamp) const;
+  void recordLioFullStatePrior(double stamp);
+  LioFullStatePrior FindClosestLioState(double stamp) const;
   void buildLidarVisualCandidates(double stamp);
   Eigen::Vector3d lidarToWorld(const Eigen::Vector3d &point_lidar) const;
 
@@ -125,6 +129,7 @@ private:
   void publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar);
   void publishFeatureImage(double stamp);
   void publishVisualSubmap(double stamp);
+  void publishVioWindowVisualization(double stamp);
   void imuPropagationTimer();
   void propagateImuOnce(StatesGroup &state, double dt, const Eigen::Vector3d &acc,
                         const Eigen::Vector3d &gyr) const;
@@ -191,6 +196,7 @@ private:
   cv::Mat latest_sync_color_image_;
   std::vector<LidarVisualCandidate> pending_lidar_visual_candidates_;
   LioPosePrior pending_lio_pose_prior_;
+  std::deque<LioFullStatePrior> lio_full_state_history_;
 
   nav_msgs::msg::Path path_msg_;
 
@@ -207,6 +213,9 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_map_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_colored_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_visual_submap_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_vio_landmarks_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_vio_window_path_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_vio_window_poses_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_effect_;
   image_transport::Publisher pub_feature_image_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
