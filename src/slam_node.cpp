@@ -703,10 +703,12 @@ void SlamNode::handleLIO()
   ekf_finish_once_ = true;
 
   publishClouds(update_time);
-  publishOdometry(update_time);
-  publishPath(update_time);
-  publishTf(update_time);
-  publishMavrosPose(update_time);
+  if (!use_image_) {
+    publishOdometry(update_time);
+    publishPath(update_time);
+    publishTf(update_time);
+    publishMavrosPose(update_time);
+  }
 
   const auto t_lio_end = std::chrono::steady_clock::now();
   static int lio_time_count = 0;
