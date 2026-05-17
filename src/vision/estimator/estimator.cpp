@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 
 // 视觉-惯导估计器构造函数。
@@ -1234,6 +1235,128 @@ void Estimator::optimization()
     TicToc t_whole, t_prepare;
     vector2double();
 
+    const bool debug_lio_full_prior = [&]() {
+        if (!USE_IMU)
+            return false;
+        for (int i = 0; i < frame_count + 1; ++i)
+        {
+            if (lio_full_priors_[i].valid)
+                return true;
+        }
+        return false;
+    }();
+    auto rotationDeltaDeg = [](const Eigen::Quaterniond &q_ref, const Eigen::Quaterniond &q) {
+        const Eigen::Quaterniond dq = q_ref.conjugate() * q.normalized();
+        return 2.0 * std::atan2(dq.vec().norm(), std::abs(dq.w())) * 57.29577951308232;
+    };
+    auto print_lio_full_prior_para_delta = [&](const char *stage) {
+        if (!debug_lio_full_prior)
+            return;
+        double dz0 = std::numeric_limits<double>::quiet_NaN();
+        double dzN = std::numeric_limits<double>::quiet_NaN();
+        double max_abs_dz = 0.0;
+        double sum_abs_dz = 0.0;
+        double max_abs_vz = 0.0;
+        double max_rot_deg = 0.0;
+        int max_dz_idx = -1;
+        int valid_count = 0;
+        for (int i = 0; i < frame_count + 1; ++i)
+        {
+            const auto &prior = lio_full_priors_[i];
+            if (!prior.valid)
+                continue;
+            const double dz = para_Pose[i][2] - prior.p_WB.z();
+            const double abs_dz = std::abs(dz);
+            const double dvz = para_SpeedBias[i][2] - prior.v_WB.z();
+            const Eigen::Quaterniond q_prior(prior.R_WB);
+            const Eigen::Quaterniond q_para(para_Pose[i][6], para_Pose[i][3], para_Pose[i][4], para_Pose[i][5]);
+            const double rot_deg = rotationDeltaDeg(q_prior, q_para);
+            if (i == 0)
+                dz0 = dz;
+            if (i == frame_count)
+                dzN = dz;
+            if (abs_dz > max_abs_dz)
+            {
+                max_abs_dz = abs_dz;
+                max_dz_idx = i;
+            }
+            max_abs_vz = std::max(max_abs_vz, std::abs(dvz));
+            max_rot_deg = std::max(max_rot_deg, rot_deg);
+            sum_abs_dz += abs_dz;
+            ++valid_count;
+        }
+        const double avg_abs_dz = valid_count > 0 ? sum_abs_dz / valid_count : 0.0;
+        const int last = frame_count;
+        std::printf("VIO OPT DEBUG %s para_delta: n=%d z0=% .6f zN=% .6f dz0=% .6f dzN=% .6f max_abs_dz=% .6f max_dz_idx=%d avg_abs_dz=% .6f max_abs_vz=% .6f max_rot_deg=% .6f prior_z0=% .6f prior_zN=% .6f\n",
+                    stage,
+                    valid_count,
+                    para_Pose[0][2],
+                    para_Pose[last][2],
+                    dz0,
+                    dzN,
+                    max_abs_dz,
+                    max_dz_idx,
+                    avg_abs_dz,
+                    max_abs_vz,
+                    max_rot_deg,
+                    lio_full_priors_[0].valid ? lio_full_priors_[0].p_WB.z() : std::numeric_limits<double>::quiet_NaN(),
+                    lio_full_priors_[last].valid ? lio_full_priors_[last].p_WB.z() : std::numeric_limits<double>::quiet_NaN());
+    };
+    auto print_lio_full_prior_state_delta = [&](const char *stage) {
+        if (!debug_lio_full_prior)
+            return;
+        double dz0 = std::numeric_limits<double>::quiet_NaN();
+        double dzN = std::numeric_limits<double>::quiet_NaN();
+        double max_abs_dz = 0.0;
+        double sum_abs_dz = 0.0;
+        double max_abs_vz = 0.0;
+        double max_rot_deg = 0.0;
+        int max_dz_idx = -1;
+        int valid_count = 0;
+        for (int i = 0; i < frame_count + 1; ++i)
+        {
+            const auto &prior = lio_full_priors_[i];
+            if (!prior.valid)
+                continue;
+            const double dz = states_[i].pos_end.z() - prior.p_WB.z();
+            const double abs_dz = std::abs(dz);
+            const double dvz = states_[i].vel_end.z() - prior.v_WB.z();
+            const Eigen::Quaterniond q_prior(prior.R_WB);
+            const Eigen::Quaterniond q_state(states_[i].rot_end);
+            const double rot_deg = rotationDeltaDeg(q_prior, q_state);
+            if (i == 0)
+                dz0 = dz;
+            if (i == frame_count)
+                dzN = dz;
+            if (abs_dz > max_abs_dz)
+            {
+                max_abs_dz = abs_dz;
+                max_dz_idx = i;
+            }
+            max_abs_vz = std::max(max_abs_vz, std::abs(dvz));
+            max_rot_deg = std::max(max_rot_deg, rot_deg);
+            sum_abs_dz += abs_dz;
+            ++valid_count;
+        }
+        const double avg_abs_dz = valid_count > 0 ? sum_abs_dz / valid_count : 0.0;
+        const int last = frame_count;
+        std::printf("VIO OPT DEBUG %s state_delta: n=%d z0=% .6f zN=% .6f dz0=% .6f dzN=% .6f max_abs_dz=% .6f max_dz_idx=%d avg_abs_dz=% .6f max_abs_vz=% .6f max_rot_deg=% .6f prior_z0=% .6f prior_zN=% .6f\n",
+                    stage,
+                    valid_count,
+                    states_[0].pos_end.z(),
+                    states_[last].pos_end.z(),
+                    dz0,
+                    dzN,
+                    max_abs_dz,
+                    max_dz_idx,
+                    avg_abs_dz,
+                    max_abs_vz,
+                    max_rot_deg,
+                    lio_full_priors_[0].valid ? lio_full_priors_[0].p_WB.z() : std::numeric_limits<double>::quiet_NaN(),
+                    lio_full_priors_[last].valid ? lio_full_priors_[last].p_WB.z() : std::numeric_limits<double>::quiet_NaN());
+    };
+    print_lio_full_prior_para_delta("before_build");
+
     ceres::Problem problem;
     ceres::LossFunction *loss_function;
     //loss_function = NULL;
@@ -1270,12 +1393,22 @@ void Estimator::optimization()
     if (!ESTIMATE_TD || states_[0].vel_end.norm() < 0.2)
         problem.SetParameterBlockConstant(para_Td[0]);
 
+    int marginalization_factor_count = 0;
+    int imu_factor_count = 0;
+    int lio_pose_prior_count = 0;
+    int lio_full_prior_count = 0;
+    int optimized_feature_count = 0;
+    int lidar_depth_feature_count = 0;
+    int lidar_depth_prior_count = 0;
+    int visual_residual_count = 0;
+
     if (last_marginalization_info && last_marginalization_info->valid)
     {
         // construct new marginlization_factor
         MarginalizationFactor *marginalization_factor = new MarginalizationFactor(last_marginalization_info);
         problem.AddResidualBlock(marginalization_factor, NULL,
                                  last_marginalization_parameter_blocks);
+        ++marginalization_factor_count;
     }
     if(USE_IMU)
     {
@@ -1286,6 +1419,7 @@ void Estimator::optimization()
                 continue;
             IMUFactor* imu_factor = new IMUFactor(pre_integrations[j]);
             problem.AddResidualBlock(imu_factor, NULL, para_Pose[i], para_SpeedBias[i], para_Pose[j], para_SpeedBias[j]);
+            ++imu_factor_count;
         }
     }
     for (int i = 0; i < frame_count + 1; i++)
@@ -1293,11 +1427,13 @@ void Estimator::optimization()
         if (lio_pose_priors_[i].valid)
         {
             problem.AddResidualBlock(cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[i]), NULL, para_Pose[i]);
+            ++lio_pose_prior_count;
         }
         if (USE_IMU && lio_full_priors_[i].valid)
         {
             problem.AddResidualBlock(cake_slam::LioFullStatePriorFactor::Create(lio_full_priors_[i]), NULL,
                                      para_Pose[i], para_SpeedBias[i]);
+            ++lio_full_prior_count;
         }
     }
 
@@ -1310,6 +1446,9 @@ void Estimator::optimization()
             continue;
 
         ++feature_index;
+        ++optimized_feature_count;
+        if (it_per_id.has_lidar_depth_prior)
+            ++lidar_depth_feature_count;
         problem.AddParameterBlock(para_Feature[feature_index], SIZE_FEATURE);
         if (it_per_id.has_lidar_depth_prior && !LIDAR_INV_DEPTH_OPTIMIZE)
         {
@@ -1321,6 +1460,7 @@ void Estimator::optimization()
                 it_per_id.lidar_depth_prior.inv_depth,
                 it_per_id.lidar_depth_prior.inv_depth_var);
             problem.AddResidualBlock(prior_factor, NULL, para_Feature[feature_index]);
+            ++lidar_depth_prior_count;
         }
 
         int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
@@ -1336,6 +1476,7 @@ void Estimator::optimization()
                 ProjectionTwoFrameOneCamFactor *f_td = new ProjectionTwoFrameOneCamFactor(pts_i, pts_j, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocity,
                                                                  it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
                 problem.AddResidualBlock(f_td, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index], para_Td[0]);
+                ++visual_residual_count;
             }
 
             // Stereo residuals are intentionally omitted in this ROS2 mono
@@ -1347,6 +1488,28 @@ void Estimator::optimization()
 
     ROS_DEBUG("visual measurement count: %d", f_m_cnt);
     //printf("prepare for ceres: %f \n", t_prepare.toc());
+
+    if (debug_lio_full_prior)
+    {
+        std::printf("VIO OPT DEBUG factors: solver_flag=%d frame_count=%d t0=%.6f tN=%.6f marg=%d imu=%d lio_pose=%d lio_full=%d features=%d lidar_features=%d depth_priors=%d visual_residuals=%d visual_measurements=%d residual_blocks=%d parameter_blocks=%d lidar_inv_depth_opt=%d\n",
+                    solver_flag,
+                    frame_count,
+                    Headers[0],
+                    Headers[frame_count],
+                    marginalization_factor_count,
+                    imu_factor_count,
+                    lio_pose_prior_count,
+                    lio_full_prior_count,
+                    optimized_feature_count,
+                    lidar_depth_feature_count,
+                    lidar_depth_prior_count,
+                    visual_residual_count,
+                    f_m_cnt,
+                    problem.NumResidualBlocks(),
+                    problem.NumParameterBlocks(),
+                    LIDAR_INV_DEPTH_OPTIMIZE);
+        print_lio_full_prior_para_delta("before_solve");
+    }
 
     ceres::Solver::Options options;
 
@@ -1375,8 +1538,21 @@ void Estimator::optimization()
     //cout << summary.BriefReport() << endl;
     ROS_DEBUG("Iterations : %d", static_cast<int>(summary.iterations.size()));
     //printf("solver costs: %f \n", t_solver.toc());
+    if (debug_lio_full_prior)
+    {
+        std::printf("VIO OPT DEBUG solve: initial_cost=%.9e final_cost=%.9e fixed_cost=%.9e iterations=%d usable=%d term=%d message=%s\n",
+                    summary.initial_cost,
+                    summary.final_cost,
+                    summary.fixed_cost,
+                    static_cast<int>(summary.iterations.size()),
+                    static_cast<int>(summary.IsSolutionUsable()),
+                    static_cast<int>(summary.termination_type),
+                    summary.message.c_str());
+        print_lio_full_prior_para_delta("after_solve");
+    }
 
     double2vector();
+    print_lio_full_prior_state_delta("after_double2vector");
     //printf("frame_count: %d \n", frame_count);
 
     if(frame_count < WINDOW_SIZE)
