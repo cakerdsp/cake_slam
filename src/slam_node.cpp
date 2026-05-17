@@ -90,8 +90,9 @@ void SlamNode::loadConfiguration()
     slam_mode_ = ONLY_VIO;
   }
 
-  CAKE_INFO("Loaded config: lidar=%d image=%d imu=%d mode=%d frame.world=%s frame.body=%s frame.lidar=%s frame.camera=%s",
+  CAKE_INFO("Loaded config: lidar=%d image=%d imu=%d mode=%d hilti_en=%d frame.world=%s frame.body=%s frame.lidar=%s frame.camera=%s",
             use_lidar_, use_image_, use_imu_, static_cast<int>(slam_mode_),
+            config_.common.hilti_en ? 1 : 0,
             config_.frame.world.c_str(), config_.frame.body.c_str(),
             config_.frame.lidar.c_str(), config_.frame.camera.c_str());
 }
@@ -271,6 +272,9 @@ void SlamNode::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg)
   }
 
   std::lock_guard<std::mutex> lock(buffer_mutex_);
+  if (config_.common.hilti_en && (++hilti_image_counter_ % 4 != 0)) {
+    return;
+  }
   raw_image_buffer_.push_back(msg);
   trimBuffersLocked();
   buffer_cv_.notify_one();
@@ -898,6 +902,7 @@ void SlamNode::resetSyncStateLocked()
   ekf_finish_once_ = false;
   state_update_flag_ = false;
   new_imu_ = false;
+  hilti_image_counter_ = 0;
   latest_sync_mono_image_.release();
   latest_sync_color_image_.release();
   pending_lidar_visual_candidates_.clear();

@@ -21,6 +21,7 @@ struct CommonConfig
   bool ros_driver_bug_fix = false;   ///< Optional whole-second IMU stamp correction.
   double imu_time_offset = 0.0;      ///< Applied as imu_stamp -= imu_time_offset [s].
   double image_time_offset = 0.0;    ///< Applied as image_stamp += image_time_offset [s].
+  bool hilti_en = false;             ///< FAST-LIVO2 HILTI22 image decimation: keep every 4th frame.
   int max_buffer_size = 200000;      ///< Per-buffer hard cap [messages].
   bool gravity_align_enable = false; ///< Rotate initial gravity to the world z axis.
   bool imu_propagation_enable = true;///< Publish high-rate IMU propagated odometry.

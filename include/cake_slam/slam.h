@@ -181,6 +181,7 @@ private:
   std::deque<ImagePacket> image_buffer_;
   ImuSample newest_imu_;
   bool new_imu_ = false;
+  std::uint64_t hilti_image_counter_ = 0;
   std::condition_variable buffer_cv_;
   std::atomic_bool sync_thread_running_{false};
   std::thread sync_process_thread_;

@@ -85,6 +85,8 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "common.imu_time_offset", config.common.imu_time_offset);
   readIfPresent(fs, "common.image_time_offset", config.common.image_time_offset);
   readIfPresent(fs, "time_offset.img_time_offset", config.common.image_time_offset);
+  readIfPresent(fs, "common.hilti_en", config.common.hilti_en);
+  readIfPresent(fs, "preprocess.hilti_en", config.common.hilti_en);
   readIfPresent(fs, "common.max_buffer_size", config.common.max_buffer_size);
   readIfPresent(fs, "common.gravity_align_enable", config.common.gravity_align_enable);
   readIfPresent(fs, "uav.gravity_align_en", config.common.gravity_align_enable);
