@@ -17,7 +17,7 @@
 // 0: optimize both triangulated visual-only points and LiDAR-depth points.
 // 1: keep tracking/triangulation, but exclude visual-only points from Ceres.
 #ifndef ONLY_USE_LIDAR_DEPTH
-#define ONLY_USE_LIDAR_DEPTH 0
+#define ONLY_USE_LIDAR_DEPTH 1
 #endif
 
 // 特征的结束帧号 = 起始帧号 + 观测长度 - 1。
