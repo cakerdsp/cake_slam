@@ -16,7 +16,9 @@
 #include "cake_slam/vision/factor/lio_full_state_prior_factor.h"
 #include "cake_slam/vision/factor/lio_pose_prior_factor.h"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 // 视觉-惯导估计器构造函数。
 // 这里只初始化容器和默认状态，不进行参数读取。
@@ -538,67 +540,65 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
             }
             if (anchor_prior.valid)
             {
-                bool imu_propagation_ok = USE_IMU;
+                constexpr double kMaxLioFullPriorDt = 0.01;
+                bool lio_window_ok = true;
+                bool imu_preintegration_ok = USE_IMU;
+                double max_lio_prior_dt = 0.0;
+                for (int i = 0; i <= WINDOW_SIZE; ++i)
+                {
+                    const auto &prior = lio_full_priors_[i];
+                    const double prior_dt = prior.valid ? std::abs(prior.timestamp - Headers[i])
+                                                        : std::numeric_limits<double>::infinity();
+                    max_lio_prior_dt = std::max(max_lio_prior_dt, prior_dt);
+                    if (!prior.valid || prior_dt > kMaxLioFullPriorDt)
+                    {
+                        lio_window_ok = false;
+                        break;
+                    }
+                }
                 for (int i = 1; i <= WINDOW_SIZE; ++i)
                 {
                     if (!pre_integrations[i] || pre_integrations[i]->sum_dt <= 0.0)
                     {
-                        imu_propagation_ok = false;
+                        imu_preintegration_ok = false;
                         break;
                     }
                 }
 
-                if (imu_propagation_ok)
+                if (lio_window_ok && imu_preintegration_ok)
                 {
-                    std::printf(BOLDYELLOW "| %-29s | %-27s |" RESET "\n", "VIO Init Path", "LIO full-state prior");
-                    CAKE_INFO("LIO full-state initialization: anchor=0 stamp=%.6f window_stamp=%.6f",
-                              anchor_prior.timestamp, Headers[0]);
+                    std::printf(BOLDYELLOW "| %-29s | %-27s |" RESET "\n", "VIO Init Path", "LIO full-state window");
+                    CAKE_INFO("LIO full-state initialization: anchor=0 stamp=%.6f window_stamp=%.6f max_dt=%.6f",
+                              anchor_prior.timestamp, Headers[0], max_lio_prior_dt);
                     std::printf(BOLDYELLOW "| %-29s | ba_z=% .6f bg_z=% .6f |" RESET "\n",
                                 "LIO Full Bias",
                                 anchor_prior.ba.z(),
                                 anchor_prior.bg.z());
 
-                    states_[0].rot_end = anchor_prior.R_WB;
-                    states_[0].pos_end = anchor_prior.p_WB;
-                    states_[0].vel_end = Eigen::Vector3d::Zero();
-                    states_[0].bias_a = anchor_prior.ba;
-                    states_[0].bias_g = anchor_prior.bg;
-
+                    for (int i = 0; i <= WINDOW_SIZE; ++i)
+                    {
+                        const auto &prior = lio_full_priors_[i];
+                        states_[i].rot_end = prior.R_WB;
+                        states_[i].pos_end = prior.p_WB;
+                        states_[i].vel_end = prior.v_WB;
+                        states_[i].bias_a = prior.ba;
+                        states_[i].bias_g = prior.bg;
+                    }
                     for (int i = 1; i <= WINDOW_SIZE; ++i)
                     {
-                        states_[i].bias_a = states_[0].bias_a;
-                        states_[i].bias_g = states_[0].bias_g;
                         pre_integrations[i]->repropagate(states_[i - 1].bias_a, states_[i - 1].bias_g);
-
-                        const double dt = pre_integrations[i]->sum_dt;
-                        const Eigen::Matrix3d R_i = states_[i - 1].rot_end;
-                        states_[i].rot_end = R_i * pre_integrations[i]->delta_q.toRotationMatrix();
-                        states_[i].pos_end = states_[i - 1].pos_end +
-                                             states_[i - 1].vel_end * dt +
-                                             R_i * pre_integrations[i]->delta_p -
-                                             0.5 * g * dt * dt;
-                        states_[i].vel_end = states_[i - 1].vel_end +
-                                             R_i * pre_integrations[i]->delta_v -
-                                             g * dt;
                     }
 
-                std::printf(BOLDYELLOW "| %-29s | z0=% .4f zN=% .4f v0z=% .4f vNz=% .4f |" RESET "\n",
-                            "VIO Init Pre-Opt",
-                            states_[0].pos_end.z(),
-                            states_[WINDOW_SIZE].pos_end.z(),
-                            states_[0].vel_end.z(),
-                            states_[WINDOW_SIZE].vel_end.z());
-                std::printf(BOLDYELLOW "| %-29s | g=% .3f % .3f % .3f |" RESET "\n",
-                            "VIO Init Gravity",
-                            g.x(), g.y(), g.z());
-                }
+                    std::printf(BOLDYELLOW "| %-29s | z0=% .4f zN=% .4f v0z=% .4f vNz=% .4f |" RESET "\n",
+                                "VIO Init Prior",
+                                states_[0].pos_end.z(),
+                                states_[WINDOW_SIZE].pos_end.z(),
+                                states_[0].vel_end.z(),
+                                states_[WINDOW_SIZE].vel_end.z());
+                    std::printf(BOLDYELLOW "| %-29s | g=% .3f % .3f % .3f |" RESET "\n",
+                                "VIO Init Gravity",
+                                g.x(), g.y(), g.z());
 
-                if (!imu_propagation_ok)
-                {
-                    CAKE_INFO("LIO full-state initialization fallback: invalid IMU preintegration in full window.");
-                }
-                else
-                {
                     if (tmp_pre_integration)
                         tmp_pre_integration->repropagate(states_[frame_count].bias_a, states_[frame_count].bias_g);
                     f_manager.triangulate(frame_count, states_, tic, ric);
@@ -615,6 +615,11 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
                     CAKE_INFO("LIO full-state initialization finish!");
                     return;
                 }
+
+                CAKE_INFO("LIO full-state initialization skipped: lio_window_ok=%d imu_preintegration_ok=%d max_lio_dt=%.6f",
+                          static_cast<int>(lio_window_ok),
+                          static_cast<int>(imu_preintegration_ok),
+                          max_lio_prior_dt);
             }
         }
 
@@ -1065,7 +1070,39 @@ void Estimator::double2vector()
         failure_occur = 0;
     }
 
-    if(USE_IMU)
+    bool has_absolute_lio_prior = false;
+    for (int i = 0; i <= frame_count && i <= WINDOW_SIZE; ++i)
+    {
+        if (lio_pose_priors_[i].valid || lio_full_priors_[i].valid)
+        {
+            has_absolute_lio_prior = true;
+            break;
+        }
+    }
+
+    if(USE_IMU && has_absolute_lio_prior)
+    {
+        for (int i = 0; i <= WINDOW_SIZE; i++)
+        {
+            states_[i].rot_end = Eigen::Quaterniond(para_Pose[i][6],
+                                                    para_Pose[i][3],
+                                                    para_Pose[i][4],
+                                                    para_Pose[i][5]).normalized().toRotationMatrix();
+            states_[i].pos_end = Eigen::Vector3d(para_Pose[i][0],
+                                                 para_Pose[i][1],
+                                                 para_Pose[i][2]);
+            states_[i].vel_end = Eigen::Vector3d(para_SpeedBias[i][0],
+                                                 para_SpeedBias[i][1],
+                                                 para_SpeedBias[i][2]);
+            states_[i].bias_a = Eigen::Vector3d(para_SpeedBias[i][3],
+                                                para_SpeedBias[i][4],
+                                                para_SpeedBias[i][5]);
+            states_[i].bias_g = Eigen::Vector3d(para_SpeedBias[i][6],
+                                                para_SpeedBias[i][7],
+                                                para_SpeedBias[i][8]);
+        }
+    }
+    else if(USE_IMU)
     {
         Eigen::Vector3d origin_R00 = Utility::R2ypr(Eigen::Quaterniond(para_Pose[0][6],
                                                           para_Pose[0][3],
