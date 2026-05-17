@@ -12,7 +12,7 @@ common:
   imu_time_offset: 0.0
   image_time_offset: 0.0
   max_buffer_size: 200000
-  gravity_align_enable: 0
+  gravity_align_enable: 1
   imu_propagation_enable: 0
 
 imu:
