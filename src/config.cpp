@@ -98,6 +98,7 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "imu.topic", config.imu.topic);
   readIfPresent(fs, "imu.acc_n", config.imu.acc_n);
   readIfPresent(fs, "imu.acc_w", config.imu.acc_w);
+  readIfPresent(fs, "imu.acc_scale", config.imu.acc_scale);
   readIfPresent(fs, "imu.gyr_n", config.imu.gyr_n);
   readIfPresent(fs, "imu.gyr_w", config.imu.gyr_w);
   readIfPresent(fs, "imu.g_norm", config.imu.g_norm);
@@ -169,6 +170,8 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.lidar_depth_std", config.vision.lidar_depth_std);
   readIfPresent(fs, "vision.min_inv_depth_var", config.vision.min_inv_depth_var);
   readIfPresent(fs, "vision.min_lio_pose_prior_var", config.vision.min_lio_pose_prior_var);
+  readIfPresent(fs, "vision.max_vio_feedback_pos_delta", config.vision.max_vio_feedback_pos_delta);
+  readIfPresent(fs, "vision.max_vio_feedback_rot_delta_deg", config.vision.max_vio_feedback_rot_delta_deg);
 
   // -------------------- 外参 --------------------
   // 这里把 OpenCV FileNode 序列平铺拷贝到 std::vector<double> 中。

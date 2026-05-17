@@ -36,6 +36,7 @@ struct ImuConfig
   std::string topic;
   double acc_n = 0.02;     ///< Accelerometer white-noise sigma [m/s^2/sqrt(Hz)].
   double acc_w = 0.04;     ///< Accelerometer random-walk sigma.
+  double acc_scale = 1.0;  ///< Multiplier from message acceleration units to m/s^2.
   double gyr_n = 0.01;     ///< Gyroscope white-noise sigma [rad/s/sqrt(Hz)].
   double gyr_w = 0.001;    ///< Gyroscope random-walk sigma.
   double g_norm = 9.81;    ///< Gravity magnitude [m/s^2].
@@ -114,6 +115,8 @@ struct VisionConfig
   double lidar_depth_std = 0.10;           ///< Fallback LiDAR depth sigma [m].
   double min_inv_depth_var = 1e-6;         ///< Inverse-depth prior variance floor [1/m^2].
   double min_lio_pose_prior_var = 1e-6;    ///< LIO pose covariance floor [rad^2 or m^2].
+  double max_vio_feedback_pos_delta = 5.0;      ///< Reject VIO->LIO feedback above this position jump [m].
+  double max_vio_feedback_rot_delta_deg = 20.0; ///< Reject VIO->LIO feedback above this rotation jump [deg].
 };
 
 /**

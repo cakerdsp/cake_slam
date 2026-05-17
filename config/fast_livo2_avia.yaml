@@ -32,6 +32,8 @@ imu:
   acc_n: 0.02
   # 加速度计随机游走标准差。
   acc_w: 0.0001
+  # FAST-LIVO2 Avia bag reports acceleration in g; convert to m/s^2.
+  acc_scale: 9.81
   # 陀螺仪白噪声标准差 [rad/s/sqrt(Hz)]。
   gyr_n: 0.01
   # 陀螺仪随机游走标准差。
@@ -150,6 +152,8 @@ vision:
   min_inv_depth_var: 1.0e-15
   # LIO 位姿先验方差下限 [rad^2 或 m^2]。
   min_lio_pose_prior_var: 1.0e-15
+  max_vio_feedback_pos_delta: 5.0
+  max_vio_feedback_rot_delta_deg: 20.0
 
 extrinsic:
   # LiDAR 到 IMU 外参：P_imu = R_I_L * P_lidar + t_I_L

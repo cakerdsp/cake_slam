@@ -25,11 +25,7 @@ inline ImuSample ImuSampleFromMsg(const sensor_msgs::msg::Imu::ConstSharedPtr &m
 {
   ImuSample sample;
   sample.stamp = rclcpp::Time(msg->header.stamp).seconds();
-  // IMU driver reports acceleration in g; convert to m/s^2 for VIO/LIO.
-  constexpr double kGravity = 9.81;
-  sample.acc << msg->linear_acceleration.x * kGravity,
-      msg->linear_acceleration.y * kGravity,
-      msg->linear_acceleration.z * kGravity;
+  sample.acc << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
   sample.gyr << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
   return sample;
 }

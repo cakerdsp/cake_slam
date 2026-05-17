@@ -90,9 +90,9 @@ void SlamNode::loadConfiguration()
     slam_mode_ = ONLY_VIO;
   }
 
-  CAKE_INFO("Loaded config: lidar=%d image=%d imu=%d mode=%d hilti_en=%d frame.world=%s frame.body=%s frame.lidar=%s frame.camera=%s",
+  CAKE_INFO("Loaded config: lidar=%d image=%d imu=%d mode=%d hilti_en=%d imu.acc_scale=%.6f frame.world=%s frame.body=%s frame.lidar=%s frame.camera=%s",
             use_lidar_, use_image_, use_imu_, static_cast<int>(slam_mode_),
-            config_.common.hilti_en ? 1 : 0,
+            config_.common.hilti_en ? 1 : 0, config_.imu.acc_scale,
             config_.frame.world.c_str(), config_.frame.body.c_str(),
             config_.frame.lidar.c_str(), config_.frame.camera.c_str());
 }
@@ -233,8 +233,12 @@ void SlamNode::imuCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
 
   ImuSample sample = ImuSampleFromMsg(msg);
   sample.stamp -= config_.common.imu_time_offset;
-  std::printf("CRITICAL DEBUG: IMU acc z = %.6f\n", sample.acc.z());
-  
+  sample.acc *= config_.imu.acc_scale;
+  CAKE_INFO_THROTTLE_MS(
+      2000,
+      "IMU sample: stamp=%.6f acc_norm=%.6f acc_z=%.6f acc_scale=%.6f",
+      sample.stamp, sample.acc.norm(), sample.acc.z(), config_.imu.acc_scale);
+
   // 可选兼容某些驱动的整秒跳变修正，逻辑保持和 FAST-LIVO2 主程序一致。
   if (config_.common.ros_driver_bug_fix && last_lidar_time_ > 0.0) {
     sample.stamp += std::round(last_lidar_time_ - sample.stamp);
@@ -773,6 +777,7 @@ void SlamNode::handleVIO()
     last_vio_update_time_ = measure.vio_time;
     if (vio_->solver_flag == Estimator::NON_LINEAR) {
       const StatesGroup vio_state = vio_->getLatestState();
+      bool accept_vio_feedback = true;
       if (use_lidar_) {
         const StatesGroup lio_state_before_vio = state_;
         const Eigen::Matrix3d dR = lio_state_before_vio.rot_end.transpose() * vio_state.rot_end;
@@ -780,6 +785,9 @@ void SlamNode::handleVIO()
         constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
         const double rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
         const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
+        accept_vio_feedback =
+            pos_delta <= config_.vision.max_vio_feedback_pos_delta &&
+            rot_delta_deg <= config_.vision.max_vio_feedback_rot_delta_deg;
         CAKE_INFO_THROTTLE_MS(
             2000,
             "VIO feedback: stamp=%.6f pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d "
@@ -788,6 +796,12 @@ void SlamNode::handleVIO()
             vio_->getLastDepthFeatureCount(), lio_state_before_vio.pos_end.x(),
             lio_state_before_vio.pos_end.y(), lio_state_before_vio.pos_end.z(),
             vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
+        if (!accept_vio_feedback) {
+          CAKE_INFO(
+              "Reject VIO feedback: stamp=%.6f pos_delta=%.4f limit=%.4f rot_delta_deg=%.3f limit=%.3f",
+              measure.vio_time, pos_delta, config_.vision.max_vio_feedback_pos_delta,
+              rot_delta_deg, config_.vision.max_vio_feedback_rot_delta_deg);
+        }
       } else {
         CAKE_INFO_THROTTLE_MS(
             2000,
@@ -796,21 +810,23 @@ void SlamNode::handleVIO()
             vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
       }
 
-      state_ = vio_state;
-      if (use_lidar_) {
-        lio_.SetState(state_);
+      if (accept_vio_feedback) {
+        state_ = vio_state;
+        if (use_lidar_) {
+          lio_.SetState(state_);
+        }
+        latest_ekf_state_ = state_;
+        latest_ekf_time_ = measure.vio_time;
+        state_update_flag_ = true;
+        ekf_finish_once_ = true;
+        publishOdometry(measure.vio_time);
+        publishPath(measure.vio_time);
+        publishTf(measure.vio_time);
+        publishMavrosPose(measure.vio_time);
+        publishVisualSubmap(measure.vio_time);
+        publishVioWindowVisualization(measure.vio_time);
+        t_vio_publish_end = std::chrono::steady_clock::now();
       }
-      latest_ekf_state_ = state_;
-      latest_ekf_time_ = measure.vio_time;
-      state_update_flag_ = true;
-      ekf_finish_once_ = true;
-      publishOdometry(measure.vio_time);
-      publishPath(measure.vio_time);
-      publishTf(measure.vio_time);
-      publishMavrosPose(measure.vio_time);
-      publishVisualSubmap(measure.vio_time);
-      publishVioWindowVisualization(measure.vio_time);
-      t_vio_publish_end = std::chrono::steady_clock::now();
     }
   }
 
