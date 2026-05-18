@@ -193,6 +193,39 @@ void Estimator::inputImage(double t, const cv::Mat &_img,
     else
         featureFrame = featureTracker.trackImage(t, _img, _img1);
     const double feature_tracker_ms = featureTrackerTime.toc();
+    const FeatureTrackerTiming &ft_timing = featureTracker.getLastTiming();
+    std::printf("FEATURE TRACKER DEBUG stamp=%.6f total=%.3f measured=%.3f image=%dx%d type=%d ch=%d prev=%d flow=%d final=%d pending_lidar=%d add_lidar=%d req_visual=%d add_visual=%d flow_back=%d pred=%d stages_ms={lk_fwd=%.3f lk_back=%.3f lio_gate=%.3f reduce=%.3f mask=%.3f add_lidar=%.3f gft=%.3f cout=%.3f add_pts=%.3f undist=%.3f velocity=%.3f stereo=%.3f draw=%.3f debug=%.3f pack=%.3f}\n",
+                t,
+                ft_timing.total_ms,
+                feature_tracker_ms,
+                ft_timing.cols,
+                ft_timing.rows,
+                ft_timing.type,
+                ft_timing.channels,
+                ft_timing.prev_tracks,
+                ft_timing.after_flow_tracks,
+                ft_timing.final_tracks,
+                ft_timing.pending_lidar,
+                ft_timing.added_lidar,
+                ft_timing.requested_visual,
+                ft_timing.added_visual,
+                ft_timing.flow_back,
+                ft_timing.has_prediction,
+                ft_timing.lk_forward_ms,
+                ft_timing.lk_backward_ms,
+                ft_timing.lio_gate_ms,
+                ft_timing.reduce_ms,
+                ft_timing.set_mask_ms,
+                ft_timing.add_lidar_ms,
+                ft_timing.good_features_ms,
+                ft_timing.console_ms,
+                ft_timing.add_points_ms,
+                ft_timing.undistort_ms,
+                ft_timing.velocity_ms,
+                ft_timing.stereo_ms,
+                ft_timing.draw_track_ms,
+                ft_timing.debug_draw_ms,
+                ft_timing.pack_ms);
 
     if (SHOW_TRACK)
     {
@@ -627,12 +660,13 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
                     return;
                 }
 
-                std::printf("LIO FULL INIT WAIT clean_window=0 anchor_valid=%d imu_preintegration_ok=%d max_lio_dt=%.6f t0=%.6f tN=%.6f\n",
+                std::printf("LIO FULL INIT WAIT clean_window=0 anchor_valid=%d imu_preintegration_ok=%d max_lio_dt=%.6f t0=%.6f tN=%.6f force_margin_old=1\n",
                             static_cast<int>(anchor_prior.valid),
                             static_cast<int>(imu_preintegration_ok),
                             max_lio_prior_dt,
                             Headers[0],
                             Headers[WINDOW_SIZE]);
+                marginalization_flag = MARGIN_OLD;
                 slideWindow();
                 return;
             }

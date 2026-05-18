@@ -53,6 +53,39 @@ void reduceVector(vector<cv::Point2f> &v, vector<uchar> status);
 /** @brief Compact an integer vector in place according to a status mask. */
 void reduceVector(vector<int> &v, vector<uchar> status);
 
+struct FeatureTrackerTiming
+{
+    double total_ms = 0.0;
+    double lk_forward_ms = 0.0;
+    double lk_backward_ms = 0.0;
+    double lio_gate_ms = 0.0;
+    double reduce_ms = 0.0;
+    double set_mask_ms = 0.0;
+    double add_lidar_ms = 0.0;
+    double good_features_ms = 0.0;
+    double console_ms = 0.0;
+    double add_points_ms = 0.0;
+    double undistort_ms = 0.0;
+    double velocity_ms = 0.0;
+    double stereo_ms = 0.0;
+    double draw_track_ms = 0.0;
+    double debug_draw_ms = 0.0;
+    double pack_ms = 0.0;
+    int rows = 0;
+    int cols = 0;
+    int type = 0;
+    int channels = 0;
+    int prev_tracks = 0;
+    int after_flow_tracks = 0;
+    int final_tracks = 0;
+    int pending_lidar = 0;
+    int added_lidar = 0;
+    int requested_visual = 0;
+    int added_visual = 0;
+    int flow_back = 0;
+    int has_prediction = 0;
+};
+
 /**
  * @brief VINS-style sparse optical-flow tracker with LiDAR seed injection.
  *
@@ -134,6 +167,7 @@ public:
     int getLastAddedLidarCount() const { return last_added_lidar_count; }
     int getLastAddedVisualCount() const { return last_added_visual_count; }
     int getLastPendingLidarCandidateCount() const { return last_pending_lidar_candidate_count; }
+    const FeatureTrackerTiming &getLastTiming() const { return last_timing; }
 
     /** @brief Check image border and valid-domain mask membership. */
     bool inBorder(const cv::Point2f &pt);
@@ -184,6 +218,7 @@ public:
     int last_added_lidar_count = 0;
     int last_added_visual_count = 0;
     int last_pending_lidar_candidate_count = 0;
+    FeatureTrackerTiming last_timing;
 
     vector<cake_slam::LidarVisualCandidate> pending_lidar_candidates;
     std::unordered_map<int, cake_slam::LidarDepthPrior> active_lidar_priors;

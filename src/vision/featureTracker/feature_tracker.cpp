@@ -151,11 +151,20 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     // 3. 补充新特征；
     // 4. 输出统一的“id -> 观测”结构。
     TicToc t_r;
+    last_timing = FeatureTrackerTiming();
     cur_time = _cur_time;
     cur_img = _img;
     row = cur_img.rows;
     col = cur_img.cols;
     cv::Mat rightImg = _img1;
+    last_timing.rows = row;
+    last_timing.cols = col;
+    last_timing.type = cur_img.type();
+    last_timing.channels = cur_img.channels();
+    last_timing.prev_tracks = static_cast<int>(prev_pts.size());
+    last_timing.pending_lidar = static_cast<int>(pending_lidar_candidates.size());
+    last_timing.flow_back = FLOW_BACK;
+    last_timing.has_prediction = hasPrediction ? 1 : 0;
     current_lidar_priors.clear();
     last_prev_track_count = static_cast<int>(prev_pts.size());
     last_tracked_after_flow_count = 0;
@@ -186,7 +195,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
         vector<uchar> status;
         if(!USE_GPU_ACC_FLOW)
         {
-            TicToc t_o;
+            TicToc t_lk_forward;
             
             vector<float> err;
             // 有预测时，把预测位置作为光流初值，可减少快速运动下的跟踪失败。
@@ -206,10 +215,14 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
                 cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(21, 21), 3);
             }
             else
+            {
                 cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(21, 21), 3);
+            }
+            last_timing.lk_forward_ms = t_lk_forward.toc();
             // reverse check
             if(FLOW_BACK)
             {
+                TicToc t_lk_backward;
                 vector<uchar> reverse_status;
                 vector<cv::Point2f> reverse_pts = prev_pts;
                 cv::calcOpticalFlowPyrLK(cur_img, prev_img, cur_pts, reverse_pts, reverse_status, err, cv::Size(21, 21), 1, 
@@ -224,8 +237,11 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
                     else
                         status[i] = 0;
                 }
+                last_timing.lk_backward_ms = t_lk_backward.toc();
             }
+            TicToc t_lio_gate;
             rejectWithLioPrior(status);
+            last_timing.lio_gate_ms = t_lio_gate.toc();
             // printf("temporal optical flow costs: %fms\n", t_o.toc());
         }
 #ifdef GPU_MODE
@@ -315,6 +331,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
         }
 #endif
     
+        TicToc t_reduce;
         for (int i = 0; i < int(cur_pts.size()); i++)
             if (status[i] && !inBorder(cur_pts[i]))
                 status[i] = 0;
@@ -323,7 +340,9 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
         reduceVector(ids, status);
         reduceVector(track_cnt, status);
         pruneLidarTracks();
+        last_timing.reduce_ms = t_reduce.toc();
         last_tracked_after_flow_count = static_cast<int>(cur_pts.size());
+        last_timing.after_flow_tracks = last_tracked_after_flow_count;
         for (const int id : ids)
         {
             if (active_lidar_priors.find(id) != active_lidar_priors.end())
@@ -342,6 +361,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
         ROS_DEBUG("set mask begins");
         TicToc t_m;
         setMask();
+        last_timing.set_mask_ms = t_m.toc();
         // ROS_DEBUG("set mask costs %fms", t_m.toc());
         // printf("set mask costs %fms\n", t_m.toc());
         ROS_DEBUG("detect feature begins");
@@ -350,11 +370,15 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
         if (LIDAR_DEPTH_ENABLE && LIDAR_PRIOR_FEATURE_ENABLE &&
             n_max_cnt > 0 && !pending_lidar_candidates.empty())
         {
+            TicToc t_lidar_add;
             const int added_lidar = addLidarCandidatePoints(n_max_cnt);
+            last_timing.add_lidar_ms = t_lidar_add.toc();
             last_added_lidar_count = added_lidar;
+            last_timing.added_lidar = added_lidar;
             n_max_cnt = MAX_CNT - static_cast<int>(cur_pts.size());
             ROS_DEBUG("add LiDAR visual candidates: %d", added_lidar);
         }
+        last_timing.requested_visual = std::max(0, n_max_cnt);
         if(!USE_GPU)
         {
             if (n_max_cnt > 0)
@@ -365,8 +389,11 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
                 if (mask.type() != CV_8UC1)
                     cout << "mask type wrong " << endl;
                 cv::goodFeaturesToTrack(cur_img, n_pts, MAX_CNT - cur_pts.size(), 0.01, MIN_DIST, mask);
+                last_timing.good_features_ms = t_t.toc();
                 // printf("good feature to track costs: %fms\n", t_t.toc());
+                TicToc t_console;
                 std::cout << "n_pts size: "<< n_pts.size()<<std::endl;
+                last_timing.console_ms = t_console.toc();
             }
             else
                 n_pts.clear();
@@ -411,15 +438,22 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
         TicToc t_a;
         last_added_visual_count = static_cast<int>(n_pts.size());
         addPoints();
+        last_timing.added_visual = last_added_visual_count;
+        last_timing.add_points_ms = t_a.toc();
         // ROS_DEBUG("selectFeature costs: %fms", t_a.toc());
         // printf("selectFeature costs: %fms\n", t_a.toc());
     }
 
+    TicToc t_undistort;
     cur_un_pts = undistortedPts(cur_pts, m_camera[0]);
+    last_timing.undistort_ms = t_undistort.toc();
+    TicToc t_velocity;
     pts_velocity = ptsVelocity(ids, cur_un_pts, cur_un_pts_map, prev_un_pts_map);
+    last_timing.velocity_ms = t_velocity.toc();
 
     if(!_img1.empty() && stereo_cam)
     {
+        TicToc t_stereo;
         ids_right.clear();
         cur_right_pts.clear();
         cur_un_right_pts.clear();
@@ -514,11 +548,18 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
             
         }
         prev_un_right_pts_map = cur_un_right_pts_map;
+        last_timing.stereo_ms = t_stereo.toc();
     }
     if(SHOW_TRACK)
+    {
+        TicToc t_draw_track;
         drawTrack(cur_img, rightImg, ids, cur_pts, cur_right_pts, prevLeftPtsMap);
+        last_timing.draw_track_ms = t_draw_track.toc();
+    }
 
+    TicToc t_debug_draw;
     drawFeatureDebugImage(prevLeftPtsMap);
+    last_timing.debug_draw_ms = t_debug_draw.toc();
 
     prev_img = cur_img;
     prev_pts = cur_pts;
@@ -532,6 +573,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     for(size_t i = 0; i < cur_pts.size(); i++)
         prevLeftPtsMap[ids[i]] = cur_pts[i];
 
+    TicToc t_pack;
     std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
     for (size_t i = 0; i < ids.size(); i++)
     {
@@ -577,6 +619,9 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     }
 
     //printf("feature track whole time %f\n", t_r.toc());
+    last_timing.pack_ms = t_pack.toc();
+    last_timing.final_tracks = static_cast<int>(cur_pts.size());
+    last_timing.total_ms = t_r.toc();
     return featureFrame;
 }
 
