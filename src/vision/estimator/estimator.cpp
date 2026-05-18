@@ -1458,7 +1458,7 @@ void Estimator::optimization()
                     worst_imu.gravity_body_i = Qi.inverse() * G;
                     worst_imu.delta_v_avg =
                         pre_integrations[j]->sum_dt > 0.0
-                            ? pre_integrations[j]->delta_v / pre_integrations[j]->sum_dt
+                            ? (pre_integrations[j]->delta_v / pre_integrations[j]->sum_dt).eval()
                             : Eigen::Vector3d::Zero();
                     worst_imu.implied_acc_body =
                         pre_integrations[j]->sum_dt > 0.0
@@ -1466,8 +1466,9 @@ void Estimator::optimization()
                             : Eigen::Vector3d::Zero();
                     worst_imu.delta_p_avg =
                         pre_integrations[j]->sum_dt > 0.0
-                            ? 2.0 * pre_integrations[j]->delta_p /
-                                  (pre_integrations[j]->sum_dt * pre_integrations[j]->sum_dt)
+                            ? (2.0 * pre_integrations[j]->delta_p /
+                               (pre_integrations[j]->sum_dt * pre_integrations[j]->sum_dt))
+                                  .eval()
                             : Eigen::Vector3d::Zero();
                 }
             }
