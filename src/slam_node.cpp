@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <limits>
 #include <stdexcept>
@@ -785,9 +786,22 @@ void SlamNode::handleVIO()
         constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
         const double rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
         const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
+        const double z_delta = vio_state.pos_end.z() - lio_state_before_vio.pos_end.z();
         accept_vio_feedback =
             pos_delta <= config_.vision.max_vio_feedback_pos_delta &&
             rot_delta_deg <= config_.vision.max_vio_feedback_rot_delta_deg;
+        std::printf("VIO FEEDBACK DEBUG stamp=%.6f accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d lio_z=% .6f vio_z=% .6f\n",
+                    measure.vio_time,
+                    static_cast<int>(accept_vio_feedback),
+                    pos_delta,
+                    z_delta,
+                    rot_delta_deg,
+                    config_.vision.max_vio_feedback_pos_delta,
+                    config_.vision.max_vio_feedback_rot_delta_deg,
+                    vio_->getLastTrackedFeatureCount(),
+                    vio_->getLastDepthFeatureCount(),
+                    lio_state_before_vio.pos_end.z(),
+                    vio_state.pos_end.z());
         CAKE_INFO_THROTTLE_MS(
             2000,
             "VIO feedback: stamp=%.6f pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d "

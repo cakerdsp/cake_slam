@@ -1355,6 +1355,214 @@ void Estimator::optimization()
                     lio_full_priors_[0].valid ? lio_full_priors_[0].p_WB.z() : std::numeric_limits<double>::quiet_NaN(),
                     lio_full_priors_[last].valid ? lio_full_priors_[last].p_WB.z() : std::numeric_limits<double>::quiet_NaN());
     };
+    struct DebugCostStats
+    {
+        int blocks = 0;
+        double sum_sq = 0.0;
+        double robust_cost = 0.0;
+        double max_norm = 0.0;
+    };
+    struct DebugWorstVisual
+    {
+        int feature_id = -1;
+        int host_frame = -1;
+        int target_frame = -1;
+        bool has_lidar_depth = false;
+        double norm = 0.0;
+        double inv_depth = std::numeric_limits<double>::quiet_NaN();
+        double depth = std::numeric_limits<double>::quiet_NaN();
+        double prior_inv_depth = std::numeric_limits<double>::quiet_NaN();
+        double prior_inv_depth_var = std::numeric_limits<double>::quiet_NaN();
+    };
+    auto huber_cost_1 = [](double squared_norm) {
+        if (squared_norm <= 1.0)
+            return 0.5 * squared_norm;
+        return std::sqrt(squared_norm) - 0.5;
+    };
+    auto add_cost_block = [](DebugCostStats &stats, double squared_norm) {
+        stats.blocks++;
+        stats.sum_sq += squared_norm;
+        stats.max_norm = std::max(stats.max_norm, std::sqrt(std::max(0.0, squared_norm)));
+    };
+    auto print_debug_factor_costs = [&](const char *stage) {
+        if (!debug_lio_full_prior)
+            return;
+
+        DebugCostStats imu_cost;
+        DebugCostStats lio_pose_cost;
+        DebugCostStats lio_full_cost;
+        DebugCostStats depth_prior_cost;
+        DebugCostStats visual_cost;
+        DebugWorstVisual worst_visual;
+        double lio_full_pos_sq = 0.0;
+        double lio_full_rot_sq = 0.0;
+        double lio_full_vel_sq = 0.0;
+        double lio_full_ba_sq = 0.0;
+        double lio_full_bg_sq = 0.0;
+        double min_lidar_depth = std::numeric_limits<double>::infinity();
+        double max_lidar_depth = 0.0;
+        double min_inv_depth_var = std::numeric_limits<double>::infinity();
+        double max_inv_depth_var = 0.0;
+
+        if (USE_IMU)
+        {
+            for (int i = 0; i < frame_count; ++i)
+            {
+                const int j = i + 1;
+                if (!pre_integrations[j] || pre_integrations[j]->sum_dt > 10.0)
+                    continue;
+                IMUFactor imu_factor(pre_integrations[j]);
+                double residuals[15] = {0.0};
+                double const *params[4] = {para_Pose[i], para_SpeedBias[i], para_Pose[j], para_SpeedBias[j]};
+                imu_factor.Evaluate(params, residuals, nullptr);
+                double sq = 0.0;
+                for (double residual : residuals)
+                    sq += residual * residual;
+                add_cost_block(imu_cost, sq);
+            }
+        }
+
+        for (int i = 0; i < frame_count + 1; ++i)
+        {
+            if (lio_pose_priors_[i].valid)
+            {
+                const auto &prior = lio_pose_priors_[i];
+                const Eigen::Vector3d p(para_Pose[i][0], para_Pose[i][1], para_Pose[i][2]);
+                const Eigen::Quaterniond q(para_Pose[i][6], para_Pose[i][3], para_Pose[i][4], para_Pose[i][5]);
+                const Eigen::Quaterniond q_prior(prior.R_WB);
+                const Eigen::Quaterniond dq = q_prior.conjugate() * q;
+                Eigen::Matrix<double, 6, 1> raw;
+                raw.segment<3>(0) = 2.0 * Eigen::Vector3d(dq.x(), dq.y(), dq.z());
+                raw.segment<3>(3) = prior.R_WB.transpose() * (p - prior.p_WB);
+                const Eigen::Matrix<double, 6, 1> whitened = prior.sqrt_information * raw;
+                add_cost_block(lio_pose_cost, whitened.squaredNorm());
+            }
+            if (USE_IMU && lio_full_priors_[i].valid)
+            {
+                const auto &prior = lio_full_priors_[i];
+                const Eigen::Vector3d p(para_Pose[i][0], para_Pose[i][1], para_Pose[i][2]);
+                const Eigen::Quaterniond q(para_Pose[i][6], para_Pose[i][3], para_Pose[i][4], para_Pose[i][5]);
+                const Eigen::Quaterniond q_prior(prior.R_WB);
+                const Eigen::Quaterniond dq = q_prior.conjugate() * q;
+                Eigen::Matrix<double, 15, 1> raw;
+                raw.segment<3>(0) = p - prior.p_WB;
+                raw.segment<3>(3) = 2.0 * Eigen::Vector3d(dq.x(), dq.y(), dq.z());
+                raw.segment<3>(6) =
+                    Eigen::Vector3d(para_SpeedBias[i][0], para_SpeedBias[i][1], para_SpeedBias[i][2]) - prior.v_WB;
+                raw.segment<3>(9) =
+                    Eigen::Vector3d(para_SpeedBias[i][3], para_SpeedBias[i][4], para_SpeedBias[i][5]) - prior.ba;
+                raw.segment<3>(12) =
+                    Eigen::Vector3d(para_SpeedBias[i][6], para_SpeedBias[i][7], para_SpeedBias[i][8]) - prior.bg;
+                const Eigen::Matrix<double, 15, 1> whitened = prior.sqrt_information * raw;
+                add_cost_block(lio_full_cost, whitened.squaredNorm());
+                lio_full_pos_sq += whitened.segment<3>(0).squaredNorm();
+                lio_full_rot_sq += whitened.segment<3>(3).squaredNorm();
+                lio_full_vel_sq += whitened.segment<3>(6).squaredNorm();
+                lio_full_ba_sq += whitened.segment<3>(9).squaredNorm();
+                lio_full_bg_sq += whitened.segment<3>(12).squaredNorm();
+            }
+        }
+
+        int feature_index = -1;
+        for (auto &it_per_id : f_manager.feature)
+        {
+            it_per_id.used_num = it_per_id.feature_per_frame.size();
+            if (!it_per_id.isUsableForOptimization())
+                continue;
+
+            ++feature_index;
+            if (it_per_id.has_lidar_depth_prior && it_per_id.lidar_depth_prior.valid)
+            {
+                const double var = std::max(it_per_id.lidar_depth_prior.inv_depth_var, MIN_INV_DEPTH_VAR);
+                const double residual = (para_Feature[feature_index][0] -
+                                         it_per_id.lidar_depth_prior.inv_depth) /
+                                        std::sqrt(var);
+                add_cost_block(depth_prior_cost, residual * residual);
+                min_lidar_depth = std::min(min_lidar_depth, it_per_id.lidar_depth_prior.depth);
+                max_lidar_depth = std::max(max_lidar_depth, it_per_id.lidar_depth_prior.depth);
+                min_inv_depth_var = std::min(min_inv_depth_var, it_per_id.lidar_depth_prior.inv_depth_var);
+                max_inv_depth_var = std::max(max_inv_depth_var, it_per_id.lidar_depth_prior.inv_depth_var);
+            }
+
+            const int imu_i = it_per_id.start_frame;
+            int imu_j = imu_i - 1;
+            const Eigen::Vector3d pts_i = it_per_id.feature_per_frame[0].point;
+            for (auto &it_per_frame : it_per_id.feature_per_frame)
+            {
+                imu_j++;
+                if (imu_i == imu_j)
+                    continue;
+
+                ProjectionTwoFrameOneCamFactor factor(
+                    pts_i, it_per_frame.point,
+                    it_per_id.feature_per_frame[0].velocity, it_per_frame.velocity,
+                    it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
+                double residuals[2] = {0.0, 0.0};
+                double const *params[5] = {
+                    para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0],
+                    para_Feature[feature_index], para_Td[0]};
+                factor.Evaluate(params, residuals, nullptr);
+                const double sq = residuals[0] * residuals[0] + residuals[1] * residuals[1];
+                add_cost_block(visual_cost, sq);
+                visual_cost.robust_cost += huber_cost_1(sq);
+                const double norm = std::sqrt(std::max(0.0, sq));
+                if (norm > worst_visual.norm)
+                {
+                    worst_visual.feature_id = it_per_id.feature_id;
+                    worst_visual.host_frame = imu_i;
+                    worst_visual.target_frame = imu_j;
+                    worst_visual.has_lidar_depth = it_per_id.has_lidar_depth_prior;
+                    worst_visual.norm = norm;
+                    worst_visual.inv_depth = para_Feature[feature_index][0];
+                    worst_visual.depth = it_per_id.estimated_depth;
+                    if (it_per_id.lidar_depth_prior.valid)
+                    {
+                        worst_visual.prior_inv_depth = it_per_id.lidar_depth_prior.inv_depth;
+                        worst_visual.prior_inv_depth_var = it_per_id.lidar_depth_prior.inv_depth_var;
+                    }
+                }
+            }
+        }
+
+        if (depth_prior_cost.blocks == 0)
+        {
+            min_lidar_depth = std::numeric_limits<double>::quiet_NaN();
+            max_lidar_depth = std::numeric_limits<double>::quiet_NaN();
+            min_inv_depth_var = std::numeric_limits<double>::quiet_NaN();
+            max_inv_depth_var = std::numeric_limits<double>::quiet_NaN();
+        }
+
+        std::printf("VIO OPT DEBUG cost %s: imu=%d/%.9e lio_pose=%d/%.9e lio_full=%d/%.9e depth_prior=%d/%.9e visual=%d raw=%.9e huber=%.9e\n",
+                    stage,
+                    imu_cost.blocks, 0.5 * imu_cost.sum_sq,
+                    lio_pose_cost.blocks, 0.5 * lio_pose_cost.sum_sq,
+                    lio_full_cost.blocks, 0.5 * lio_full_cost.sum_sq,
+                    depth_prior_cost.blocks, 0.5 * depth_prior_cost.sum_sq,
+                    visual_cost.blocks, 0.5 * visual_cost.sum_sq, visual_cost.robust_cost);
+        std::printf("VIO OPT DEBUG lio_full_cost %s: pos=%.9e rot=%.9e vel=%.9e ba=%.9e bg=%.9e max_norm=%.6f\n",
+                    stage,
+                    0.5 * lio_full_pos_sq,
+                    0.5 * lio_full_rot_sq,
+                    0.5 * lio_full_vel_sq,
+                    0.5 * lio_full_ba_sq,
+                    0.5 * lio_full_bg_sq,
+                    lio_full_cost.max_norm);
+        std::printf("VIO OPT DEBUG visual_worst %s: norm=%.6f feature=%d frames=%d->%d lidar=%d inv_depth=% .9e depth=% .6f prior_inv=% .9e prior_var=% .9e depth_range=[% .6f,% .6f] inv_var_range=[% .9e,% .9e]\n",
+                    stage,
+                    worst_visual.norm,
+                    worst_visual.feature_id,
+                    worst_visual.host_frame,
+                    worst_visual.target_frame,
+                    static_cast<int>(worst_visual.has_lidar_depth),
+                    worst_visual.inv_depth,
+                    worst_visual.depth,
+                    worst_visual.prior_inv_depth,
+                    worst_visual.prior_inv_depth_var,
+                    min_lidar_depth,
+                    max_lidar_depth,
+                    min_inv_depth_var,
+                    max_inv_depth_var);
+    };
     print_lio_full_prior_para_delta("before_build");
 
     ceres::Problem problem;
@@ -1509,6 +1717,7 @@ void Estimator::optimization()
                     problem.NumParameterBlocks(),
                     LIDAR_INV_DEPTH_OPTIMIZE);
         print_lio_full_prior_para_delta("before_solve");
+        print_debug_factor_costs("before_solve");
     }
 
     ceres::Solver::Options options;
@@ -1549,6 +1758,7 @@ void Estimator::optimization()
                     static_cast<int>(summary.termination_type),
                     summary.message.c_str());
         print_lio_full_prior_para_delta("after_solve");
+        print_debug_factor_costs("after_solve");
     }
 
     double2vector();
