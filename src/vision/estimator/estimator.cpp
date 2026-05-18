@@ -1374,6 +1374,19 @@ void Estimator::optimization()
         double prior_inv_depth = std::numeric_limits<double>::quiet_NaN();
         double prior_inv_depth_var = std::numeric_limits<double>::quiet_NaN();
     };
+    struct DebugWorstImu
+    {
+        int i = -1;
+        int j = -1;
+        double sum_dt = 0.0;
+        double raw_norm = 0.0;
+        double white_norm = 0.0;
+        Eigen::Matrix<double, 15, 1> raw = Eigen::Matrix<double, 15, 1>::Zero();
+        Eigen::Vector3d gravity_body_i = Eigen::Vector3d::Zero();
+        Eigen::Vector3d delta_v_avg = Eigen::Vector3d::Zero();
+        Eigen::Vector3d implied_acc_body = Eigen::Vector3d::Zero();
+        Eigen::Vector3d delta_p_avg = Eigen::Vector3d::Zero();
+    };
     auto huber_cost_1 = [](double squared_norm) {
         if (squared_norm <= 1.0)
             return 0.5 * squared_norm;
@@ -1393,6 +1406,7 @@ void Estimator::optimization()
         DebugCostStats lio_full_cost;
         DebugCostStats depth_prior_cost;
         DebugCostStats visual_cost;
+        DebugWorstImu worst_imu;
         DebugWorstVisual worst_visual;
         double lio_full_pos_sq = 0.0;
         double lio_full_rot_sq = 0.0;
@@ -1411,6 +1425,18 @@ void Estimator::optimization()
                 const int j = i + 1;
                 if (!pre_integrations[j] || pre_integrations[j]->sum_dt > 10.0)
                     continue;
+                const Eigen::Vector3d Pi(para_Pose[i][0], para_Pose[i][1], para_Pose[i][2]);
+                const Eigen::Quaterniond Qi(para_Pose[i][6], para_Pose[i][3], para_Pose[i][4], para_Pose[i][5]);
+                const Eigen::Vector3d Vi(para_SpeedBias[i][0], para_SpeedBias[i][1], para_SpeedBias[i][2]);
+                const Eigen::Vector3d Bai(para_SpeedBias[i][3], para_SpeedBias[i][4], para_SpeedBias[i][5]);
+                const Eigen::Vector3d Bgi(para_SpeedBias[i][6], para_SpeedBias[i][7], para_SpeedBias[i][8]);
+                const Eigen::Vector3d Pj(para_Pose[j][0], para_Pose[j][1], para_Pose[j][2]);
+                const Eigen::Quaterniond Qj(para_Pose[j][6], para_Pose[j][3], para_Pose[j][4], para_Pose[j][5]);
+                const Eigen::Vector3d Vj(para_SpeedBias[j][0], para_SpeedBias[j][1], para_SpeedBias[j][2]);
+                const Eigen::Vector3d Baj(para_SpeedBias[j][3], para_SpeedBias[j][4], para_SpeedBias[j][5]);
+                const Eigen::Vector3d Bgj(para_SpeedBias[j][6], para_SpeedBias[j][7], para_SpeedBias[j][8]);
+                const Eigen::Matrix<double, 15, 1> raw = pre_integrations[j]->evaluate(
+                    Pi, Qi, Vi, Bai, Bgi, Pj, Qj, Vj, Baj, Bgj);
                 IMUFactor imu_factor(pre_integrations[j]);
                 double residuals[15] = {0.0};
                 double const *params[4] = {para_Pose[i], para_SpeedBias[i], para_Pose[j], para_SpeedBias[j]};
@@ -1419,6 +1445,31 @@ void Estimator::optimization()
                 for (double residual : residuals)
                     sq += residual * residual;
                 add_cost_block(imu_cost, sq);
+                const double raw_norm = raw.norm();
+                const double white_norm = std::sqrt(std::max(0.0, sq));
+                if (white_norm > worst_imu.white_norm)
+                {
+                    worst_imu.i = i;
+                    worst_imu.j = j;
+                    worst_imu.sum_dt = pre_integrations[j]->sum_dt;
+                    worst_imu.raw_norm = raw_norm;
+                    worst_imu.white_norm = white_norm;
+                    worst_imu.raw = raw;
+                    worst_imu.gravity_body_i = Qi.inverse() * G;
+                    worst_imu.delta_v_avg =
+                        pre_integrations[j]->sum_dt > 0.0
+                            ? pre_integrations[j]->delta_v / pre_integrations[j]->sum_dt
+                            : Eigen::Vector3d::Zero();
+                    worst_imu.implied_acc_body =
+                        pre_integrations[j]->sum_dt > 0.0
+                            ? Qi.inverse() * (G + (Vj - Vi) / pre_integrations[j]->sum_dt)
+                            : Eigen::Vector3d::Zero();
+                    worst_imu.delta_p_avg =
+                        pre_integrations[j]->sum_dt > 0.0
+                            ? 2.0 * pre_integrations[j]->delta_p /
+                                  (pre_integrations[j]->sum_dt * pre_integrations[j]->sum_dt)
+                            : Eigen::Vector3d::Zero();
+                }
             }
         }
 
@@ -1547,6 +1598,26 @@ void Estimator::optimization()
                     0.5 * lio_full_ba_sq,
                     0.5 * lio_full_bg_sq,
                     lio_full_cost.max_norm);
+        std::printf("VIO OPT DEBUG imu_worst %s: factor=%d->%d dt=%.6f raw_norm=%.6f white_norm=%.6f raw_p=(% .6f % .6f % .6f) raw_r=(% .6f % .6f % .6f) raw_v=(% .6f % .6f % .6f) raw_ba=(% .6f % .6f % .6f) raw_bg=(% .6f % .6f % .6f)\n",
+                    stage,
+                    worst_imu.i,
+                    worst_imu.j,
+                    worst_imu.sum_dt,
+                    worst_imu.raw_norm,
+                    worst_imu.white_norm,
+                    worst_imu.raw(0), worst_imu.raw(1), worst_imu.raw(2),
+                    worst_imu.raw(3), worst_imu.raw(4), worst_imu.raw(5),
+                    worst_imu.raw(6), worst_imu.raw(7), worst_imu.raw(8),
+                    worst_imu.raw(9), worst_imu.raw(10), worst_imu.raw(11),
+                    worst_imu.raw(12), worst_imu.raw(13), worst_imu.raw(14));
+        std::printf("VIO OPT DEBUG imu_gravity %s: factor=%d->%d QiT_G=(% .6f % .6f % .6f) implied_acc_body=(% .6f % .6f % .6f) delta_v_avg=(% .6f % .6f % .6f) delta_p_avg=(% .6f % .6f % .6f)\n",
+                    stage,
+                    worst_imu.i,
+                    worst_imu.j,
+                    worst_imu.gravity_body_i.x(), worst_imu.gravity_body_i.y(), worst_imu.gravity_body_i.z(),
+                    worst_imu.implied_acc_body.x(), worst_imu.implied_acc_body.y(), worst_imu.implied_acc_body.z(),
+                    worst_imu.delta_v_avg.x(), worst_imu.delta_v_avg.y(), worst_imu.delta_v_avg.z(),
+                    worst_imu.delta_p_avg.x(), worst_imu.delta_p_avg.y(), worst_imu.delta_p_avg.z());
         std::printf("VIO OPT DEBUG visual_worst %s: norm=%.6f feature=%d frames=%d->%d lidar=%d inv_depth=% .9e depth=% .6f prior_inv=% .9e prior_var=% .9e depth_range=[% .6f,% .6f] inv_var_range=[% .9e,% .9e]\n",
                     stage,
                     worst_visual.norm,
