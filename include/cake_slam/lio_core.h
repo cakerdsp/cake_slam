@@ -43,6 +43,8 @@ public:
 
   /** @brief Return the latest IESKF state and 19x19 covariance. */
   const StatesGroup &GetState() const;
+  /** @brief Whether the internal IMU initializer has finished. */
+  bool IsImuInitialized() const;
   /** @brief Synchronize the LIO state from the fused main state. */
   void SetState(const StatesGroup &state);
   /** @brief Return the undistorted point cloud [m], LiDAR/body frame. */

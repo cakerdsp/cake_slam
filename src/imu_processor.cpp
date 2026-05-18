@@ -114,6 +114,11 @@ void ImuProcess::set_acc_bias_cov(const V3D &b_a) { cov_bias_acc = b_a; }
 
 void ImuProcess::set_imu_init_frame_num(const int &num) { MAX_INI_COUNT = num; }
 
+bool ImuProcess::IsInitialized() const
+{
+  return !imu_en || !imu_need_init;
+}
+
 void ImuProcess::IMU_init(const FusionMeasure &meas, StatesGroup &state_inout, int &N)
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance

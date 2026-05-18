@@ -698,14 +698,37 @@ void SlamNode::handleLIO()
   lio_.ProcessMeasurement(measures_);
   measures_.last_lio_update_time = update_time;
   state_ = lio_.GetState();
-  gravityAlignment();
+  const bool lio_imu_initialized = !use_imu_ || lio_.IsImuInitialized();
+  if (lio_imu_initialized) {
+    gravityAlignment();
+  }
   latest_ekf_state_ = state_;
   latest_ekf_time_ = update_time;
   const auto t_lio_process_end = std::chrono::steady_clock::now();
 
-  pending_lio_pose_prior_ = makeLioPosePrior(update_time);
-  recordLioFullStatePrior(update_time);
-  buildLidarVisualCandidates(update_time);
+  if (lio_imu_initialized) {
+    if (!lio_full_state_prior_ready_) {
+      lio_full_state_history_.clear();
+      lio_full_state_prior_ready_ = true;
+      std::printf("LIO PRIOR GATE reset history after IMU initialization and gravity alignment: stamp=%.6f\n",
+                  update_time);
+    }
+    pending_lio_pose_prior_ = makeLioPosePrior(update_time);
+    recordLioFullStatePrior(update_time);
+    buildLidarVisualCandidates(update_time);
+  } else {
+    lio_full_state_prior_ready_ = false;
+    lio_full_state_history_.clear();
+    pending_lio_pose_prior_ = LioPosePrior();
+    pending_lidar_visual_candidates_.clear();
+    static double last_lio_prior_skip_log_time = -1.0;
+    if (last_lio_prior_skip_log_time < 0.0 ||
+        update_time - last_lio_prior_skip_log_time >= 2.0) {
+      std::printf("LIO PRIOR GATE skip priors before IMU initialization: stamp=%.6f\n",
+                  update_time);
+      last_lio_prior_skip_log_time = update_time;
+    }
+  }
   const auto t_lio_prior_end = std::chrono::steady_clock::now();
 
   state_update_flag_ = true;
@@ -787,16 +810,19 @@ void SlamNode::handleVIO()
         const double rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
         const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
         const double z_delta = vio_state.pos_end.z() - lio_state_before_vio.pos_end.z();
+        const double abs_z_delta = std::abs(z_delta);
         accept_vio_feedback =
             pos_delta <= config_.vision.max_vio_feedback_pos_delta &&
+            abs_z_delta <= config_.vision.max_vio_feedback_z_delta &&
             rot_delta_deg <= config_.vision.max_vio_feedback_rot_delta_deg;
-        std::printf("VIO FEEDBACK DEBUG stamp=%.6f accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d lio_z=% .6f vio_z=% .6f\n",
+        std::printf("VIO FEEDBACK DEBUG stamp=%.6f accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_z=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d lio_z=% .6f vio_z=% .6f\n",
                     measure.vio_time,
                     static_cast<int>(accept_vio_feedback),
                     pos_delta,
                     z_delta,
                     rot_delta_deg,
                     config_.vision.max_vio_feedback_pos_delta,
+                    config_.vision.max_vio_feedback_z_delta,
                     config_.vision.max_vio_feedback_rot_delta_deg,
                     vio_->getLastTrackedFeatureCount(),
                     vio_->getLastDepthFeatureCount(),
@@ -812,8 +838,9 @@ void SlamNode::handleVIO()
             vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
         if (!accept_vio_feedback) {
           CAKE_INFO(
-              "Reject VIO feedback: stamp=%.6f pos_delta=%.4f limit=%.4f rot_delta_deg=%.3f limit=%.3f",
+              "Reject VIO feedback: stamp=%.6f pos_delta=%.4f limit=%.4f z_delta=%.4f limit=%.4f rot_delta_deg=%.3f limit=%.3f",
               measure.vio_time, pos_delta, config_.vision.max_vio_feedback_pos_delta,
+              z_delta, config_.vision.max_vio_feedback_z_delta,
               rot_delta_deg, config_.vision.max_vio_feedback_rot_delta_deg);
         }
       } else {
@@ -938,6 +965,7 @@ void SlamNode::resetSyncStateLocked()
   pending_lidar_visual_candidates_.clear();
   pending_lio_pose_prior_ = LioPosePrior();
   lio_full_state_history_.clear();
+  lio_full_state_prior_ready_ = false;
 }
 
 double SlamNode::newestLidarEndTimeLocked() const
@@ -1151,6 +1179,11 @@ LioFullStatePrior SlamNode::makeLioFullStatePrior(double stamp) const
 
 void SlamNode::recordLioFullStatePrior(double stamp)
 {
+  if (use_imu_ && !lio_.IsImuInitialized()) {
+    lio_full_state_history_.clear();
+    return;
+  }
+
   LioFullStatePrior prior = makeLioFullStatePrior(stamp);
   if (!lio_full_state_history_.empty() && stamp < lio_full_state_history_.back().timestamp) {
     lio_full_state_history_.clear();
@@ -1166,6 +1199,11 @@ void SlamNode::recordLioFullStatePrior(double stamp)
 LioFullStatePrior SlamNode::FindClosestLioState(double stamp) const
 {
   LioFullStatePrior closest;
+  if (use_imu_ && !lio_.IsImuInitialized()) {
+    closest.timestamp = stamp;
+    return closest;
+  }
+
   double best_dt = std::numeric_limits<double>::max();
   for (const auto &prior : lio_full_state_history_) {
     const double dt = std::abs(prior.timestamp - stamp);

@@ -75,6 +75,7 @@ public:
   // 2. stat 为上一时刻状态，函数返回后将被原位更新；
   // 3. cur_pcl_un_ 指向的点云会被写入去畸变结果。
   void Process2(FusionMeasureGroup &lidar_meas, StatesGroup &stat, PointCloudXYZI::Ptr cur_pcl_un_);
+  bool IsInitialized() const;
   // 仅执行点云去畸变，不额外封装上层处理流程。
   void UndistortPcl(FusionMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
 

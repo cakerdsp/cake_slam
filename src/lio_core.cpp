@@ -140,6 +140,11 @@ const StatesGroup &LioCore::GetState() const
   return state_;
 }
 
+bool LioCore::IsImuInitialized() const
+{
+  return !imu_proc_ || imu_proc_->IsInitialized();
+}
+
 void LioCore::SetState(const StatesGroup &state)
 {
   state_ = state;

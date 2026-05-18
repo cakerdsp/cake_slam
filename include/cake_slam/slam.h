@@ -156,6 +156,7 @@ private:
   bool state_update_flag_ = false;
   bool first_frame_handled_ = false;
   bool gravity_align_finished_ = false;
+  bool lio_full_state_prior_ready_ = false;
   double first_lidar_time_ = -1.0;
   double latest_ekf_time_ = -1.0;
   double last_imu_prop_time_ = -1.0;

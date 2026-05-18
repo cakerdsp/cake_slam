@@ -533,16 +533,25 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
     {
         if (frame_count == WINDOW_SIZE && !lio_full_state_init_attempted_)
         {
-            lio_full_state_init_attempted_ = true;
-            auto &anchor_prior = lio_full_priors_[0];
-            if (!anchor_prior.valid || std::abs(anchor_prior.timestamp - Headers[0]) > 0.01)
+            bool has_lio_full_prior = false;
+            for (int i = 0; i <= WINDOW_SIZE; ++i)
             {
-                anchor_prior.valid = false;
+                if (lio_full_priors_[i].valid)
+                {
+                    has_lio_full_prior = true;
+                    break;
+                }
             }
-            if (anchor_prior.valid)
+
+            if (has_lio_full_prior)
             {
+                auto &anchor_prior = lio_full_priors_[0];
+                if (!anchor_prior.valid || std::abs(anchor_prior.timestamp - Headers[0]) > 0.01)
+                {
+                    anchor_prior.valid = false;
+                }
                 constexpr double kMaxLioFullPriorDt = 0.01;
-                bool lio_window_ok = true;
+                bool lio_window_ok = anchor_prior.valid;
                 bool imu_preintegration_ok = USE_IMU;
                 double max_lio_prior_dt = 0.0;
                 for (int i = 0; i <= WINDOW_SIZE; ++i)
@@ -568,6 +577,7 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
 
                 if (lio_window_ok && imu_preintegration_ok)
                 {
+                    lio_full_state_init_attempted_ = true;
                     std::printf(BOLDYELLOW "| %-29s | %-27s |" RESET "\n", "VIO Init Path", "LIO full-state window");
                     CAKE_INFO("LIO full-state initialization: anchor=0 stamp=%.6f window_stamp=%.6f max_dt=%.6f",
                               anchor_prior.timestamp, Headers[0], max_lio_prior_dt);
@@ -617,10 +627,14 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
                     return;
                 }
 
-                CAKE_INFO("LIO full-state initialization skipped: lio_window_ok=%d imu_preintegration_ok=%d max_lio_dt=%.6f",
-                          static_cast<int>(lio_window_ok),
-                          static_cast<int>(imu_preintegration_ok),
-                          max_lio_prior_dt);
+                std::printf("LIO FULL INIT WAIT clean_window=0 anchor_valid=%d imu_preintegration_ok=%d max_lio_dt=%.6f t0=%.6f tN=%.6f\n",
+                            static_cast<int>(anchor_prior.valid),
+                            static_cast<int>(imu_preintegration_ok),
+                            max_lio_prior_dt,
+                            Headers[0],
+                            Headers[WINDOW_SIZE]);
+                slideWindow();
+                return;
             }
         }
 

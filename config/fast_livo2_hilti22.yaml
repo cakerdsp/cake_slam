@@ -84,7 +84,8 @@ vision:
   lidar_depth_std: 1.0e-8
   min_inv_depth_var: 1.0e-15
   min_lio_pose_prior_var: 1.0e-15
-  max_vio_feedback_pos_delta: 5.0
+  max_vio_feedback_pos_delta: 0.50
+  max_vio_feedback_z_delta: 0.20
   max_vio_feedback_rot_delta_deg: 20.0
 
 extrinsic:
