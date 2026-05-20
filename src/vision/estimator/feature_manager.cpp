@@ -142,11 +142,43 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const std::map<int
     }
     pending_lidar_depth_priors_.clear();
 
+    int len1 = 0;
+    int len2 = 0;
+    int len3 = 0;
+    int len4p = 0;
+    for (const auto &it_per_id : feature)
+    {
+        const int len = static_cast<int>(it_per_id.feature_per_frame.size());
+        if (len <= 1)
+            ++len1;
+        else if (len == 2)
+            ++len2;
+        else if (len == 3)
+            ++len3;
+        else
+            ++len4p;
+    }
+
     //if (frame_count < 2 || last_track_num < 20)
     //if (frame_count < 2 || last_track_num < 20 || new_feature_num > 0.5 * last_track_num)
     // 前几帧或跟踪过少时直接放宽关键帧判定，优先保证系统能够初始化。
     if (frame_count < 2 || last_track_num < 20 || long_track_num < 40 || new_feature_num > 0.5 * last_track_num)
+    {
+        std::printf("VIO PARALLAX DEBUG frame=%d input=%zu tracks=%zu len1=%d len2=%d len3=%d len4p=%d last_track=%d new=%d long=%d parallax_num=%d avg_px=%.3f margin=old reason=early_or_weak_tracks\n",
+                    frame_count,
+                    image.size(),
+                    feature.size(),
+                    len1,
+                    len2,
+                    len3,
+                    len4p,
+                    last_track_num,
+                    new_feature_num,
+                    long_track_num,
+                    parallax_num,
+                    last_average_parallax);
         return true;
+    }
 
     // 统计当前帧和前一帧之间共享特征的平均视差。
     for (auto &it_per_id : feature)
@@ -161,6 +193,19 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const std::map<int
 
     if (parallax_num == 0)
     {
+        std::printf("VIO PARALLAX DEBUG frame=%d input=%zu tracks=%zu len1=%d len2=%d len3=%d len4p=%d last_track=%d new=%d long=%d parallax_num=%d avg_px=%.3f margin=old reason=no_parallax_pairs\n",
+                    frame_count,
+                    image.size(),
+                    feature.size(),
+                    len1,
+                    len2,
+                    len3,
+                    len4p,
+                    last_track_num,
+                    new_feature_num,
+                    long_track_num,
+                    parallax_num,
+                    last_average_parallax);
         return true;
     }
     else
@@ -169,7 +214,22 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const std::map<int
         ROS_DEBUG("current parallax: %lf", parallax_sum / parallax_num * FOCAL_LENGTH);
         last_average_parallax = parallax_sum / parallax_num * FOCAL_LENGTH;
         // 视差足够大才保留为关键帧，否则新图像提供的新几何信息不足。
-        return parallax_sum / parallax_num >= MIN_PARALLAX;
+        const bool margin_old = parallax_sum / parallax_num >= MIN_PARALLAX;
+        std::printf("VIO PARALLAX DEBUG frame=%d input=%zu tracks=%zu len1=%d len2=%d len3=%d len4p=%d last_track=%d new=%d long=%d parallax_num=%d avg_px=%.3f margin=%s reason=parallax_check\n",
+                    frame_count,
+                    image.size(),
+                    feature.size(),
+                    len1,
+                    len2,
+                    len3,
+                    len4p,
+                    last_track_num,
+                    new_feature_num,
+                    long_track_num,
+                    parallax_num,
+                    last_average_parallax,
+                    margin_old ? "old" : "second_new");
+        return margin_old;
     }
 }
 

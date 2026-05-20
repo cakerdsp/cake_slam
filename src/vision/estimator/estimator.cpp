@@ -1774,16 +1774,47 @@ void Estimator::optimization()
     int feature_index = -1;
     int total_feature_track_count = 0;
     int total_lidar_depth_track_count = 0;
+    int lidar_prior_valid_count = 0;
+    int lidar_prior_invalid_count = 0;
     int max_feature_track_length = 0;
+    int feature_len1 = 0;
+    int feature_len2 = 0;
+    int feature_len3 = 0;
+    int feature_len4p = 0;
+    int rejected_short_visual = 0;
+    int rejected_short_lidar = 0;
     for (auto &it_per_id : f_manager.feature)
     {
         it_per_id.used_num = it_per_id.feature_per_frame.size();
         ++total_feature_track_count;
         max_feature_track_length = std::max(max_feature_track_length, it_per_id.used_num);
+        if (it_per_id.used_num <= 1)
+            ++feature_len1;
+        else if (it_per_id.used_num == 2)
+            ++feature_len2;
+        else if (it_per_id.used_num == 3)
+            ++feature_len3;
+        else
+            ++feature_len4p;
         if (it_per_id.has_lidar_depth_prior)
+        {
             ++total_lidar_depth_track_count;
+            if (it_per_id.lidar_depth_prior.valid)
+                ++lidar_prior_valid_count;
+            else
+                ++lidar_prior_invalid_count;
+        }
         if (!it_per_id.isUsableForOptimization())
+        {
+            if (it_per_id.used_num < it_per_id.minObservationCountForOptimization())
+            {
+                if (it_per_id.has_lidar_depth_prior)
+                    ++rejected_short_lidar;
+                else
+                    ++rejected_short_visual;
+            }
             continue;
+        }
 
         ++feature_index;
         ++optimized_feature_count;
@@ -1833,8 +1864,9 @@ void Estimator::optimization()
     //printf("prepare for ceres: %f \n", t_prepare.toc());
 
     static double last_light_opt_debug_stamp = -1.0;
+    const bool weak_visual_constraints = optimized_feature_count < 10 || visual_residual_count < 20;
     const bool print_light_opt_debug =
-        (visual_residual_count == 0 || optimized_feature_count == 0) &&
+        weak_visual_constraints &&
         (last_light_opt_debug_stamp < 0.0 || Headers[frame_count] - last_light_opt_debug_stamp >= 1.0);
     if (debug_lio_full_prior || print_light_opt_debug)
     {
@@ -1864,6 +1896,18 @@ void Estimator::optimization()
                     2,
                     static_cast<int>(use_lio_full_prior_factor),
                     static_cast<int>(debug_lio_full_prior));
+        std::printf("VIO OPT DEBUG reject_reason: len1=%d len2=%d len3=%d len4p=%d short_visual=%d short_lidar=%d lidar_prior_valid=%d lidar_prior_invalid=%d usable=%d visual_residuals=%d weak=%d\n",
+                    feature_len1,
+                    feature_len2,
+                    feature_len3,
+                    feature_len4p,
+                    rejected_short_visual,
+                    rejected_short_lidar,
+                    lidar_prior_valid_count,
+                    lidar_prior_invalid_count,
+                    optimized_feature_count,
+                    visual_residual_count,
+                    static_cast<int>(weak_visual_constraints));
         last_light_opt_debug_stamp = Headers[frame_count];
         if (debug_lio_full_prior)
         {

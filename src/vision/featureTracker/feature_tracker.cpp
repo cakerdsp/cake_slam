@@ -169,6 +169,19 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     last_timing.flow_back = FLOW_BACK;
     last_timing.has_prediction = hasPrediction ? 1 : 0;
     current_lidar_priors.clear();
+    auto countStatus = [](const vector<uchar> &status) {
+        int count = 0;
+        for (const auto s : status)
+        {
+            if (s)
+                ++count;
+        }
+        return count;
+    };
+    int survival_lk_forward = 0;
+    int survival_lk_backward = 0;
+    int survival_lio_gate = 0;
+    int survival_border = 0;
     last_prev_track_count = static_cast<int>(prev_pts.size());
     last_tracked_after_flow_count = 0;
     last_prev_lidar_track_count = 0;
@@ -221,6 +234,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
             {
                 cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(21, 21), 3);
             }
+            survival_lk_forward = countStatus(status);
             last_timing.lk_forward_ms = t_lk_forward.toc();
             // reverse check
             if(FLOW_BACK)
@@ -242,8 +256,10 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
                 }
                 last_timing.lk_backward_ms = t_lk_backward.toc();
             }
+            survival_lk_backward = FLOW_BACK ? countStatus(status) : survival_lk_forward;
             TicToc t_lio_gate;
             rejectWithLioPrior(status);
+            survival_lio_gate = countStatus(status);
             last_timing.lio_gate_ms = t_lio_gate.toc();
             // printf("temporal optical flow costs: %fms\n", t_o.toc());
         }
@@ -306,6 +322,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
                 gpu_status.download(tmp1_status);
                 status = tmp1_status;
             }
+            survival_lk_forward = countStatus(status);
             if(FLOW_BACK)
             {
                 cv::cuda::GpuMat reverse_gpu_status;
@@ -330,6 +347,8 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
                         status[i] = 0;
                 }
             }
+            survival_lk_backward = FLOW_BACK ? countStatus(status) : survival_lk_forward;
+            survival_lio_gate = survival_lk_backward;
             // printf("gpu temporal optical flow costs: %f ms\n",t_og.toc());
         }
 #endif
@@ -338,6 +357,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
         for (int i = 0; i < int(cur_pts.size()); i++)
             if (status[i] && !inBorder(cur_pts[i]))
                 status[i] = 0;
+        survival_border = countStatus(status);
         reduceVector(prev_pts, status);
         reduceVector(cur_pts, status);
         reduceVector(ids, status);
@@ -625,6 +645,40 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     last_timing.pack_ms = t_pack.toc();
     last_timing.final_tracks = static_cast<int>(cur_pts.size());
     last_timing.total_ms = t_r.toc();
+    int cur_len1 = 0;
+    int cur_len2 = 0;
+    int cur_len3 = 0;
+    int cur_len4p = 0;
+    for (const int cnt : track_cnt)
+    {
+        if (cnt <= 1)
+            ++cur_len1;
+        else if (cnt == 2)
+            ++cur_len2;
+        else if (cnt == 3)
+            ++cur_len3;
+        else
+            ++cur_len4p;
+    }
+    std::printf("FEATURE TRACKER SURVIVAL stamp=%.6f prev=%d lk_fwd=%d lk_back=%d lio_gate=%d border=%d old_survive=%d add_lidar=%d add_visual=%d new_total=%d final=%d len1=%d len2=%d len3=%d len4p=%d prev_lidar=%d tracked_lidar=%d lio_reject=%d\n",
+                cur_time,
+                last_prev_track_count,
+                survival_lk_forward,
+                survival_lk_backward,
+                survival_lio_gate,
+                survival_border,
+                last_tracked_after_flow_count,
+                last_added_lidar_count,
+                last_added_visual_count,
+                last_added_lidar_count + last_added_visual_count,
+                last_timing.final_tracks,
+                cur_len1,
+                cur_len2,
+                cur_len3,
+                cur_len4p,
+                last_prev_lidar_track_count,
+                last_tracked_lidar_count,
+                last_rejected_by_lio_prior_count);
     return featureFrame;
 }
 
