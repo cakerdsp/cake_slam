@@ -689,6 +689,7 @@ void SlamNode::handleLIO()
 
   const auto t_lio_start = std::chrono::steady_clock::now();
   handleFirstFrame();
+  const StatesGroup lio_input_state = state_;
   lio_.SetState(state_);
 
   // LioCore 内部会复制测量包，因此主程序同步上下文中的 last_lio_update_time
@@ -729,6 +730,32 @@ void SlamNode::handleLIO()
       last_lio_prior_skip_log_time = update_time;
     }
   }
+  static bool has_last_lio_output_state = false;
+  static double last_lio_output_z = 0.0;
+  static double last_lio_output_time = -1.0;
+  const double lio_output_z = state_.pos_end.z();
+  const double lio_dz_from_input = lio_output_z - lio_input_state.pos_end.z();
+  const double lio_dz_from_prev =
+      has_last_lio_output_state ? lio_output_z - last_lio_output_z
+                                : std::numeric_limits<double>::quiet_NaN();
+  const double lio_dt_from_prev =
+      has_last_lio_output_state ? update_time - last_lio_output_time
+                                : std::numeric_limits<double>::quiet_NaN();
+  std::printf("LIO STATE DEBUG stamp=%.6f input_z=% .6f output_z=% .6f dz_input=% .6f dz_prev=% .6f dt_prev=%.6f vel_z=% .6f gravity_z=% .6f imu_init=%d visual_candidates=%zu lio_history=%zu\n",
+              update_time,
+              lio_input_state.pos_end.z(),
+              lio_output_z,
+              lio_dz_from_input,
+              lio_dz_from_prev,
+              lio_dt_from_prev,
+              state_.vel_end.z(),
+              state_.gravity.z(),
+              lio_imu_initialized ? 1 : 0,
+              pending_lidar_visual_candidates_.size(),
+              lio_full_state_history_.size());
+  has_last_lio_output_state = true;
+  last_lio_output_z = lio_output_z;
+  last_lio_output_time = update_time;
   const auto t_lio_prior_end = std::chrono::steady_clock::now();
 
   state_update_flag_ = true;
@@ -816,13 +843,16 @@ void SlamNode::handleVIO()
         const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
         const double z_delta = vio_state.pos_end.z() - lio_state_before_vio.pos_end.z();
         const double abs_z_delta = std::abs(z_delta);
-        const bool has_visual_constraints =
+        const bool visual_ok =
             opt_visual_residuals >= config_.vision.min_vio_feedback_visual_residuals;
+        const bool pos_ok = pos_delta <= config_.vision.max_vio_feedback_pos_delta;
+        const bool z_ok = abs_z_delta <= config_.vision.max_vio_feedback_z_delta;
+        const bool rot_ok = rot_delta_deg <= config_.vision.max_vio_feedback_rot_delta_deg;
         accept_vio_feedback =
-            has_visual_constraints &&
-            pos_delta <= config_.vision.max_vio_feedback_pos_delta &&
-            abs_z_delta <= config_.vision.max_vio_feedback_z_delta &&
-            rot_delta_deg <= config_.vision.max_vio_feedback_rot_delta_deg;
+            visual_ok &&
+            pos_ok &&
+            z_ok &&
+            rot_ok;
         std::printf("VIO FEEDBACK DEBUG stamp=%.6f accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_z=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d min_visual_residuals=%d lio_z=% .6f vio_z=% .6f\n",
                     measure.vio_time,
                     static_cast<int>(accept_vio_feedback),
@@ -840,6 +870,22 @@ void SlamNode::handleVIO()
                     config_.vision.min_vio_feedback_visual_residuals,
                     lio_state_before_vio.pos_end.z(),
                     vio_state.pos_end.z());
+        std::printf("VIO FEEDBACK REASON stamp=%.6f visual_ok=%d pos_ok=%d z_ok=%d rot_ok=%d reject_visual=%d reject_pos=%d reject_z=%d reject_rot=%d would_accept_without_z=%d would_accept_without_pos=%d would_accept_without_visual=%d lio_full_prior=%d lio_full_dt=%.6f lidar_candidates=%zu\n",
+                    measure.vio_time,
+                    visual_ok ? 1 : 0,
+                    pos_ok ? 1 : 0,
+                    z_ok ? 1 : 0,
+                    rot_ok ? 1 : 0,
+                    visual_ok ? 0 : 1,
+                    pos_ok ? 0 : 1,
+                    z_ok ? 0 : 1,
+                    rot_ok ? 0 : 1,
+                    (visual_ok && pos_ok && rot_ok) ? 1 : 0,
+                    (visual_ok && z_ok && rot_ok) ? 1 : 0,
+                    (pos_ok && z_ok && rot_ok) ? 1 : 0,
+                    has_lio_full_prior ? 1 : 0,
+                    lio_full_prior_dt,
+                    lidar_candidate_count);
         CAKE_INFO_THROTTLE_MS(
             2000,
             "VIO feedback: stamp=%.6f pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d visual_residuals=%d "
@@ -865,10 +911,20 @@ void SlamNode::handleVIO()
       }
 
       if (accept_vio_feedback) {
+        const double fused_z_before = state_.pos_end.z();
         state_ = vio_state;
         if (use_lidar_) {
           lio_.SetState(state_);
         }
+        std::printf("VIO FEEDBACK APPLY stamp=%.6f write_lio=%d z_before=% .6f z_after=% .6f dz_write=% .6f visual_residuals=%d opt_features=%d opt_lidar=%d\n",
+                    measure.vio_time,
+                    use_lidar_ ? 1 : 0,
+                    fused_z_before,
+                    state_.pos_end.z(),
+                    state_.pos_end.z() - fused_z_before,
+                    opt_visual_residuals,
+                    opt_features,
+                    opt_lidar_features);
         latest_ekf_state_ = state_;
         latest_ekf_time_ = measure.vio_time;
         state_update_flag_ = true;
@@ -1248,18 +1304,43 @@ LioFullStatePrior SlamNode::FindClosestLioState(double stamp) const
   return closest;
 }
 
-void SlamNode::buildLidarVisualCandidates(double /*stamp*/)
+void SlamNode::buildLidarVisualCandidates(double stamp)
 {
   // Project the latest LIO cloud into the synchronized image and keep only
   // candidates that pass valid-mask, z-buffer, texture, and spacing checks.
   pending_lidar_visual_candidates_.clear();
   if (!use_image_ || !vio_ || !config_.vision.lidar_depth_enable ||
       !config_.vision.lidar_prior_feature_enable || latest_sync_mono_image_.empty()) {
+    const char *reason = "disabled";
+    if (!use_image_)
+      reason = "image_disabled";
+    else if (!vio_)
+      reason = "vio_missing";
+    else if (!config_.vision.lidar_depth_enable)
+      reason = "lidar_depth_disabled";
+    else if (!config_.vision.lidar_prior_feature_enable)
+      reason = "lidar_prior_disabled";
+    else if (latest_sync_mono_image_.empty())
+      reason = "image_empty";
+    std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=1 reason=%s use_image=%d vio=%d lidar_depth_enable=%d lidar_prior_feature_enable=%d image_empty=%d state_z=% .6f\n",
+                stamp,
+                reason,
+                use_image_ ? 1 : 0,
+                vio_ ? 1 : 0,
+                config_.vision.lidar_depth_enable ? 1 : 0,
+                config_.vision.lidar_prior_feature_enable ? 1 : 0,
+                latest_sync_mono_image_.empty() ? 1 : 0,
+                state_.pos_end.z());
     return;
   }
 
   auto camera = vio_->getCameraModel();
   if (!camera) {
+    std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=1 reason=no_camera image_size=%dx%d state_z=% .6f\n",
+                stamp,
+                latest_sync_mono_image_.cols,
+                latest_sync_mono_image_.rows,
+                state_.pos_end.z());
     return;
   }
 
@@ -1267,10 +1348,56 @@ void SlamNode::buildLidarVisualCandidates(double /*stamp*/)
   if (!source_cloud || source_cloud->empty()) {
     source_cloud = lio_.GetUndistortedCloud();
   }
+  const size_t source_points = source_cloud ? source_cloud->size() : 0;
+  if (!source_cloud || source_cloud->empty()) {
+    std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=1 reason=empty_cloud image_size=%dx%d state_z=% .6f\n",
+                stamp,
+                latest_sync_mono_image_.cols,
+                latest_sync_mono_image_.rows,
+                state_.pos_end.z());
+    return;
+  }
   pending_lidar_visual_candidates_ = lidar_visual_selector_.Select(
       source_cloud, state_, latest_sync_mono_image_, vio_->getUndistortedValidMask(), camera);
 
   const auto &stats = lidar_visual_selector_.lastStats();
+  const double depth_ratio = stats.input_points > 0
+                                 ? static_cast<double>(stats.positive_depth) /
+                                       static_cast<double>(stats.input_points)
+                                 : 0.0;
+  const double image_ratio = stats.positive_depth > 0
+                                 ? static_cast<double>(stats.in_image) /
+                                       static_cast<double>(stats.positive_depth)
+                                 : 0.0;
+  const double texture_ratio = stats.zbuffer_kept > 0
+                                   ? static_cast<double>(stats.texture_kept) /
+                                         static_cast<double>(stats.zbuffer_kept)
+                                   : 0.0;
+  const double mask_ratio = stats.texture_kept > 0
+                                ? static_cast<double>(stats.mask_kept) /
+                                      static_cast<double>(stats.texture_kept)
+                                : 0.0;
+  std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=0 source_points=%zu input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d selected=%zu depth_ratio=%.3f image_ratio=%.3f texture_ratio=%.3f mask_ratio=%.3f image_size=%dx%d state_z=% .6f min_depth=%.3f max_depth=%.3f mask_radius=%.3f score_min=%.6g\n",
+              stamp,
+              source_points,
+              stats.input_points,
+              stats.positive_depth,
+              stats.in_image,
+              stats.zbuffer_kept,
+              stats.texture_kept,
+              stats.mask_kept,
+              pending_lidar_visual_candidates_.size(),
+              depth_ratio,
+              image_ratio,
+              texture_ratio,
+              mask_ratio,
+              latest_sync_mono_image_.cols,
+              latest_sync_mono_image_.rows,
+              state_.pos_end.z(),
+              config_.vision.min_lidar_depth,
+              config_.vision.max_lidar_depth,
+              config_.vision.lidar_mask_radius,
+              config_.vision.shi_tomasi_min_score);
   CAKE_INFO_THROTTLE_MS(
       2000,
       "LiDAR visual candidates: input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d image_size=%dx%d",

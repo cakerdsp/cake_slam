@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 // 判断点是否落在图像有效区域内。
 bool FeatureTracker::inBorder(const cv::Point2f &pt)
@@ -649,8 +650,23 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     int cur_len2 = 0;
     int cur_len3 = 0;
     int cur_len4p = 0;
-    for (const int cnt : track_cnt)
+    int lidar_len1 = 0;
+    int lidar_len2 = 0;
+    int lidar_len3 = 0;
+    int lidar_len4p = 0;
+    int visual_len1 = 0;
+    int visual_len2 = 0;
+    int visual_len3 = 0;
+    int visual_len4p = 0;
+    int lidar_track_total = 0;
+    int visual_track_total = 0;
+    int max_lidar_age = 0;
+    int max_visual_age = 0;
+    double sum_lidar_age = 0.0;
+    double sum_visual_age = 0.0;
+    for (size_t i = 0; i < track_cnt.size() && i < ids.size(); ++i)
     {
+        const int cnt = track_cnt[i];
         if (cnt <= 1)
             ++cur_len1;
         else if (cnt == 2)
@@ -659,6 +675,36 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
             ++cur_len3;
         else
             ++cur_len4p;
+
+        const bool lidar_track = active_lidar_priors.find(ids[i]) != active_lidar_priors.end();
+        if (lidar_track)
+        {
+            ++lidar_track_total;
+            sum_lidar_age += cnt;
+            max_lidar_age = std::max(max_lidar_age, cnt);
+            if (cnt <= 1)
+                ++lidar_len1;
+            else if (cnt == 2)
+                ++lidar_len2;
+            else if (cnt == 3)
+                ++lidar_len3;
+            else
+                ++lidar_len4p;
+        }
+        else
+        {
+            ++visual_track_total;
+            sum_visual_age += cnt;
+            max_visual_age = std::max(max_visual_age, cnt);
+            if (cnt <= 1)
+                ++visual_len1;
+            else if (cnt == 2)
+                ++visual_len2;
+            else if (cnt == 3)
+                ++visual_len3;
+            else
+                ++visual_len4p;
+        }
     }
     std::printf("FEATURE TRACKER SURVIVAL stamp=%.6f prev=%d lk_fwd=%d lk_back=%d lio_gate=%d border=%d old_survive=%d add_lidar=%d add_visual=%d new_total=%d final=%d len1=%d len2=%d len3=%d len4p=%d prev_lidar=%d tracked_lidar=%d lio_reject=%d\n",
                 cur_time,
@@ -679,6 +725,22 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
                 last_prev_lidar_track_count,
                 last_tracked_lidar_count,
                 last_rejected_by_lio_prior_count);
+    std::printf("FEATURE TRACKER AGE stamp=%.6f lidar_total=%d lidar_len1=%d lidar_len2=%d lidar_len3=%d lidar_len4p=%d lidar_avg_age=%.3f lidar_max_age=%d visual_total=%d visual_len1=%d visual_len2=%d visual_len3=%d visual_len4p=%d visual_avg_age=%.3f visual_max_age=%d\n",
+                cur_time,
+                lidar_track_total,
+                lidar_len1,
+                lidar_len2,
+                lidar_len3,
+                lidar_len4p,
+                lidar_track_total > 0 ? sum_lidar_age / static_cast<double>(lidar_track_total) : 0.0,
+                max_lidar_age,
+                visual_track_total,
+                visual_len1,
+                visual_len2,
+                visual_len3,
+                visual_len4p,
+                visual_track_total > 0 ? sum_visual_age / static_cast<double>(visual_track_total) : 0.0,
+                max_visual_age);
     return featureFrame;
 }
 
@@ -687,22 +749,54 @@ void FeatureTracker::rejectWithLioPrior(vector<uchar> &status)
     // LiDAR-seeded tracks have a world anchor from the LIO update. Reproject
     // that anchor through the current LIO pose prior and reject tracks whose
     // LK result moved too far in pixels. This replaces the old F-matrix gate.
-    if (!lio_prior_gate.valid || active_lidar_priors.empty() || m_camera.empty() ||
-        LIDAR_PRIOR_REPROJ_THRESHOLD <= 0.0)
+    const bool gate_enabled =
+        lio_prior_gate.valid && !active_lidar_priors.empty() && !m_camera.empty() &&
+        LIDAR_PRIOR_REPROJ_THRESHOLD > 0.0;
+    if (!gate_enabled)
     {
+        if (!active_lidar_priors.empty() || last_prev_lidar_track_count > 0)
+        {
+            const char *reason = "none";
+            if (!lio_prior_gate.valid)
+                reason = "no_lio_prior";
+            else if (active_lidar_priors.empty())
+                reason = "no_lidar_tracks";
+            else if (m_camera.empty())
+                reason = "no_camera";
+            else if (LIDAR_PRIOR_REPROJ_THRESHOLD <= 0.0)
+                reason = "disabled_threshold";
+            std::printf("LIO PRIOR GATE DEBUG stamp=%.6f enabled=0 reason=%s active=%zu prev_lidar=%d status=%zu threshold=%.3f prior_valid=%d camera=%d\n",
+                        cur_time,
+                        reason,
+                        active_lidar_priors.size(),
+                        last_prev_lidar_track_count,
+                        status.size(),
+                        LIDAR_PRIOR_REPROJ_THRESHOLD,
+                        lio_prior_gate.valid ? 1 : 0,
+                        m_camera.empty() ? 0 : 1);
+        }
         return;
     }
 
     const double threshold_sq = LIDAR_PRIOR_REPROJ_THRESHOLD * LIDAR_PRIOR_REPROJ_THRESHOLD;
+    int tested = 0;
+    int kept = 0;
+    int rejected_behind = 0;
+    int rejected_reproj = 0;
+    int already_failed = 0;
+    std::vector<double> reproj_errors;
     for (size_t i = 0; i < ids.size() && i < cur_pts.size() && i < status.size(); ++i)
     {
-        if (!status[i])
-            continue;
-
         const auto it = active_lidar_priors.find(ids[i]);
         if (it == active_lidar_priors.end() || !it->second.valid)
             continue;
+        if (!status[i])
+        {
+            already_failed++;
+            continue;
+        }
 
+        tested++;
         const Eigen::Vector3d p_body =
             lio_prior_gate.R_WB.transpose() * (it->second.P_W_init - lio_prior_gate.p_WB);
         const Eigen::Vector3d p_cam = gate_R_I_C.transpose() * (p_body - gate_t_I_C);
@@ -710,6 +804,7 @@ void FeatureTracker::rejectWithLioPrior(vector<uchar> &status)
         {
             status[i] = 0;
             last_rejected_by_lio_prior_count++;
+            rejected_behind++;
             continue;
         }
 
@@ -717,11 +812,44 @@ void FeatureTracker::rejectWithLioPrior(vector<uchar> &status)
         m_camera[0]->spaceToPlane(p_cam, uv);
         const double dx = static_cast<double>(cur_pts[i].x) - uv.x();
         const double dy = static_cast<double>(cur_pts[i].y) - uv.y();
+        const double reproj_error = std::sqrt(dx * dx + dy * dy);
+        reproj_errors.push_back(reproj_error);
         if (dx * dx + dy * dy > threshold_sq) {
             status[i] = 0;
             last_rejected_by_lio_prior_count++;
+            rejected_reproj++;
+        }
+        else
+        {
+            kept++;
         }
     }
+    std::sort(reproj_errors.begin(), reproj_errors.end());
+    const auto percentile = [&reproj_errors](double q) -> double {
+        if (reproj_errors.empty())
+            return std::numeric_limits<double>::quiet_NaN();
+        const double idx = q * static_cast<double>(reproj_errors.size() - 1);
+        const size_t lo = static_cast<size_t>(std::floor(idx));
+        const size_t hi = static_cast<size_t>(std::ceil(idx));
+        if (lo == hi)
+            return reproj_errors[lo];
+        const double alpha = idx - static_cast<double>(lo);
+        return reproj_errors[lo] * (1.0 - alpha) + reproj_errors[hi] * alpha;
+    };
+    std::printf("LIO PRIOR GATE DEBUG stamp=%.6f enabled=1 active=%zu prev_lidar=%d tested=%d kept=%d reject_reproj=%d reject_behind=%d already_failed=%d threshold=%.3f err_med=%.3f err_p90=%.3f err_max=%.3f prior_z=%.6f\n",
+                cur_time,
+                active_lidar_priors.size(),
+                last_prev_lidar_track_count,
+                tested,
+                kept,
+                rejected_reproj,
+                rejected_behind,
+                already_failed,
+                LIDAR_PRIOR_REPROJ_THRESHOLD,
+                percentile(0.5),
+                percentile(0.9),
+                reproj_errors.empty() ? std::numeric_limits<double>::quiet_NaN() : reproj_errors.back(),
+                lio_prior_gate.p_WB.z());
 }
 
 int FeatureTracker::addLidarCandidatePoints(int max_num)

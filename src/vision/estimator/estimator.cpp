@@ -1781,11 +1781,20 @@ void Estimator::optimization()
     int feature_len2 = 0;
     int feature_len3 = 0;
     int feature_len4p = 0;
+    int visual_len1 = 0;
+    int visual_len2 = 0;
+    int visual_len3 = 0;
+    int visual_len4p = 0;
+    int lidar_len1 = 0;
+    int lidar_len2 = 0;
+    int lidar_len3 = 0;
+    int lidar_len4p = 0;
     int rejected_short_visual = 0;
     int rejected_short_lidar = 0;
     for (auto &it_per_id : f_manager.feature)
     {
         it_per_id.used_num = it_per_id.feature_per_frame.size();
+        const bool is_lidar_track = it_per_id.has_lidar_depth_prior;
         ++total_feature_track_count;
         max_feature_track_length = std::max(max_feature_track_length, it_per_id.used_num);
         if (it_per_id.used_num <= 1)
@@ -1796,7 +1805,29 @@ void Estimator::optimization()
             ++feature_len3;
         else
             ++feature_len4p;
-        if (it_per_id.has_lidar_depth_prior)
+        if (is_lidar_track)
+        {
+            if (it_per_id.used_num <= 1)
+                ++lidar_len1;
+            else if (it_per_id.used_num == 2)
+                ++lidar_len2;
+            else if (it_per_id.used_num == 3)
+                ++lidar_len3;
+            else
+                ++lidar_len4p;
+        }
+        else
+        {
+            if (it_per_id.used_num <= 1)
+                ++visual_len1;
+            else if (it_per_id.used_num == 2)
+                ++visual_len2;
+            else if (it_per_id.used_num == 3)
+                ++visual_len3;
+            else
+                ++visual_len4p;
+        }
+        if (is_lidar_track)
         {
             ++total_lidar_depth_track_count;
             if (it_per_id.lidar_depth_prior.valid)
@@ -1908,6 +1939,15 @@ void Estimator::optimization()
                     optimized_feature_count,
                     visual_residual_count,
                     static_cast<int>(weak_visual_constraints));
+        std::printf("VIO OPT DEBUG source_age: visual_len1=%d visual_len2=%d visual_len3=%d visual_len4p=%d lidar_len1=%d lidar_len2=%d lidar_len3=%d lidar_len4p=%d\n",
+                    visual_len1,
+                    visual_len2,
+                    visual_len3,
+                    visual_len4p,
+                    lidar_len1,
+                    lidar_len2,
+                    lidar_len3,
+                    lidar_len4p);
         last_light_opt_debug_stamp = Headers[frame_count];
         if (debug_lio_full_prior)
         {
