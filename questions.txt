@@ -664,3 +664,17 @@ rviz设置或者点云等等的坐标系配置似乎有问题，观察时发现�
 [cake_slam_node-1] | Average Total Time            | 0.047761                    |
 [cake_slam_node-1] +-------------------------------------------------------------+
 [cake_slam_node-1] LIO summary: stamp=946685516.499479 imu=20 cur_pts=22328 next_pts=22418 lidar_prior_candidates=195
+
+
+
+
+定位到了：TrackAndOptimize 慢不是 Ceres 后端慢。你贴的 HILTI22 日志里 solver costs 只有约 1.5-2 ms，真正耗时是 FEATURE TRACKER DEBUG 里的 undist=200-395 ms，也就是前端每帧逐点调用 fisheye liftProjective()。
+根因是 HILTI22 用的是 KANNALA_BRANDT 相机模型，而 AVIA 是 PINHOLE。当前代码对每个特征点每帧调用 `camodocal
+::KannalaBrandtCamera::liftProjective()`，这个 fisheye 反投影很贵。
+已改：
+在 feature_tracker.h (line 141) 增加 pixel -> normalized camera lookup 缓存。
+在 feature_tracker.cpp (line 858) 预计算整幅图的反投影查找表，运行时用双线性插值替代逐点 liftProjective()。
+trackImage() 里的左右目去畸变调用已改为查表路径：feature_tracker.cpp (line 451)。
+预期现象：启动或图像尺寸变化时会打印一次 FeatureTracker undistort lookup...，之后 FEATURE TRACKER DEBUG stages_ms 里的 undist 应从几百 ms 降到很小，TrackAndOptimize 会随之下降。
+我只做了静态验证：git diff --check -- src include config 通过；按你的要求没有尝试编译或运行。
+另外，日志里的 opt_features=0 / visual_residuals=0 / max_track_len=3 说明视觉残差仍然没有进入优化，这是另一个问题，但它不是这次 TrackAndOptimize=0.3s 的直接耗时来源。

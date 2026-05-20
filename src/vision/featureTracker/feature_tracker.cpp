@@ -14,6 +14,9 @@
 
 #include "feature_tracker.h"
 
+#include <algorithm>
+#include <cmath>
+
 // 判断点是否落在图像有效区域内。
 bool FeatureTracker::inBorder(const cv::Point2f &pt)
 {
@@ -445,7 +448,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     }
 
     TicToc t_undistort;
-    cur_un_pts = undistortedPts(cur_pts, m_camera[0]);
+    cur_un_pts = undistortedPts(cur_pts, 0);
     last_timing.undistort_ms = t_undistort.toc();
     TicToc t_velocity;
     pts_velocity = ptsVelocity(ids, cur_un_pts, cur_un_pts_map, prev_un_pts_map);
@@ -543,7 +546,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
             reduceVector(cur_un_pts, status);
             reduceVector(pts_velocity, status);
             */
-            cur_un_right_pts = undistortedPts(cur_right_pts, m_camera[1]);
+            cur_un_right_pts = undistortedPts(cur_right_pts, 1);
             right_pts_velocity = ptsVelocity(ids_right, cur_un_right_pts, cur_un_right_pts_map, prev_un_right_pts_map);
             
         }
@@ -781,6 +784,9 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
     if (calib_file.empty())
         throw std::runtime_error("FeatureTracker requires at least one camera calibration file");
 
+    m_camera.clear();
+    undistort_lookup.clear();
+    stereo_cam = false;
     for (size_t i = 0; i < calib_file.size(); i++)
     {
         if (calib_file[i].empty())
@@ -791,6 +797,14 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
         if (!camera)
             throw std::runtime_error("FeatureTracker failed to load camera calibration: " + calib_file[i]);
         m_camera.push_back(camera);
+    }
+    undistort_lookup.resize(m_camera.size());
+    if (ROW > 0 && COL > 0)
+    {
+        row = ROW;
+        col = COL;
+        for (int camera_id = 0; camera_id < static_cast<int>(m_camera.size()); ++camera_id)
+            ensureUndistortLookup(camera_id);
     }
     if (calib_file.size() == 2)
         stereo_cam = 1;
@@ -841,14 +855,104 @@ void FeatureTracker::showUndistortion(const string &name)
 }
 
 // 对输入像素点逐个执行去畸变，并转换为归一化平面坐标。
-vector<cv::Point2f> FeatureTracker::undistortedPts(vector<cv::Point2f> &pts, camodocal::CameraPtr cam)
+void FeatureTracker::ensureUndistortLookup(int camera_id)
+{
+    if (camera_id < 0 || camera_id >= static_cast<int>(m_camera.size()) ||
+        row <= 0 || col <= 0)
+    {
+        return;
+    }
+
+    if (static_cast<int>(undistort_lookup.size()) != static_cast<int>(m_camera.size()))
+        undistort_lookup.resize(m_camera.size());
+
+    cv::Mat &lookup = undistort_lookup[camera_id];
+    if (!lookup.empty() && lookup.rows == row && lookup.cols == col &&
+        lookup.type() == CV_32FC2)
+    {
+        return;
+    }
+
+    TicToc t_lookup;
+    lookup.create(row, col, CV_32FC2);
+    for (int v = 0; v < row; ++v)
+    {
+        for (int u = 0; u < col; ++u)
+        {
+            Eigen::Vector2d pixel(u, v);
+            Eigen::Vector3d ray;
+            m_camera[camera_id]->liftProjective(pixel, ray);
+            const double z = ray.z();
+            cv::Vec2f &normalized = lookup.at<cv::Vec2f>(v, u);
+            if (std::abs(z) > 1e-12)
+            {
+                normalized[0] = static_cast<float>(ray.x() / z);
+                normalized[1] = static_cast<float>(ray.y() / z);
+            }
+            else
+            {
+                normalized[0] = 0.0f;
+                normalized[1] = 0.0f;
+            }
+        }
+    }
+    CAKE_INFO("FeatureTracker undistort lookup: camera=%d size=%dx%d build=%.3f ms",
+              camera_id, col, row, t_lookup.toc());
+}
+
+cv::Point2f FeatureTracker::lookupUndistortedPoint(const cv::Point2f &pt, int camera_id) const
+{
+    if (camera_id < 0 || camera_id >= static_cast<int>(undistort_lookup.size()) ||
+        undistort_lookup[camera_id].empty())
+    {
+        return cv::Point2f(0.0f, 0.0f);
+    }
+
+    const cv::Mat &lookup = undistort_lookup[camera_id];
+    const float max_x = static_cast<float>(lookup.cols - 1);
+    const float max_y = static_cast<float>(lookup.rows - 1);
+    const float x = std::max(0.0f, std::min(pt.x, max_x));
+    const float y = std::max(0.0f, std::min(pt.y, max_y));
+    const int x0 = static_cast<int>(std::floor(x));
+    const int y0 = static_cast<int>(std::floor(y));
+    const int x1 = std::min(x0 + 1, lookup.cols - 1);
+    const int y1 = std::min(y0 + 1, lookup.rows - 1);
+    const float dx = x - static_cast<float>(x0);
+    const float dy = y - static_cast<float>(y0);
+
+    const cv::Vec2f p00 = lookup.at<cv::Vec2f>(y0, x0);
+    const cv::Vec2f p10 = lookup.at<cv::Vec2f>(y0, x1);
+    const cv::Vec2f p01 = lookup.at<cv::Vec2f>(y1, x0);
+    const cv::Vec2f p11 = lookup.at<cv::Vec2f>(y1, x1);
+
+    const cv::Vec2f top = p00 * (1.0f - dx) + p10 * dx;
+    const cv::Vec2f bottom = p01 * (1.0f - dx) + p11 * dx;
+    const cv::Vec2f normalized = top * (1.0f - dy) + bottom * dy;
+    return cv::Point2f(normalized[0], normalized[1]);
+}
+
+vector<cv::Point2f> FeatureTracker::undistortedPts(vector<cv::Point2f> &pts, int camera_id)
 {
     vector<cv::Point2f> un_pts;
-    for (unsigned int i = 0; i < pts.size(); i++)
+    un_pts.reserve(pts.size());
+
+    ensureUndistortLookup(camera_id);
+    if (camera_id >= 0 && camera_id < static_cast<int>(undistort_lookup.size()) &&
+        !undistort_lookup[camera_id].empty())
     {
-        Eigen::Vector2d a(pts[i].x, pts[i].y);
+        for (const auto &pt : pts)
+            un_pts.push_back(lookupUndistortedPoint(pt, camera_id));
+        return un_pts;
+    }
+
+    if (camera_id < 0 || camera_id >= static_cast<int>(m_camera.size()) || !m_camera[camera_id])
+        return un_pts;
+
+    for (const auto &pt : pts)
+    {
+        Eigen::Vector2d a(pt.x, pt.y);
         Eigen::Vector3d b;
-        cam->liftProjective(a, b);
+        m_camera[camera_id]->liftProjective(a, b);
         un_pts.push_back(cv::Point2f(b.x() / b.z(), b.y() / b.z()));
     }
     return un_pts;
