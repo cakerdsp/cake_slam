@@ -137,12 +137,6 @@ public:
     /** @brief Convert current pixel tracks to normalized camera coordinates. */
     void undistortedPoints();
 
-    /** @brief Precompute pixel -> normalized-camera lookup for a camera. */
-    void ensureUndistortLookup(int camera_id);
-
-    /** @brief Read one normalized-camera point from the lookup with bilinear interpolation. */
-    cv::Point2f lookupUndistortedPoint(const cv::Point2f &pt, int camera_id) const;
-
     /** @brief Undistort arbitrary pixel points with the selected camera model. */
     vector<cv::Point2f> undistortedPts(vector<cv::Point2f> &pts, int camera_id);
 
@@ -209,7 +203,9 @@ public:
     std::map<int, cv::Point2f> cur_un_right_pts_map, prev_un_right_pts_map;
     std::map<int, cv::Point2f> prevLeftPtsMap;
     vector<camodocal::CameraPtr> m_camera;
-    vector<cv::Mat> undistort_lookup;
+    vector<int> fast_undistort_model;
+    vector<cv::Mat> fast_undistort_K;
+    vector<cv::Mat> fast_undistort_D;
     double cur_time = 0.0;
     double prev_time = 0.0;
     bool stereo_cam = false;

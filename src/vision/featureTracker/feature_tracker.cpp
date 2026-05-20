@@ -785,7 +785,9 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
         throw std::runtime_error("FeatureTracker requires at least one camera calibration file");
 
     m_camera.clear();
-    undistort_lookup.clear();
+    fast_undistort_model.clear();
+    fast_undistort_K.clear();
+    fast_undistort_D.clear();
     stereo_cam = false;
     for (size_t i = 0; i < calib_file.size(); i++)
     {
@@ -797,14 +799,49 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
         if (!camera)
             throw std::runtime_error("FeatureTracker failed to load camera calibration: " + calib_file[i]);
         m_camera.push_back(camera);
-    }
-    undistort_lookup.resize(m_camera.size());
-    if (ROW > 0 && COL > 0)
-    {
-        row = ROW;
-        col = COL;
-        for (int camera_id = 0; camera_id < static_cast<int>(m_camera.size()); ++camera_id)
-            ensureUndistortLookup(camera_id);
+
+        fast_undistort_model.push_back(0);
+        fast_undistort_K.emplace_back();
+        fast_undistort_D.emplace_back();
+
+        cv::FileStorage fs(calib_file[i], cv::FileStorage::READ);
+        std::string model_type;
+        if (fs.isOpened())
+            fs["model_type"] >> model_type;
+
+        if (model_type == "KANNALA_BRANDT")
+        {
+            const cv::FileNode projection = fs["projection_parameters"];
+            if (!projection.empty() &&
+                !projection["mu"].empty() && !projection["mv"].empty() &&
+                !projection["u0"].empty() && !projection["v0"].empty() &&
+                !projection["k2"].empty() && !projection["k3"].empty() &&
+                !projection["k4"].empty() && !projection["k5"].empty())
+            {
+                const double mu = static_cast<double>(projection["mu"]);
+                const double mv = static_cast<double>(projection["mv"]);
+                const double u0 = static_cast<double>(projection["u0"]);
+                const double v0 = static_cast<double>(projection["v0"]);
+                const double k2 = static_cast<double>(projection["k2"]);
+                const double k3 = static_cast<double>(projection["k3"]);
+                const double k4 = static_cast<double>(projection["k4"]);
+                const double k5 = static_cast<double>(projection["k5"]);
+
+                fast_undistort_model.back() = 1;
+                fast_undistort_K.back() = (cv::Mat_<double>(3, 3) <<
+                    mu, 0.0, u0,
+                    0.0, mv, v0,
+                    0.0, 0.0, 1.0);
+                fast_undistort_D.back() = (cv::Mat_<double>(4, 1) << k2, k3, k4, k5);
+                CAKE_INFO("FeatureTracker fast undistort: camera=%zu model=KANNALA_BRANDT backend=opencv_fisheye",
+                          i);
+            }
+            else
+            {
+                ROS_WARN("KANNALA_BRANDT camera calibration is missing projection parameters, falling back to camodocal liftProjective: %s",
+                         calib_file[i].c_str());
+            }
+        }
     }
     if (calib_file.size() == 2)
         stereo_cam = 1;
@@ -855,93 +892,17 @@ void FeatureTracker::showUndistortion(const string &name)
 }
 
 // 对输入像素点逐个执行去畸变，并转换为归一化平面坐标。
-void FeatureTracker::ensureUndistortLookup(int camera_id)
-{
-    if (camera_id < 0 || camera_id >= static_cast<int>(m_camera.size()) ||
-        row <= 0 || col <= 0)
-    {
-        return;
-    }
-
-    if (static_cast<int>(undistort_lookup.size()) != static_cast<int>(m_camera.size()))
-        undistort_lookup.resize(m_camera.size());
-
-    cv::Mat &lookup = undistort_lookup[camera_id];
-    if (!lookup.empty() && lookup.rows == row && lookup.cols == col &&
-        lookup.type() == CV_32FC2)
-    {
-        return;
-    }
-
-    TicToc t_lookup;
-    lookup.create(row, col, CV_32FC2);
-    for (int v = 0; v < row; ++v)
-    {
-        for (int u = 0; u < col; ++u)
-        {
-            Eigen::Vector2d pixel(u, v);
-            Eigen::Vector3d ray;
-            m_camera[camera_id]->liftProjective(pixel, ray);
-            const double z = ray.z();
-            cv::Vec2f &normalized = lookup.at<cv::Vec2f>(v, u);
-            if (std::abs(z) > 1e-12)
-            {
-                normalized[0] = static_cast<float>(ray.x() / z);
-                normalized[1] = static_cast<float>(ray.y() / z);
-            }
-            else
-            {
-                normalized[0] = 0.0f;
-                normalized[1] = 0.0f;
-            }
-        }
-    }
-    CAKE_INFO("FeatureTracker undistort lookup: camera=%d size=%dx%d build=%.3f ms",
-              camera_id, col, row, t_lookup.toc());
-}
-
-cv::Point2f FeatureTracker::lookupUndistortedPoint(const cv::Point2f &pt, int camera_id) const
-{
-    if (camera_id < 0 || camera_id >= static_cast<int>(undistort_lookup.size()) ||
-        undistort_lookup[camera_id].empty())
-    {
-        return cv::Point2f(0.0f, 0.0f);
-    }
-
-    const cv::Mat &lookup = undistort_lookup[camera_id];
-    const float max_x = static_cast<float>(lookup.cols - 1);
-    const float max_y = static_cast<float>(lookup.rows - 1);
-    const float x = std::max(0.0f, std::min(pt.x, max_x));
-    const float y = std::max(0.0f, std::min(pt.y, max_y));
-    const int x0 = static_cast<int>(std::floor(x));
-    const int y0 = static_cast<int>(std::floor(y));
-    const int x1 = std::min(x0 + 1, lookup.cols - 1);
-    const int y1 = std::min(y0 + 1, lookup.rows - 1);
-    const float dx = x - static_cast<float>(x0);
-    const float dy = y - static_cast<float>(y0);
-
-    const cv::Vec2f p00 = lookup.at<cv::Vec2f>(y0, x0);
-    const cv::Vec2f p10 = lookup.at<cv::Vec2f>(y0, x1);
-    const cv::Vec2f p01 = lookup.at<cv::Vec2f>(y1, x0);
-    const cv::Vec2f p11 = lookup.at<cv::Vec2f>(y1, x1);
-
-    const cv::Vec2f top = p00 * (1.0f - dx) + p10 * dx;
-    const cv::Vec2f bottom = p01 * (1.0f - dx) + p11 * dx;
-    const cv::Vec2f normalized = top * (1.0f - dy) + bottom * dy;
-    return cv::Point2f(normalized[0], normalized[1]);
-}
-
 vector<cv::Point2f> FeatureTracker::undistortedPts(vector<cv::Point2f> &pts, int camera_id)
 {
     vector<cv::Point2f> un_pts;
     un_pts.reserve(pts.size());
 
-    ensureUndistortLookup(camera_id);
-    if (camera_id >= 0 && camera_id < static_cast<int>(undistort_lookup.size()) &&
-        !undistort_lookup[camera_id].empty())
+    if (camera_id >= 0 && camera_id < static_cast<int>(fast_undistort_model.size()) &&
+        fast_undistort_model[camera_id] == 1 && !pts.empty())
     {
-        for (const auto &pt : pts)
-            un_pts.push_back(lookupUndistortedPoint(pt, camera_id));
+        cv::fisheye::undistortPoints(pts, un_pts,
+                                      fast_undistort_K[camera_id],
+                                      fast_undistort_D[camera_id]);
         return un_pts;
     }
 
