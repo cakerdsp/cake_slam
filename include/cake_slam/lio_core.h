@@ -55,16 +55,6 @@ public:
   PointCloudXYZI::Ptr GetDownsampledWorldCloud() const;
   /** @brief Return point-to-plane residual inputs used by the latest LIO solve. */
   const std::vector<PointToPlane> &GetEffectPoints() const;
-  /** @brief Whether the latest LIO update was rejected as geometrically degenerate. */
-  bool LastUpdateDegenerate() const;
-  /** @brief Effective point-to-plane residual count from the latest LIO update. */
-  int LastEffectiveFeatureCount() const;
-  /** @brief Mean absolute point-to-plane residual from the latest LIO update. */
-  double LastAverageResidual() const;
-  /** @brief Smallest weighted 6DoF Hessian eigenvalue from the latest LIO update. */
-  double LastMinObservableEigenvalue() const;
-  /** @brief Smallest/largest weighted 6DoF Hessian eigenvalue ratio. */
-  double LastObservableEigenRatio() const;
 
 private:
   /** @brief Propagate IMU and undistort the current LiDAR scan. */
@@ -90,11 +80,6 @@ private:
 
   // 地图是否已用第一帧数据完成初始化。
   bool map_inited_ = false;
-  bool last_update_degenerate_ = true;
-  int last_effective_feature_count_ = 0;
-  double last_average_residual_ = 0.0;
-  double last_min_observable_eigenvalue_ = 0.0;
-  double last_observable_eigen_ratio_ = 0.0;
 
   // PCL 体素下采样滤波器。
   pcl::VoxelGrid<PointType> downsample_filter_;

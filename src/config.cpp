@@ -135,10 +135,6 @@ bool LoadConfig(const std::string &path, Config &config)
   }
   readIfPresent(fs, "map.max_points_num", config.map.max_points_num);
   readIfPresent(fs, "map.min_iterations", config.map.min_iterations);
-  readIfPresent(fs, "map.min_effective_features", config.map.min_effective_features);
-  readIfPresent(fs, "map.min_observable_eigenvalue", config.map.min_observable_eigenvalue);
-  readIfPresent(fs, "map.min_observable_ratio", config.map.min_observable_ratio);
-  readIfPresent(fs, "map.hold_state_on_degenerate", config.map.hold_state_on_degenerate);
   readIfPresent(fs, "map.sliding_enable", config.map.sliding_enable);
   readIfPresent(fs, "map.half_map_size", config.map.half_map_size);
   readIfPresent(fs, "map.sliding_thresh", config.map.sliding_thresh);
@@ -177,7 +173,6 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.lio_full_state_prior_enable", config.vision.lio_full_state_prior_enable);
   readIfPresent(fs, "vision.vio_debug_factor_costs", config.vision.vio_debug_factor_costs);
   readIfPresent(fs, "vision.min_vio_feedback_visual_residuals", config.vision.min_vio_feedback_visual_residuals);
-  readIfPresent(fs, "vision.min_vio_feedback_lidar_features", config.vision.min_vio_feedback_lidar_features);
   readIfPresent(fs, "vision.max_vio_feedback_pos_delta", config.vision.max_vio_feedback_pos_delta);
   readIfPresent(fs, "vision.max_vio_feedback_z_delta", config.vision.max_vio_feedback_z_delta);
   readIfPresent(fs, "vision.max_vio_feedback_rot_delta_deg", config.vision.max_vio_feedback_rot_delta_deg);

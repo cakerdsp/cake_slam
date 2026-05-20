@@ -51,12 +51,6 @@ map:
   layer_init_num: [5, 5, 5, 5, 5]
   max_points_num: 100
   min_iterations: 5
-  # HILTI22 has wall-corner static segments where point-to-plane geometry can
-  # lose vertical/6DoF observability. Treat those updates as prediction-only.
-  min_effective_features: 30
-  min_observable_eigenvalue: 1.0e-6
-  min_observable_ratio: 1.0e-6
-  hold_state_on_degenerate: 1
   sliding_enable: 0
   half_map_size: 100
   sliding_thresh: 8.0
@@ -95,8 +89,6 @@ vision:
   lio_full_state_prior_enable: 0
   vio_debug_factor_costs: 0
   min_vio_feedback_visual_residuals: 20
-  # In LIVO mode, do not let pure monocular/no-depth feedback overwrite LIO.
-  min_vio_feedback_lidar_features: 3
   max_vio_feedback_pos_delta: 0.50
   max_vio_feedback_z_delta: 0.20
   max_vio_feedback_rot_delta_deg: 20.0

@@ -76,10 +76,6 @@ struct MapConfig
   std::vector<int> layer_init_num = {5, 5, 5, 5, 5};
   int max_points_num = 50;                     ///< Max retained points per voxel.
   int min_iterations = 5;                      ///< Minimum LIO iterations.
-  int min_effective_features = 6;              ///< Minimum point-to-plane residuals for a trusted LIO update.
-  double min_observable_eigenvalue = 0.0;      ///< Optional minimum Hessian eigenvalue for LIO observability.
-  double min_observable_ratio = 0.0;           ///< Optional min/max Hessian eigenvalue ratio for LIO observability.
-  bool hold_state_on_degenerate = false;       ///< Keep the fused state when LIO geometry is degenerate.
   bool sliding_enable = false;                 ///< Enable local-map sliding.
   int half_map_size = 100;                     ///< Local map half extent [m].
   double sliding_thresh = 8.0;                 ///< Map slide trigger distance [m].
@@ -122,7 +118,6 @@ struct VisionConfig
   bool lio_full_state_prior_enable = false;///< Add LIO velocity/bias prior factors after initialization.
   bool vio_debug_factor_costs = false;     ///< Print expensive per-factor VIO cost diagnostics.
   int min_vio_feedback_visual_residuals = 20; ///< Required visual residuals before VIO may overwrite LIO.
-  int min_vio_feedback_lidar_features = 0;     ///< Required optimized LiDAR-depth tracks for VIO feedback.
   double max_vio_feedback_pos_delta = 5.0;      ///< Reject VIO->LIO feedback above this position jump [m].
   double max_vio_feedback_z_delta = 0.20;       ///< Reject VIO->LIO feedback above this vertical jump [m].
   double max_vio_feedback_rot_delta_deg = 20.0; ///< Reject VIO->LIO feedback above this rotation jump [deg].

@@ -342,12 +342,6 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   // 2. 构造点到面的残差；
   // 3. 迭代更新误差状态；
   // 4. 得到当前帧优化后的状态。
-  last_update_degenerate_ = false;
-  last_average_residual_ = 0.0;
-  last_min_observable_eigenvalue_ = 0.0;
-  last_max_observable_eigenvalue_ = 0.0;
-  last_observable_eigen_ratio_ = 0.0;
-  effct_feat_num_ = 0;
   cross_mat_list_.clear();
   cross_mat_list_.reserve(feats_down_size_);
   body_cov_list_.clear();
@@ -412,22 +406,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       total_residual += fabs(ptpl_list_[i].dis_to_plane_);
     }
     effct_feat_num_ = ptpl_list_.size();
-    last_average_residual_ = effct_feat_num_ > 0 ? total_residual / static_cast<double>(effct_feat_num_) : 0.0;
-    cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_
-         << " effective feature num: " << effct_feat_num_ << " average residual: ";
-    if (effct_feat_num_ > 0) {
-      cout << last_average_residual_;
-    } else {
-      cout << "nan";
-    }
-    cout << endl;
-    if (effct_feat_num_ < config_setting_.min_effective_features_) {
-      last_update_degenerate_ = true;
-      cout << "[ LIO ] Degenerate update: effective feature num " << effct_feat_num_
-           << " < min " << config_setting_.min_effective_features_
-           << ", skip state/map update" << endl;
-      return;
-    }
+    cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
+         << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
      * ***/
@@ -488,37 +468,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     // auto &&Hsub_T = Hsub.transpose();
     auto &&HTz = Hsub_T_R_inv * meas_vec;
     // fout_dbg<<"HTz: "<<HTz<<endl;
-    const Eigen::Matrix<double, 6, 6> observable_hessian = Hsub_T_R_inv * Hsub;
-    H_T_H.block<6, 6>(0, 0) = observable_hessian;
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> observability_solver(observable_hessian);
-    bool observability_degenerate = observability_solver.info() != Eigen::Success;
-    if (!observability_degenerate) {
-      const auto eigenvalues = observability_solver.eigenvalues();
-      last_min_observable_eigenvalue_ = eigenvalues.minCoeff();
-      last_max_observable_eigenvalue_ = eigenvalues.maxCoeff();
-      if (last_min_observable_eigenvalue_ < 0.0 && last_min_observable_eigenvalue_ > -1e-9) {
-        last_min_observable_eigenvalue_ = 0.0;
-      }
-      last_observable_eigen_ratio_ =
-          last_max_observable_eigenvalue_ > 1e-12
-              ? last_min_observable_eigenvalue_ / last_max_observable_eigenvalue_
-              : 0.0;
-      observability_degenerate =
-          (config_setting_.min_observable_eigenvalue_ > 0.0 &&
-           last_min_observable_eigenvalue_ < config_setting_.min_observable_eigenvalue_) ||
-          (config_setting_.min_observable_ratio_ > 0.0 &&
-           last_observable_eigen_ratio_ < config_setting_.min_observable_ratio_);
-    }
-    if (observability_degenerate) {
-      last_update_degenerate_ = true;
-      cout << "[ LIO ] Degenerate observability: min_eig=" << last_min_observable_eigenvalue_
-           << " max_eig=" << last_max_observable_eigenvalue_
-           << " ratio=" << last_observable_eigen_ratio_
-           << " min_eig_limit=" << config_setting_.min_observable_eigenvalue_
-           << " ratio_limit=" << config_setting_.min_observable_ratio_
-           << ", skip state/map update" << endl;
-      return;
-    }
+    H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
     // Eigen::EigenSolver<Eigen::Matrix<double, 6, 6>> es(H_T_H.block<6, 6>(0, 0));
     MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H.block<DIM_STATE, DIM_STATE>(0, 0) + state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).inverse()).inverse();
     G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
