@@ -46,6 +46,9 @@ typedef struct VoxelMapConfig
   double beam_err_;
   double dept_err_;
   double sigma_num_;
+  int min_effective_features_ = 6;
+  double min_observable_eigenvalue_ = 0.0;
+  double min_observable_ratio_ = 0.0;
   bool is_pub_plane_map_;
 
   // config of local map sliding
@@ -268,6 +271,11 @@ public:
   // 当前下采样点数和有效匹配点数。
   int feats_down_size_;
   int effct_feat_num_;
+  bool last_update_degenerate_ = true;
+  double last_average_residual_ = 0.0;
+  double last_min_observable_eigenvalue_ = 0.0;
+  double last_max_observable_eigenvalue_ = 0.0;
+  double last_observable_eigen_ratio_ = 0.0;
   // 点云误差传播与残差构建过程中的中间缓存。
   std::vector<M3D> cross_mat_list_;
   std::vector<M3D> body_cov_list_;

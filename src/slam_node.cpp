@@ -689,6 +689,7 @@ void SlamNode::handleLIO()
 
   const auto t_lio_start = std::chrono::steady_clock::now();
   handleFirstFrame();
+  const StatesGroup state_before_lio = state_;
   lio_.SetState(state_);
 
   // LioCore 内部会复制测量包，因此主程序同步上下文中的 last_lio_update_time
@@ -699,6 +700,22 @@ void SlamNode::handleLIO()
   measures_.last_lio_update_time = update_time;
   state_ = lio_.GetState();
   const bool lio_imu_initialized = !use_imu_ || lio_.IsImuInitialized();
+  const bool lio_update_degenerate = lio_.LastUpdateDegenerate();
+  const int lio_effective_features = lio_.LastEffectiveFeatureCount();
+  const double lio_average_residual = lio_.LastAverageResidual();
+  const double lio_min_observable_eigenvalue = lio_.LastMinObservableEigenvalue();
+  const double lio_observable_eigen_ratio = lio_.LastObservableEigenRatio();
+  if (lio_imu_initialized && lio_update_degenerate && config_.map.hold_state_on_degenerate) {
+    std::printf("LIO DEGENERATE HOLD stamp=%.6f eff=%d avg_res=%.6f obs_min=%.6e obs_ratio=%.6e "
+                "prop_pos=(%.3f %.3f %.3f) hold_pos=(%.3f %.3f %.3f) prop_vel=(%.3f %.3f %.3f)\n",
+                update_time, lio_effective_features, lio_average_residual,
+                lio_min_observable_eigenvalue, lio_observable_eigen_ratio,
+                state_.pos_end.x(), state_.pos_end.y(), state_.pos_end.z(),
+                state_before_lio.pos_end.x(), state_before_lio.pos_end.y(), state_before_lio.pos_end.z(),
+                state_.vel_end.x(), state_.vel_end.y(), state_.vel_end.z());
+    state_ = state_before_lio;
+    lio_.SetState(state_);
+  }
   if (lio_imu_initialized) {
     gravityAlignment();
   }
@@ -706,7 +723,7 @@ void SlamNode::handleLIO()
   latest_ekf_time_ = update_time;
   const auto t_lio_process_end = std::chrono::steady_clock::now();
 
-  if (lio_imu_initialized) {
+  if (lio_imu_initialized && !lio_update_degenerate) {
     if (!lio_full_state_prior_ready_) {
       lio_full_state_history_.clear();
       lio_full_state_prior_ready_ = true;
@@ -716,6 +733,15 @@ void SlamNode::handleLIO()
     pending_lio_pose_prior_ = makeLioPosePrior(update_time);
     recordLioFullStatePrior(update_time);
     buildLidarVisualCandidates(update_time);
+  } else if (lio_imu_initialized) {
+    pending_lio_pose_prior_ = LioPosePrior();
+    pending_lidar_visual_candidates_.clear();
+    CAKE_INFO_THROTTLE_MS(
+        500,
+        "LIO PRIOR GATE skip degenerate update: stamp=%.6f eff=%d min=%d avg_res=%.6f obs_min=%.3e obs_ratio=%.3e hold=%d",
+        update_time, lio_effective_features, config_.map.min_effective_features, lio_average_residual,
+        lio_min_observable_eigenvalue, lio_observable_eigen_ratio,
+        static_cast<int>(config_.map.hold_state_on_degenerate));
   } else {
     lio_full_state_prior_ready_ = false;
     lio_full_state_history_.clear();
@@ -758,10 +784,13 @@ void SlamNode::handleLIO()
                   {"BuildVisualPrior", prior_sec},
                   {"PublishOutputs", publish_sec}},
                  total_sec, lio_average_total);
-  CAKE_INFO("LIO summary: stamp=%.6f imu=%zu cur_pts=%zu next_pts=%zu lidar_prior_candidates=%zu",
+  CAKE_INFO("LIO summary: stamp=%.6f imu=%zu cur_pts=%zu next_pts=%zu eff=%d degenerate=%d avg_res=%.6f obs_min=%.3e obs_ratio=%.3e lio_prior=%d lidar_prior_candidates=%zu",
             update_time, measures_.measures.back().imu.size(),
             measures_.pcl_proc_cur ? measures_.pcl_proc_cur->size() : 0,
             measures_.pcl_proc_next ? measures_.pcl_proc_next->size() : 0,
+            lio_effective_features, static_cast<int>(lio_update_degenerate),
+            lio_average_residual, lio_min_observable_eigenvalue, lio_observable_eigen_ratio,
+            static_cast<int>(pending_lio_pose_prior_.valid),
             pending_lidar_visual_candidates_.size());
 }
 
@@ -818,12 +847,15 @@ void SlamNode::handleVIO()
         const double abs_z_delta = std::abs(z_delta);
         const bool has_visual_constraints =
             opt_visual_residuals >= config_.vision.min_vio_feedback_visual_residuals;
+        const bool has_lidar_feedback_constraints =
+            opt_lidar_features >= config_.vision.min_vio_feedback_lidar_features;
         accept_vio_feedback =
             has_visual_constraints &&
+            has_lidar_feedback_constraints &&
             pos_delta <= config_.vision.max_vio_feedback_pos_delta &&
             abs_z_delta <= config_.vision.max_vio_feedback_z_delta &&
             rot_delta_deg <= config_.vision.max_vio_feedback_rot_delta_deg;
-        std::printf("VIO FEEDBACK DEBUG stamp=%.6f accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_z=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d min_visual_residuals=%d lio_z=% .6f vio_z=% .6f\n",
+        std::printf("VIO FEEDBACK DEBUG stamp=%.6f accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_z=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d min_opt_lidar=%d visual_residuals=%d min_visual_residuals=%d lio_z=% .6f vio_z=% .6f\n",
                     measure.vio_time,
                     static_cast<int>(accept_vio_feedback),
                     pos_delta,
@@ -836,6 +868,7 @@ void SlamNode::handleVIO()
                     vio_->getLastDepthFeatureCount(),
                     opt_features,
                     opt_lidar_features,
+                    config_.vision.min_vio_feedback_lidar_features,
                     opt_visual_residuals,
                     config_.vision.min_vio_feedback_visual_residuals,
                     lio_state_before_vio.pos_end.z(),
@@ -850,11 +883,12 @@ void SlamNode::handleVIO()
             vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
         if (!accept_vio_feedback) {
           CAKE_INFO(
-              "Reject VIO feedback: stamp=%.6f pos_delta=%.4f limit=%.4f z_delta=%.4f limit=%.4f rot_delta_deg=%.3f limit=%.3f visual_residuals=%d min=%d",
+              "Reject VIO feedback: stamp=%.6f pos_delta=%.4f limit=%.4f z_delta=%.4f limit=%.4f rot_delta_deg=%.3f limit=%.3f visual_residuals=%d min=%d opt_lidar=%d min_lidar=%d",
               measure.vio_time, pos_delta, config_.vision.max_vio_feedback_pos_delta,
               z_delta, config_.vision.max_vio_feedback_z_delta,
               rot_delta_deg, config_.vision.max_vio_feedback_rot_delta_deg,
-              opt_visual_residuals, config_.vision.min_vio_feedback_visual_residuals);
+              opt_visual_residuals, config_.vision.min_vio_feedback_visual_residuals,
+              opt_lidar_features, config_.vision.min_vio_feedback_lidar_features);
         }
       } else {
         CAKE_INFO_THROTTLE_MS(

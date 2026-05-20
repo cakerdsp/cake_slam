@@ -55,6 +55,9 @@ void LioCore::Configure(const Config &config)
   map_cfg.layer_init_num_.assign(config.map.layer_init_num.begin(), config.map.layer_init_num.end());
   map_cfg.max_points_num_ = config.map.max_points_num;
   map_cfg.max_iterations_ = config.map.min_iterations;
+  map_cfg.min_effective_features_ = config.map.min_effective_features;
+  map_cfg.min_observable_eigenvalue_ = config.map.min_observable_eigenvalue;
+  map_cfg.min_observable_ratio_ = config.map.min_observable_ratio;
   map_cfg.map_sliding_en = config.map.sliding_enable;
   map_cfg.half_map_size = config.map.half_map_size;
   map_cfg.sliding_thresh = config.map.sliding_thresh;
@@ -76,6 +79,11 @@ void LioCore::ProcessMeasurement(FusionMeasureGroup &meas)
   // 1. 缓存测量；
   // 2. 标记为 LIO 更新；
   // 3. 先做 IMU 去畸变，再做地图匹配。
+  last_update_degenerate_ = true;
+  last_effective_feature_count_ = 0;
+  last_average_residual_ = 0.0;
+  last_min_observable_eigenvalue_ = 0.0;
+  last_observable_eigen_ratio_ = 0.0;
   meas_ = meas;
   meas_.lio_vio_flg = LIO;
   if (meas_.measures.empty()) {
@@ -114,10 +122,31 @@ void LioCore::ProcessLio()
 {
   // 没有点云就直接返回，避免后续匹配器处理空输入。
   if (!feats_undistort_ || feats_undistort_->empty()) {
+    if (voxel_manager_) {
+      voxel_manager_->ptpl_list_.clear();
+      voxel_manager_->effct_feat_num_ = 0;
+      voxel_manager_->last_update_degenerate_ = true;
+      voxel_manager_->last_average_residual_ = 0.0;
+      voxel_manager_->last_min_observable_eigenvalue_ = 0.0;
+      voxel_manager_->last_max_observable_eigenvalue_ = 0.0;
+      voxel_manager_->last_observable_eigen_ratio_ = 0.0;
+    }
     return;
   }
 
   Downsample();
+  if (!feats_down_body_ || feats_down_body_->empty()) {
+    if (voxel_manager_) {
+      voxel_manager_->ptpl_list_.clear();
+      voxel_manager_->effct_feat_num_ = 0;
+      voxel_manager_->last_update_degenerate_ = true;
+      voxel_manager_->last_average_residual_ = 0.0;
+      voxel_manager_->last_min_observable_eigenvalue_ = 0.0;
+      voxel_manager_->last_max_observable_eigenvalue_ = 0.0;
+      voxel_manager_->last_observable_eigen_ratio_ = 0.0;
+    }
+    return;
+  }
 
   // 第一帧只负责建图，不进行常规匹配更新。
   if (!map_inited_) {
@@ -127,6 +156,14 @@ void LioCore::ProcessLio()
 
   // 常规流程：状态估计 -> 回写状态 -> 地图更新 -> 视需要滑动地图。
   voxel_manager_->StateEstimation(state_propagat_);
+  last_effective_feature_count_ = voxel_manager_->effct_feat_num_;
+  last_update_degenerate_ = voxel_manager_->last_update_degenerate_;
+  last_average_residual_ = voxel_manager_->last_average_residual_;
+  last_min_observable_eigenvalue_ = voxel_manager_->last_min_observable_eigenvalue_;
+  last_observable_eigen_ratio_ = voxel_manager_->last_observable_eigen_ratio_;
+  if (last_update_degenerate_) {
+    return;
+  }
   state_ = voxel_manager_->state_;
   voxel_manager_->UpdateVoxelMap(voxel_manager_->pv_list_);
 
@@ -172,6 +209,31 @@ PointCloudXYZI::Ptr LioCore::GetDownsampledWorldCloud() const
 const std::vector<PointToPlane> &LioCore::GetEffectPoints() const
 {
   return voxel_manager_->ptpl_list_;
+}
+
+bool LioCore::LastUpdateDegenerate() const
+{
+  return last_update_degenerate_;
+}
+
+int LioCore::LastEffectiveFeatureCount() const
+{
+  return last_effective_feature_count_;
+}
+
+double LioCore::LastAverageResidual() const
+{
+  return last_average_residual_;
+}
+
+double LioCore::LastMinObservableEigenvalue() const
+{
+  return last_min_observable_eigenvalue_;
+}
+
+double LioCore::LastObservableEigenRatio() const
+{
+  return last_observable_eigen_ratio_;
 }
 
 } // namespace cake_slam
