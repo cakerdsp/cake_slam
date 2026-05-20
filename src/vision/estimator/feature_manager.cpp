@@ -17,7 +17,7 @@
 // 0: optimize both triangulated visual-only points and LiDAR-depth points.
 // 1: keep tracking/triangulation, but exclude visual-only points from Ceres.
 #ifndef ONLY_USE_LIDAR_DEPTH
-#define ONLY_USE_LIDAR_DEPTH 1
+#define ONLY_USE_LIDAR_DEPTH 0
 #endif
 
 // 特征的结束帧号 = 起始帧号 + 观测长度 - 1。
@@ -527,6 +527,10 @@ void FeatureManager::removeBackShiftDepth(Eigen::Matrix3d marg_R, Eigen::Vector3
             it->start_frame--;
         else
         {
+            const bool had_lidar_depth_prior =
+                it->has_lidar_depth_prior && it->lidar_depth_prior.valid;
+            const double old_inv_depth_var =
+                had_lidar_depth_prior ? it->lidar_depth_prior.inv_depth_var : 1.0;
             Eigen::Vector3d uv_i = it->feature_per_frame[0].point;
             it->feature_per_frame.erase(it->feature_per_frame.begin());
             if (it->feature_per_frame.size() < 2)
@@ -541,11 +545,30 @@ void FeatureManager::removeBackShiftDepth(Eigen::Matrix3d marg_R, Eigen::Vector3
                 Eigen::Vector3d pts_j = new_R.transpose() * (w_pts_i - new_P);
                 double dep_j = pts_j(2);
                 if (dep_j > 0)
+                {
                     it->estimated_depth = dep_j;
+                    if (had_lidar_depth_prior)
+                    {
+                        it->has_lidar_depth_prior = true;
+                        it->lidar_depth_prior.valid = true;
+                        it->lidar_depth_prior.depth = dep_j;
+                        it->lidar_depth_prior.inv_depth = 1.0 / dep_j;
+                        it->lidar_depth_prior.inv_depth_var =
+                            std::max(MIN_INV_DEPTH_VAR, old_inv_depth_var * 4.0);
+                        it->lidar_depth_prior.P_W_init = w_pts_i;
+                    }
+                    else
+                    {
+                        it->has_lidar_depth_prior = false;
+                        it->lidar_depth_prior.valid = false;
+                    }
+                }
                 else
+                {
                     it->estimated_depth = INIT_DEPTH;
-                it->has_lidar_depth_prior = false;
-                it->lidar_depth_prior.valid = false;
+                    it->has_lidar_depth_prior = false;
+                    it->lidar_depth_prior.valid = false;
+                }
             }
         }
         // remove tracking-lost feature after marginalize

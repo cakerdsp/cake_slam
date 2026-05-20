@@ -115,6 +115,9 @@ struct VisionConfig
   double lidar_depth_std = 0.10;           ///< Fallback LiDAR depth sigma [m].
   double min_inv_depth_var = 1e-6;         ///< Inverse-depth prior variance floor [1/m^2].
   double min_lio_pose_prior_var = 1e-6;    ///< LIO pose covariance floor [rad^2 or m^2].
+  bool lio_full_state_prior_enable = false;///< Add LIO velocity/bias prior factors after initialization.
+  bool vio_debug_factor_costs = false;     ///< Print expensive per-factor VIO cost diagnostics.
+  int min_vio_feedback_visual_residuals = 20; ///< Required visual residuals before VIO may overwrite LIO.
   double max_vio_feedback_pos_delta = 5.0;      ///< Reject VIO->LIO feedback above this position jump [m].
   double max_vio_feedback_z_delta = 0.20;       ///< Reject VIO->LIO feedback above this vertical jump [m].
   double max_vio_feedback_rot_delta_deg = 20.0; ///< Reject VIO->LIO feedback above this rotation jump [deg].

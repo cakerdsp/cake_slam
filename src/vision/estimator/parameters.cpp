@@ -54,6 +54,8 @@ int FLOW_BACK;
 int LIDAR_DEPTH_ENABLE;
 int LIDAR_PRIOR_FEATURE_ENABLE;
 int LIDAR_INV_DEPTH_OPTIMIZE;
+int LIO_FULL_STATE_PRIOR_ENABLE;
+int VIO_DEBUG_FACTOR_COSTS;
 double LIDAR_PRIOR_REPROJ_THRESHOLD;
 double MIN_INV_DEPTH_VAR;
 double MIN_LIO_POSE_PRIOR_VAR;
@@ -258,6 +260,8 @@ void readParameters(std::string config_file)
     LIDAR_PRIOR_FEATURE_ENABLE = readOrDefault<int>(fsSettings, "vision.radar_prior_feature_enable",
                                                     LIDAR_PRIOR_FEATURE_ENABLE);
     LIDAR_INV_DEPTH_OPTIMIZE = readOrDefault<int>(fsSettings, "vision.optimize_lidar_inv_depth", 1);
+    LIO_FULL_STATE_PRIOR_ENABLE = readOrDefault<int>(fsSettings, "vision.lio_full_state_prior_enable", 0);
+    VIO_DEBUG_FACTOR_COSTS = readOrDefault<int>(fsSettings, "vision.vio_debug_factor_costs", 0);
     LIDAR_PRIOR_REPROJ_THRESHOLD = readOrDefault<double>(fsSettings, "vision.lio_prior_reproj_threshold", 3.0);
     MIN_INV_DEPTH_VAR = readOrDefault<double>(fsSettings, "vision.min_inv_depth_var", 1e-6);
     MIN_LIO_POSE_PRIOR_VAR = readOrDefault<double>(fsSettings, "vision.min_lio_pose_prior_var", 1e-6);

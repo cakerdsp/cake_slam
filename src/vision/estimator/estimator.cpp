@@ -116,6 +116,9 @@ void Estimator::clearState()
     for (auto &prior : lio_full_priors_)
         prior = cake_slam::LioFullStatePrior();
     lio_full_state_init_attempted_ = false;
+    last_optimization_feature_count_ = 0;
+    last_optimization_lidar_feature_count_ = 0;
+    last_optimization_visual_residual_count_ = 0;
 
     failure_occur = 0;
 
@@ -1283,7 +1286,8 @@ void Estimator::optimization()
     TicToc t_whole, t_prepare;
     vector2double();
 
-    const bool debug_lio_full_prior = [&]() {
+    const bool use_lio_full_prior_factor = USE_IMU && LIO_FULL_STATE_PRIOR_ENABLE;
+    const bool has_lio_full_prior_for_debug = [&]() {
         if (!USE_IMU)
             return false;
         for (int i = 0; i < frame_count + 1; ++i)
@@ -1293,6 +1297,7 @@ void Estimator::optimization()
         }
         return false;
     }();
+    const bool debug_lio_full_prior = VIO_DEBUG_FACTOR_COSTS && has_lio_full_prior_for_debug;
     auto rotationDeltaDeg = [](const Eigen::Quaterniond &q_ref, const Eigen::Quaterniond &q) {
         const Eigen::Quaterniond dq = q_ref.conjugate() * q.normalized();
         return 2.0 * std::atan2(dq.vec().norm(), std::abs(dq.w())) * 57.29577951308232;
@@ -1757,7 +1762,7 @@ void Estimator::optimization()
             problem.AddResidualBlock(cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[i]), NULL, para_Pose[i]);
             ++lio_pose_prior_count;
         }
-        if (USE_IMU && lio_full_priors_[i].valid)
+        if (use_lio_full_prior_factor && lio_full_priors_[i].valid)
         {
             problem.AddResidualBlock(cake_slam::LioFullStatePriorFactor::Create(lio_full_priors_[i]), NULL,
                                      para_Pose[i], para_SpeedBias[i]);
@@ -1767,9 +1772,16 @@ void Estimator::optimization()
 
     int f_m_cnt = 0;
     int feature_index = -1;
+    int total_feature_track_count = 0;
+    int total_lidar_depth_track_count = 0;
+    int max_feature_track_length = 0;
     for (auto &it_per_id : f_manager.feature)
     {
         it_per_id.used_num = it_per_id.feature_per_frame.size();
+        ++total_feature_track_count;
+        max_feature_track_length = std::max(max_feature_track_length, it_per_id.used_num);
+        if (it_per_id.has_lidar_depth_prior)
+            ++total_lidar_depth_track_count;
         if (!it_per_id.isUsableForOptimization())
             continue;
 
@@ -1813,11 +1825,18 @@ void Estimator::optimization()
             f_m_cnt++;
         }
     }
+    last_optimization_feature_count_ = optimized_feature_count;
+    last_optimization_lidar_feature_count_ = lidar_depth_feature_count;
+    last_optimization_visual_residual_count_ = visual_residual_count;
 
     ROS_DEBUG("visual measurement count: %d", f_m_cnt);
     //printf("prepare for ceres: %f \n", t_prepare.toc());
 
-    if (debug_lio_full_prior)
+    static double last_light_opt_debug_stamp = -1.0;
+    const bool print_light_opt_debug =
+        (visual_residual_count == 0 || optimized_feature_count == 0) &&
+        (last_light_opt_debug_stamp < 0.0 || Headers[frame_count] - last_light_opt_debug_stamp >= 1.0);
+    if (debug_lio_full_prior || print_light_opt_debug)
     {
         std::printf("VIO OPT DEBUG factors: solver_flag=%d frame_count=%d t0=%.6f tN=%.6f marg=%d imu=%d lio_pose=%d lio_full=%d features=%d lidar_features=%d depth_priors=%d visual_residuals=%d visual_measurements=%d residual_blocks=%d parameter_blocks=%d lidar_inv_depth_opt=%d\n",
                     solver_flag,
@@ -1836,8 +1855,21 @@ void Estimator::optimization()
                     problem.NumResidualBlocks(),
                     problem.NumParameterBlocks(),
                     LIDAR_INV_DEPTH_OPTIMIZE);
-        print_lio_full_prior_para_delta("before_solve");
-        print_debug_factor_costs("before_solve");
+        std::printf("VIO OPT DEBUG feature_health: total_tracks=%d lidar_tracks=%d max_track_len=%d usable=%d usable_lidar=%d min_lidar_obs=%d full_prior_factor=%d expensive_debug=%d\n",
+                    total_feature_track_count,
+                    total_lidar_depth_track_count,
+                    max_feature_track_length,
+                    optimized_feature_count,
+                    lidar_depth_feature_count,
+                    2,
+                    static_cast<int>(use_lio_full_prior_factor),
+                    static_cast<int>(debug_lio_full_prior));
+        last_light_opt_debug_stamp = Headers[frame_count];
+        if (debug_lio_full_prior)
+        {
+            print_lio_full_prior_para_delta("before_solve");
+            print_debug_factor_costs("before_solve");
+        }
     }
 
     ceres::Solver::Options options;
@@ -1930,7 +1962,7 @@ void Estimator::optimization()
                 vector<int>{0});
             marginalization_info->addResidualBlockInfo(residual_block_info);
         }
-        if (USE_IMU && lio_full_priors_[0].valid)
+        if (use_lio_full_prior_factor && lio_full_priors_[0].valid)
         {
             ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
                 cake_slam::LioFullStatePriorFactor::Create(lio_full_priors_[0]), NULL,
@@ -2050,7 +2082,7 @@ void Estimator::optimization()
                     vector<int>{0});
                 marginalization_info->addResidualBlockInfo(residual_block_info);
             }
-            if (USE_IMU && lio_full_priors_[WINDOW_SIZE - 1].valid)
+            if (use_lio_full_prior_factor && lio_full_priors_[WINDOW_SIZE - 1].valid)
             {
                 ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
                     cake_slam::LioFullStatePriorFactor::Create(lio_full_priors_[WINDOW_SIZE - 1]), NULL,
@@ -2320,6 +2352,21 @@ int Estimator::getLastAddedVisualCount() const
 int Estimator::getLastPendingLidarCandidateCount() const
 {
     return featureTracker.getLastPendingLidarCandidateCount();
+}
+
+int Estimator::getLastOptimizationFeatureCount() const
+{
+    return last_optimization_feature_count_;
+}
+
+int Estimator::getLastOptimizationLidarFeatureCount() const
+{
+    return last_optimization_lidar_feature_count_;
+}
+
+int Estimator::getLastOptimizationVisualResidualCount() const
+{
+    return last_optimization_visual_residual_count_;
 }
 
 bool Estimator::buildVinsFallbackInitialLandmarksDeadCode(std::map<int, Eigen::Vector3d> &sfm_tracked_points)

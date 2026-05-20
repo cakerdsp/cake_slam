@@ -735,7 +735,9 @@ void SlamNode::handleLIO()
   ekf_finish_once_ = true;
 
   publishClouds(update_time);
-  if (!use_image_) {
+  const bool publish_lio_pose_direct =
+      !use_image_ || !vio_ || vio_->solver_flag != Estimator::NON_LINEAR;
+  if (publish_lio_pose_direct) {
     publishOdometry(update_time);
     publishPath(update_time);
     publishTf(update_time);
@@ -801,6 +803,9 @@ void SlamNode::handleVIO()
     last_vio_update_time_ = measure.vio_time;
     if (vio_->solver_flag == Estimator::NON_LINEAR) {
       const StatesGroup vio_state = vio_->getLatestState();
+      const int opt_features = vio_->getLastOptimizationFeatureCount();
+      const int opt_lidar_features = vio_->getLastOptimizationLidarFeatureCount();
+      const int opt_visual_residuals = vio_->getLastOptimizationVisualResidualCount();
       bool accept_vio_feedback = true;
       if (use_lidar_) {
         const StatesGroup lio_state_before_vio = state_;
@@ -811,11 +816,14 @@ void SlamNode::handleVIO()
         const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
         const double z_delta = vio_state.pos_end.z() - lio_state_before_vio.pos_end.z();
         const double abs_z_delta = std::abs(z_delta);
+        const bool has_visual_constraints =
+            opt_visual_residuals >= config_.vision.min_vio_feedback_visual_residuals;
         accept_vio_feedback =
+            has_visual_constraints &&
             pos_delta <= config_.vision.max_vio_feedback_pos_delta &&
             abs_z_delta <= config_.vision.max_vio_feedback_z_delta &&
             rot_delta_deg <= config_.vision.max_vio_feedback_rot_delta_deg;
-        std::printf("VIO FEEDBACK DEBUG stamp=%.6f accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_z=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d lio_z=% .6f vio_z=% .6f\n",
+        std::printf("VIO FEEDBACK DEBUG stamp=%.6f accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_z=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d min_visual_residuals=%d lio_z=% .6f vio_z=% .6f\n",
                     measure.vio_time,
                     static_cast<int>(accept_vio_feedback),
                     pos_delta,
@@ -826,29 +834,34 @@ void SlamNode::handleVIO()
                     config_.vision.max_vio_feedback_rot_delta_deg,
                     vio_->getLastTrackedFeatureCount(),
                     vio_->getLastDepthFeatureCount(),
+                    opt_features,
+                    opt_lidar_features,
+                    opt_visual_residuals,
+                    config_.vision.min_vio_feedback_visual_residuals,
                     lio_state_before_vio.pos_end.z(),
                     vio_state.pos_end.z());
         CAKE_INFO_THROTTLE_MS(
             2000,
-            "VIO feedback: stamp=%.6f pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d "
+            "VIO feedback: stamp=%.6f pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d visual_residuals=%d "
             "lio_pos=(%.3f %.3f %.3f) vio_pos=(%.3f %.3f %.3f)",
             measure.vio_time, pos_delta, rot_delta_deg, vio_->getLastTrackedFeatureCount(),
-            vio_->getLastDepthFeatureCount(), lio_state_before_vio.pos_end.x(),
+            vio_->getLastDepthFeatureCount(), opt_visual_residuals, lio_state_before_vio.pos_end.x(),
             lio_state_before_vio.pos_end.y(), lio_state_before_vio.pos_end.z(),
             vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
         if (!accept_vio_feedback) {
           CAKE_INFO(
-              "Reject VIO feedback: stamp=%.6f pos_delta=%.4f limit=%.4f z_delta=%.4f limit=%.4f rot_delta_deg=%.3f limit=%.3f",
+              "Reject VIO feedback: stamp=%.6f pos_delta=%.4f limit=%.4f z_delta=%.4f limit=%.4f rot_delta_deg=%.3f limit=%.3f visual_residuals=%d min=%d",
               measure.vio_time, pos_delta, config_.vision.max_vio_feedback_pos_delta,
               z_delta, config_.vision.max_vio_feedback_z_delta,
-              rot_delta_deg, config_.vision.max_vio_feedback_rot_delta_deg);
+              rot_delta_deg, config_.vision.max_vio_feedback_rot_delta_deg,
+              opt_visual_residuals, config_.vision.min_vio_feedback_visual_residuals);
         }
       } else {
         CAKE_INFO_THROTTLE_MS(
             2000,
-            "VIO-only state: stamp=%.6f tracked=%d lidar_depth=%d pos=(%.3f %.3f %.3f)",
+            "VIO-only state: stamp=%.6f tracked=%d lidar_depth=%d visual_residuals=%d pos=(%.3f %.3f %.3f)",
             measure.vio_time, vio_->getLastTrackedFeatureCount(), vio_->getLastDepthFeatureCount(),
-            vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
+            opt_visual_residuals, vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
       }
 
       if (accept_vio_feedback) {
@@ -866,6 +879,20 @@ void SlamNode::handleVIO()
         publishMavrosPose(measure.vio_time);
         publishVisualSubmap(measure.vio_time);
         publishVioWindowVisualization(measure.vio_time);
+        t_vio_publish_end = std::chrono::steady_clock::now();
+      } else if (use_lidar_) {
+        // Keep the public body/world TF synchronized with the LIO state even
+        // when the VIO correction is rejected. Otherwise RViz shows a static
+        // body frame with a moving world-frame cloud, which looks like a frame
+        // error while the real issue is the rejected VIO update.
+        latest_ekf_state_ = state_;
+        latest_ekf_time_ = measure.vio_time;
+        state_update_flag_ = true;
+        ekf_finish_once_ = true;
+        publishOdometry(measure.vio_time);
+        publishPath(measure.vio_time);
+        publishTf(measure.vio_time);
+        publishMavrosPose(measure.vio_time);
         t_vio_publish_end = std::chrono::steady_clock::now();
       }
     }
@@ -888,9 +915,11 @@ void SlamNode::handleVIO()
                   {"TrackAndOptimize", image_sec},
                   {"PublishOutputs", publish_sec}},
                  total_sec, vio_average_total);
-  CAKE_INFO("VIO summary: stamp=%.6f imu=%zu tracked=%d lidar_depth=%d lidar_candidates=%zu lio_prior=%d lio_full_prior=%d lio_full_dt=%.6f mode=%d",
+  CAKE_INFO("VIO summary: stamp=%.6f imu=%zu tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d lidar_candidates=%zu lio_prior=%d lio_full_prior=%d lio_full_dt=%.6f mode=%d",
             measure.vio_time, measure.imu.size(), vio_->getLastTrackedFeatureCount(),
-            vio_->getLastDepthFeatureCount(), lidar_candidate_count, static_cast<int>(has_lio_prior),
+            vio_->getLastDepthFeatureCount(), vio_->getLastOptimizationFeatureCount(),
+            vio_->getLastOptimizationLidarFeatureCount(), vio_->getLastOptimizationVisualResidualCount(),
+            lidar_candidate_count, static_cast<int>(has_lio_prior),
             static_cast<int>(has_lio_full_prior), lio_full_prior_dt,
             static_cast<int>(slam_mode_));
   CAKE_INFO_THROTTLE_MS(

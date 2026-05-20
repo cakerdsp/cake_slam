@@ -158,6 +158,9 @@ public:
     int getLastAddedLidarCount() const;
     int getLastAddedVisualCount() const;
     int getLastPendingLidarCandidateCount() const;
+    int getLastOptimizationFeatureCount() const;
+    int getLastOptimizationLidarFeatureCount() const;
+    int getLastOptimizationVisualResidualCount() const;
 
     /**
      * @brief Preserve VINS-Fusion GlobalSFM landmark bootstrap for a future fallback path.
@@ -262,6 +265,9 @@ public:
     cake_slam::LioPosePrior lio_pose_priors_[WINDOW_SIZE + 1];
     cake_slam::LioFullStatePrior lio_full_priors_[WINDOW_SIZE + 1];
     bool lio_full_state_init_attempted_ = false;
+    int last_optimization_feature_count_ = 0;
+    int last_optimization_lidar_feature_count_ = 0;
+    int last_optimization_visual_residual_count_ = 0;
     Eigen::Vector3d initP = Eigen::Vector3d::Zero();
     Eigen::Matrix3d initR = Eigen::Matrix3d::Identity();
 
