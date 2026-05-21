@@ -172,6 +172,7 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.min_lio_pose_prior_var", config.vision.min_lio_pose_prior_var);
   readIfPresent(fs, "vision.lio_full_state_prior_enable", config.vision.lio_full_state_prior_enable);
   readIfPresent(fs, "vision.vio_debug_factor_costs", config.vision.vio_debug_factor_costs);
+  readIfPresent(fs, "vision.vio_state_feedback_enable", config.vision.vio_state_feedback_enable);
   readIfPresent(fs, "vision.min_vio_feedback_visual_residuals", config.vision.min_vio_feedback_visual_residuals);
   readIfPresent(fs, "vision.max_vio_feedback_pos_delta", config.vision.max_vio_feedback_pos_delta);
   readIfPresent(fs, "vision.max_vio_feedback_z_delta", config.vision.max_vio_feedback_z_delta);

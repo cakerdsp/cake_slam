@@ -88,6 +88,7 @@ vision:
   min_lio_pose_prior_var: 1.0e-6
   lio_full_state_prior_enable: 0
   vio_debug_factor_costs: 0
+  vio_state_feedback_enable: 0
   min_vio_feedback_visual_residuals: 20
   max_vio_feedback_pos_delta: 0.50
   max_vio_feedback_z_delta: 0.20

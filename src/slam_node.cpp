@@ -688,13 +688,16 @@ void SlamNode::handleLIO()
   }
 
   const auto t_lio_start = std::chrono::steady_clock::now();
+  const double update_time = measures_.measures.back().lio_time;
+  const bool lio_input_from_vio_feedback = state_last_written_by_vio_feedback_;
+  const double lio_input_vio_feedback_dt =
+      (last_vio_feedback_write_time_ >= 0.0) ? update_time - last_vio_feedback_write_time_ : -1.0;
   handleFirstFrame();
   const StatesGroup lio_input_state = state_;
   lio_.SetState(state_);
 
   // LioCore 内部会复制测量包，因此主程序同步上下文中的 last_lio_update_time
   // 需要在这里显式推进，后续 LIVO 点云切割才有正确起点。
-  const double update_time = measures_.measures.back().lio_time;
   const auto t_lio_process_start = std::chrono::steady_clock::now();
   lio_.ProcessMeasurement(measures_);
   measures_.last_lio_update_time = update_time;
@@ -703,6 +706,7 @@ void SlamNode::handleLIO()
   if (lio_imu_initialized) {
     gravityAlignment();
   }
+  state_last_written_by_vio_feedback_ = false;
   latest_ekf_state_ = state_;
   latest_ekf_time_ = update_time;
   const auto t_lio_process_end = std::chrono::steady_clock::now();
@@ -741,7 +745,7 @@ void SlamNode::handleLIO()
   const double lio_dt_from_prev =
       has_last_lio_output_state ? update_time - last_lio_output_time
                                 : std::numeric_limits<double>::quiet_NaN();
-  std::printf("LIO STATE DEBUG stamp=%.6f input_z=% .6f output_z=% .6f dz_input=% .6f dz_prev=% .6f dt_prev=%.6f vel_z=% .6f gravity_z=% .6f imu_init=%d visual_candidates=%zu lio_history=%zu\n",
+  std::printf("LIO STATE DEBUG stamp=%.6f input_z=% .6f output_z=% .6f dz_input=% .6f dz_prev=% .6f dt_prev=%.6f vel_z=% .6f gravity_z=% .6f imu_init=%d input_from_vio=%d vio_write_dt=%.6f visual_candidates=%zu lio_history=%zu\n",
               update_time,
               lio_input_state.pos_end.z(),
               lio_output_z,
@@ -751,6 +755,8 @@ void SlamNode::handleLIO()
               state_.vel_end.z(),
               state_.gravity.z(),
               lio_imu_initialized ? 1 : 0,
+              lio_input_from_vio_feedback ? 1 : 0,
+              lio_input_vio_feedback_dt,
               pending_lidar_visual_candidates_.size(),
               lio_full_state_history_.size());
   has_last_lio_output_state = true;
@@ -785,11 +791,13 @@ void SlamNode::handleLIO()
                   {"BuildVisualPrior", prior_sec},
                   {"PublishOutputs", publish_sec}},
                  total_sec, lio_average_total);
-  CAKE_INFO("LIO summary: stamp=%.6f imu=%zu cur_pts=%zu next_pts=%zu lidar_prior_candidates=%zu",
+  CAKE_INFO("LIO summary: stamp=%.6f imu=%zu cur_pts=%zu next_pts=%zu lidar_prior_candidates=%zu input_from_vio=%d mode=%d",
             update_time, measures_.measures.back().imu.size(),
             measures_.pcl_proc_cur ? measures_.pcl_proc_cur->size() : 0,
             measures_.pcl_proc_next ? measures_.pcl_proc_next->size() : 0,
-            pending_lidar_visual_candidates_.size());
+            pending_lidar_visual_candidates_.size(),
+            lio_input_from_vio_feedback ? 1 : 0,
+            static_cast<int>(slam_mode_));
 }
 
 // 执行一次 VIO 更新并回写融合状态。
@@ -808,6 +816,7 @@ void SlamNode::handleVIO()
   const LioFullStatePrior lio_full_prior = use_lidar_ ? FindClosestLioState(measure.vio_time) : LioFullStatePrior();
   const bool has_lio_full_prior = lio_full_prior.valid;
   const double lio_full_prior_dt = has_lio_full_prior ? std::abs(lio_full_prior.timestamp - measure.vio_time) : -1.0;
+  const bool vio_state_feedback_enabled = !use_lidar_ || config_.vision.vio_state_feedback_enable;
 
   // VINS-Fusion 风格入口：先送 IMU，再送单目图像。
   // inputImage 内部会调用 featureTracker.trackImage，外部不负责提特征。
@@ -835,6 +844,7 @@ void SlamNode::handleVIO()
       const int opt_visual_residuals = vio_->getLastOptimizationVisualResidualCount();
       bool accept_vio_feedback = true;
       if (use_lidar_) {
+        const bool feedback_enabled = vio_state_feedback_enabled;
         const StatesGroup lio_state_before_vio = state_;
         const Eigen::Matrix3d dR = lio_state_before_vio.rot_end.transpose() * vio_state.rot_end;
         const double cos_angle = std::clamp((dR.trace() - 1.0) * 0.5, -1.0, 1.0);
@@ -849,12 +859,14 @@ void SlamNode::handleVIO()
         const bool z_ok = abs_z_delta <= config_.vision.max_vio_feedback_z_delta;
         const bool rot_ok = rot_delta_deg <= config_.vision.max_vio_feedback_rot_delta_deg;
         accept_vio_feedback =
+            feedback_enabled &&
             visual_ok &&
             pos_ok &&
             z_ok &&
             rot_ok;
-        std::printf("VIO FEEDBACK DEBUG stamp=%.6f accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_z=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d min_visual_residuals=%d lio_z=% .6f vio_z=% .6f\n",
+        std::printf("VIO FEEDBACK DEBUG stamp=%.6f enabled=%d accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_z=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d min_visual_residuals=%d lio_z=% .6f vio_z=% .6f\n",
                     measure.vio_time,
+                    feedback_enabled ? 1 : 0,
                     static_cast<int>(accept_vio_feedback),
                     pos_delta,
                     z_delta,
@@ -870,12 +882,14 @@ void SlamNode::handleVIO()
                     config_.vision.min_vio_feedback_visual_residuals,
                     lio_state_before_vio.pos_end.z(),
                     vio_state.pos_end.z());
-        std::printf("VIO FEEDBACK REASON stamp=%.6f visual_ok=%d pos_ok=%d z_ok=%d rot_ok=%d reject_visual=%d reject_pos=%d reject_z=%d reject_rot=%d would_accept_without_z=%d would_accept_without_pos=%d would_accept_without_visual=%d lio_full_prior=%d lio_full_dt=%.6f lidar_candidates=%zu\n",
+        std::printf("VIO FEEDBACK REASON stamp=%.6f enabled=%d visual_ok=%d pos_ok=%d z_ok=%d rot_ok=%d reject_disabled=%d reject_visual=%d reject_pos=%d reject_z=%d reject_rot=%d would_accept_without_z=%d would_accept_without_pos=%d would_accept_without_visual=%d lio_full_prior=%d lio_full_dt=%.6f lidar_candidates=%zu\n",
                     measure.vio_time,
+                    feedback_enabled ? 1 : 0,
                     visual_ok ? 1 : 0,
                     pos_ok ? 1 : 0,
                     z_ok ? 1 : 0,
                     rot_ok ? 1 : 0,
+                    feedback_enabled ? 0 : 1,
                     visual_ok ? 0 : 1,
                     pos_ok ? 0 : 1,
                     z_ok ? 0 : 1,
@@ -896,8 +910,9 @@ void SlamNode::handleVIO()
             vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
         if (!accept_vio_feedback) {
           CAKE_INFO(
-              "Reject VIO feedback: stamp=%.6f pos_delta=%.4f limit=%.4f z_delta=%.4f limit=%.4f rot_delta_deg=%.3f limit=%.3f visual_residuals=%d min=%d",
-              measure.vio_time, pos_delta, config_.vision.max_vio_feedback_pos_delta,
+              "Reject VIO feedback: stamp=%.6f enabled=%d pos_delta=%.4f limit=%.4f z_delta=%.4f limit=%.4f rot_delta_deg=%.3f limit=%.3f visual_residuals=%d min=%d",
+              measure.vio_time, feedback_enabled ? 1 : 0,
+              pos_delta, config_.vision.max_vio_feedback_pos_delta,
               z_delta, config_.vision.max_vio_feedback_z_delta,
               rot_delta_deg, config_.vision.max_vio_feedback_rot_delta_deg,
               opt_visual_residuals, config_.vision.min_vio_feedback_visual_residuals);
@@ -915,6 +930,8 @@ void SlamNode::handleVIO()
         state_ = vio_state;
         if (use_lidar_) {
           lio_.SetState(state_);
+          state_last_written_by_vio_feedback_ = true;
+          last_vio_feedback_write_time_ = measure.vio_time;
         }
         std::printf("VIO FEEDBACK APPLY stamp=%.6f write_lio=%d z_before=% .6f z_after=% .6f dz_write=% .6f visual_residuals=%d opt_features=%d opt_lidar=%d\n",
                     measure.vio_time,
@@ -971,12 +988,13 @@ void SlamNode::handleVIO()
                   {"TrackAndOptimize", image_sec},
                   {"PublishOutputs", publish_sec}},
                  total_sec, vio_average_total);
-  CAKE_INFO("VIO summary: stamp=%.6f imu=%zu tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d lidar_candidates=%zu lio_prior=%d lio_full_prior=%d lio_full_dt=%.6f mode=%d",
+  CAKE_INFO("VIO summary: stamp=%.6f imu=%zu tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d lidar_candidates=%zu lio_prior=%d lio_full_prior=%d lio_full_dt=%.6f feedback_enabled=%d mode=%d",
             measure.vio_time, measure.imu.size(), vio_->getLastTrackedFeatureCount(),
             vio_->getLastDepthFeatureCount(), vio_->getLastOptimizationFeatureCount(),
             vio_->getLastOptimizationLidarFeatureCount(), vio_->getLastOptimizationVisualResidualCount(),
             lidar_candidate_count, static_cast<int>(has_lio_prior),
             static_cast<int>(has_lio_full_prior), lio_full_prior_dt,
+            vio_state_feedback_enabled ? 1 : 0,
             static_cast<int>(slam_mode_));
   CAKE_INFO_THROTTLE_MS(
       2000,
