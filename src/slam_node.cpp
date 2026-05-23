@@ -1264,18 +1264,70 @@ LioFullStatePrior SlamNode::makeLioFullStatePrior(double stamp) const
   prior.ba = lio_state.bias_a;
   prior.bg = lio_state.bias_g;
 
-  constexpr double sigma_p = 0.01;
-  constexpr double sigma_q = 0.002;
-  constexpr double sigma_v = 0.05;
-  constexpr double sigma_ba = 0.002;
-  constexpr double sigma_bg = 0.001;
-  prior.sqrt_information.setZero();
-  for (int i = 0; i < 3; ++i) {
-    prior.sqrt_information(i, i) = 1.0 / sigma_p;
-    prior.sqrt_information(i + 3, i + 3) = 1.0 / sigma_q;
-    prior.sqrt_information(i + 6, i + 6) = 1.0 / sigma_v;
-    prior.sqrt_information(i + 9, i + 9) = 1.0 / sigma_ba;
-    prior.sqrt_information(i + 12, i + 12) = 1.0 / sigma_bg;
+  // StatesGroup covariance order is [rot, pos, inv_expo, vel, bg, ba, gravity].
+  // LioFullStatePriorResidual order is [pos, rot, vel, ba, bg].
+  constexpr int kFullPriorStateIndex[15] = {
+      3, 4, 5,    // pos
+      0, 1, 2,    // rot
+      7, 8, 9,    // vel
+      13, 14, 15, // ba
+      10, 11, 12  // bg
+  };
+
+  Eigen::Matrix<double, 15, 15> cov_full;
+  cov_full.setZero();
+  for (int row = 0; row < 15; ++row) {
+    for (int col = 0; col < 15; ++col) {
+      const double value = lio_state.cov(kFullPriorStateIndex[row], kFullPriorStateIndex[col]);
+      cov_full(row, col) = std::isfinite(value) ? value : 0.0;
+    }
+  }
+  cov_full = (0.5 * (cov_full + cov_full.transpose())).eval();
+
+  Eigen::Matrix<double, 15, 1> cov_inflation;
+  cov_inflation.segment<3>(0).setConstant(std::sqrt(2.0));  // pos
+  cov_inflation.segment<3>(3).setConstant(std::sqrt(5.0));  // rot
+  cov_inflation.segment<3>(6).setConstant(std::sqrt(5.0));  // vel
+  cov_inflation.segment<3>(9).setConstant(std::sqrt(10.0)); // ba
+  cov_inflation.segment<3>(12).setConstant(std::sqrt(10.0)); // bg
+  cov_full = cov_inflation.asDiagonal() * cov_full * cov_inflation.asDiagonal();
+  cov_full = (0.5 * (cov_full + cov_full.transpose())).eval();
+
+  const double config_min_var = std::max(1e-12, config_.vision.min_lio_pose_prior_var);
+  constexpr double kMinVariance[15] = {
+      1e-4, 1e-4, 1e-4,       // pos: 0.01 m
+      4e-6, 4e-6, 4e-6,       // rot: 0.002 rad
+      2.5e-3, 2.5e-3, 2.5e-3, // vel: 0.05 m/s
+      4e-6, 4e-6, 4e-6,       // ba
+      1e-6, 1e-6, 1e-6        // bg
+  };
+  for (int i = 0; i < 15; ++i) {
+    const double min_var = std::max(config_min_var, kMinVariance[i]);
+    if (!std::isfinite(cov_full(i, i)) || cov_full(i, i) < min_var) {
+      cov_full(i, i) = min_var;
+    }
+  }
+
+  Eigen::LLT<Eigen::Matrix<double, 15, 15>> cov_llt(cov_full);
+  if (cov_llt.info() == Eigen::Success) {
+    const Eigen::Matrix<double, 15, 15> information =
+        cov_llt.solve(Eigen::Matrix<double, 15, 15>::Identity());
+    const Eigen::Matrix<double, 15, 15> information_sym =
+        (0.5 * (information + information.transpose())).eval();
+    Eigen::LLT<Eigen::Matrix<double, 15, 15>> info_llt(information_sym);
+    if (info_llt.info() == Eigen::Success) {
+      prior.sqrt_information = info_llt.matrixL().transpose();
+    } else {
+      prior.sqrt_information.setZero();
+      for (int i = 0; i < 15; ++i) {
+        prior.sqrt_information(i, i) = 1.0 / std::sqrt(cov_full(i, i));
+      }
+    }
+  } else {
+    prior.sqrt_information.setZero();
+    for (int i = 0; i < 15; ++i) {
+      prior.sqrt_information(i, i) = 1.0 / std::sqrt(cov_full(i, i));
+    }
   }
   return prior;
 }
