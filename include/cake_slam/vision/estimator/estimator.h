@@ -138,6 +138,9 @@ public:
     /** @brief Return the latest optimized body state in world frame. */
     const StatesGroup &getLatestState() const;
 
+    /** @brief Whether getLatestState().cov contains a VIO posterior covariance. */
+    bool hasLatestStateCovariance() const;
+
     /** @brief Return the VINS-style valid-domain mask (CV_8UC1, image pixels). */
     const cv::Mat &getUndistortedValidMask() const;
 
@@ -176,6 +179,7 @@ public:
                              Eigen::Matrix3d &Rj, Eigen::Vector3d &Pj, Eigen::Matrix3d &ricj, Eigen::Vector3d &ticj,
                              double depth, Eigen::Vector3d &uvi, Eigen::Vector3d &uvj);
     void updateLatestStates();
+    bool updateLatestStateCovarianceFromProblem(ceres::Problem &problem);
     void fastPredictIMU(double t, Eigen::Vector3d linear_acceleration,
                         Eigen::Vector3d angular_velocity);
     bool IMUAvailable(double t);
@@ -268,6 +272,7 @@ public:
     int last_optimization_feature_count_ = 0;
     int last_optimization_lidar_feature_count_ = 0;
     int last_optimization_visual_residual_count_ = 0;
+    bool latest_state_covariance_valid_ = false;
     Eigen::Vector3d initP = Eigen::Vector3d::Zero();
     Eigen::Matrix3d initR = Eigen::Matrix3d::Identity();
 

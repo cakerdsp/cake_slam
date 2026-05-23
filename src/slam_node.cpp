@@ -22,6 +22,52 @@ using namespace std::chrono_literals;
 
 namespace cake_slam {
 
+namespace {
+
+constexpr int kVioFeedbackStateIndex[15] = {
+    3, 4, 5,    // pos
+    0, 1, 2,    // rot
+    7, 8, 9,    // vel
+    13, 14, 15, // ba
+    10, 11, 12  // bg
+};
+
+void MergeVioFeedbackCovariance(StatesGroup &fused_state,
+                                const StatesGroup &lio_state_before_vio,
+                                bool vio_covariance_valid)
+{
+  if (!vio_covariance_valid) {
+    fused_state.cov = lio_state_before_vio.cov;
+    return;
+  }
+
+  Eigen::Matrix<double, DIM_STATE, DIM_STATE> merged_cov = lio_state_before_vio.cov;
+  for (int idx : kVioFeedbackStateIndex) {
+    for (int col = 0; col < DIM_STATE; ++col) {
+      merged_cov(idx, col) = 0.0;
+      merged_cov(col, idx) = 0.0;
+    }
+  }
+
+  for (int row = 0; row < 15; ++row) {
+    for (int col = 0; col < 15; ++col) {
+      const int state_row = kVioFeedbackStateIndex[row];
+      const int state_col = kVioFeedbackStateIndex[col];
+      const double value = fused_state.cov(state_row, state_col);
+      merged_cov(state_row, state_col) = std::isfinite(value) ? value : 0.0;
+    }
+  }
+
+  for (int i = 0; i < DIM_STATE; ++i) {
+    if (!std::isfinite(merged_cov(i, i)) || merged_cov(i, i) <= 0.0) {
+      merged_cov(i, i) = std::max(1e-12, lio_state_before_vio.cov(i, i));
+    }
+  }
+  fused_state.cov = (0.5 * (merged_cov + merged_cov.transpose())).eval();
+}
+
+} // namespace
+
 SlamNode::SlamNode(const rclcpp::NodeOptions &options)
     : rclcpp::Node("cake_slam", options)
 {
@@ -838,14 +884,15 @@ void SlamNode::handleVIO()
     pending_lio_pose_prior_ = LioPosePrior();
     last_vio_update_time_ = measure.vio_time;
     if (vio_->solver_flag == Estimator::NON_LINEAR) {
-      const StatesGroup vio_state = vio_->getLatestState();
+      StatesGroup vio_state = vio_->getLatestState();
+      const bool vio_covariance_valid = vio_->hasLatestStateCovariance();
       const int opt_features = vio_->getLastOptimizationFeatureCount();
       const int opt_lidar_features = vio_->getLastOptimizationLidarFeatureCount();
       const int opt_visual_residuals = vio_->getLastOptimizationVisualResidualCount();
       bool accept_vio_feedback = true;
+      const StatesGroup lio_state_before_vio = state_;
       if (use_lidar_) {
         const bool feedback_enabled = vio_state_feedback_enabled;
-        const StatesGroup lio_state_before_vio = state_;
         const Eigen::Matrix3d dR = lio_state_before_vio.rot_end.transpose() * vio_state.rot_end;
         const double cos_angle = std::clamp((dR.trace() - 1.0) * 0.5, -1.0, 1.0);
         constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
@@ -864,10 +911,11 @@ void SlamNode::handleVIO()
             pos_ok &&
             z_ok &&
             rot_ok;
-        std::printf("VIO FEEDBACK DEBUG stamp=%.6f enabled=%d accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_z=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d min_visual_residuals=%d lio_z=% .6f vio_z=% .6f\n",
+        std::printf("VIO FEEDBACK DEBUG stamp=%.6f enabled=%d accept=%d vio_cov=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_z=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d min_visual_residuals=%d lio_z=% .6f vio_z=% .6f\n",
                     measure.vio_time,
                     feedback_enabled ? 1 : 0,
                     static_cast<int>(accept_vio_feedback),
+                    vio_covariance_valid ? 1 : 0,
                     pos_delta,
                     z_delta,
                     rot_delta_deg,
@@ -929,13 +977,15 @@ void SlamNode::handleVIO()
         const double fused_z_before = state_.pos_end.z();
         state_ = vio_state;
         if (use_lidar_) {
+          MergeVioFeedbackCovariance(state_, lio_state_before_vio, vio_covariance_valid);
           lio_.SetState(state_);
           state_last_written_by_vio_feedback_ = true;
           last_vio_feedback_write_time_ = measure.vio_time;
         }
-        std::printf("VIO FEEDBACK APPLY stamp=%.6f write_lio=%d z_before=% .6f z_after=% .6f dz_write=% .6f visual_residuals=%d opt_features=%d opt_lidar=%d\n",
+        std::printf("VIO FEEDBACK APPLY stamp=%.6f write_lio=%d vio_cov=%d z_before=% .6f z_after=% .6f dz_write=% .6f visual_residuals=%d opt_features=%d opt_lidar=%d\n",
                     measure.vio_time,
                     use_lidar_ ? 1 : 0,
+                    vio_covariance_valid ? 1 : 0,
                     fused_z_before,
                     state_.pos_end.z(),
                     state_.pos_end.z() - fused_z_before,
