@@ -17,7 +17,6 @@
 #include "cake_slam/vision/factor/lio_pose_prior_factor.h"
 
 #include <algorithm>
-#include <ceres/covariance.h>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -120,7 +119,6 @@ void Estimator::clearState()
     last_optimization_feature_count_ = 0;
     last_optimization_lidar_feature_count_ = 0;
     last_optimization_visual_residual_count_ = 0;
-    latest_state_covariance_valid_ = false;
 
     failure_occur = 0;
 
@@ -1999,11 +1997,6 @@ void Estimator::optimization()
         print_debug_factor_costs("after_solve");
     }
 
-    if (summary.IsSolutionUsable())
-        updateLatestStateCovarianceFromProblem(problem);
-    else
-        latest_state_covariance_valid_ = false;
-
     double2vector();
     print_lio_full_prior_state_delta("after_double2vector");
     //printf("frame_count: %d \n", frame_count);
@@ -2383,86 +2376,6 @@ void Estimator::getPoseInWorldFrame(int index, Eigen::Matrix4d &T)
 const StatesGroup &Estimator::getLatestState() const
 {
     return states_[frame_count];
-}
-
-bool Estimator::hasLatestStateCovariance() const
-{
-    return latest_state_covariance_valid_;
-}
-
-bool Estimator::updateLatestStateCovarianceFromProblem(ceres::Problem &problem)
-{
-    latest_state_covariance_valid_ = false;
-    if (!USE_IMU || frame_count < 0)
-        return false;
-
-    const double *latest_pose = para_Pose[frame_count];
-    const double *latest_speed_bias = para_SpeedBias[frame_count];
-    std::vector<std::pair<const double *, const double *>> covariance_blocks;
-    covariance_blocks.emplace_back(latest_pose, latest_pose);
-    covariance_blocks.emplace_back(latest_pose, latest_speed_bias);
-    covariance_blocks.emplace_back(latest_speed_bias, latest_speed_bias);
-
-    Eigen::Matrix<double, 6, 6, Eigen::RowMajor> pose_cov_row;
-    Eigen::Matrix<double, 6, 9, Eigen::RowMajor> pose_speed_cov_row;
-    Eigen::Matrix<double, 9, 9, Eigen::RowMajor> speed_cov_row;
-    auto compute_covariance = [&](ceres::CovarianceAlgorithmType algorithm_type) -> bool
-    {
-        ceres::Covariance::Options covariance_options;
-        covariance_options.algorithm_type = algorithm_type;
-        covariance_options.apply_loss_function = true;
-        ceres::Covariance covariance(covariance_options);
-        if (!covariance.Compute(covariance_blocks, &problem))
-            return false;
-        return covariance.GetCovarianceBlockInTangentSpace(latest_pose, latest_pose, pose_cov_row.data()) &&
-               covariance.GetCovarianceBlockInTangentSpace(latest_pose, latest_speed_bias, pose_speed_cov_row.data()) &&
-               covariance.GetCovarianceBlockInTangentSpace(latest_speed_bias, latest_speed_bias, speed_cov_row.data());
-    };
-    if (!compute_covariance(ceres::SPARSE_QR) && !compute_covariance(ceres::DENSE_SVD))
-    {
-        CAKE_INFO_THROTTLE_MS(2000, "VIO covariance extraction failed: stamp=%.6f frame_count=%d", Headers[frame_count], frame_count);
-        return false;
-    }
-
-    Eigen::Matrix<double, 15, 15> vio_cov = Eigen::Matrix<double, 15, 15>::Zero();
-    vio_cov.block<6, 6>(0, 0) = pose_cov_row;
-    vio_cov.block<6, 9>(0, 6) = pose_speed_cov_row;
-    vio_cov.block<9, 6>(6, 0) = pose_speed_cov_row.transpose();
-    vio_cov.block<9, 9>(6, 6) = speed_cov_row;
-    vio_cov = (0.5 * (vio_cov + vio_cov.transpose())).eval();
-
-    constexpr int kVioToStateIndex[15] = {
-        3, 4, 5,    // pos
-        0, 1, 2,    // rot
-        7, 8, 9,    // vel
-        13, 14, 15, // ba
-        10, 11, 12  // bg
-    };
-
-    Eigen::Matrix<double, DIM_STATE, DIM_STATE> state_cov =
-        Eigen::Matrix<double, DIM_STATE, DIM_STATE>::Zero();
-    state_cov(6, 6) = states_[frame_count].cov(6, 6);
-    state_cov.block<3, 3>(16, 16) = states_[frame_count].cov.block<3, 3>(16, 16);
-
-    for (int row = 0; row < 15; ++row)
-    {
-        for (int col = 0; col < 15; ++col)
-        {
-            const double value = vio_cov(row, col);
-            state_cov(kVioToStateIndex[row], kVioToStateIndex[col]) =
-                std::isfinite(value) ? value : 0.0;
-        }
-    }
-
-    const double min_var = std::max(1e-12, MIN_LIO_POSE_PRIOR_VAR);
-    for (int i = 0; i < DIM_STATE; ++i)
-    {
-        if (!std::isfinite(state_cov(i, i)) || state_cov(i, i) < min_var)
-            state_cov(i, i) = min_var;
-    }
-    states_[frame_count].cov = (0.5 * (state_cov + state_cov.transpose())).eval();
-    latest_state_covariance_valid_ = true;
-    return true;
 }
 
 const cv::Mat &Estimator::getUndistortedValidMask() const
