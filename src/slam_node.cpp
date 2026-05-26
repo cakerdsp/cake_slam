@@ -91,9 +91,10 @@ void SlamNode::loadConfiguration()
     slam_mode_ = ONLY_VIO;
   }
 
-  CAKE_INFO("Loaded config: lidar=%d image=%d imu=%d mode=%d hilti_en=%d imu.acc_scale=%.6f frame.world=%s frame.body=%s frame.lidar=%s frame.camera=%s",
+  CAKE_INFO("Loaded config: lidar=%d image=%d imu=%d mode=%d hilti_en=%d image_interval=%d imu.acc_scale=%.6f frame.world=%s frame.body=%s frame.lidar=%s frame.camera=%s",
             use_lidar_, use_image_, use_imu_, static_cast<int>(slam_mode_),
-            config_.common.hilti_en ? 1 : 0, config_.imu.acc_scale,
+            config_.common.hilti_en ? 1 : 0, config_.vision.image_process_interval,
+            config_.imu.acc_scale,
             config_.frame.world.c_str(), config_.frame.body.c_str(),
             config_.frame.lidar.c_str(), config_.frame.camera.c_str());
 }
@@ -277,7 +278,12 @@ void SlamNode::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg)
   }
 
   std::lock_guard<std::mutex> lock(buffer_mutex_);
-  if (config_.common.hilti_en && (++hilti_image_counter_ % 4 != 0)) {
+  ++hilti_image_counter_;
+  int image_process_interval = std::max(1, config_.vision.image_process_interval);
+  if (image_process_interval == 1 && config_.common.hilti_en) {
+    image_process_interval = 4;
+  }
+  if ((hilti_image_counter_ - 1) % static_cast<std::uint64_t>(image_process_interval) != 0) {
     return;
   }
   raw_image_buffer_.push_back(msg);

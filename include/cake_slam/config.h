@@ -21,7 +21,7 @@ struct CommonConfig
   bool ros_driver_bug_fix = false;   ///< Optional whole-second IMU stamp correction.
   double imu_time_offset = 0.0;      ///< Applied as imu_stamp -= imu_time_offset [s].
   double image_time_offset = 0.0;    ///< Applied as image_stamp += image_time_offset [s].
-  bool hilti_en = false;             ///< FAST-LIVO2 HILTI22 image decimation: keep every 4th frame.
+  bool hilti_en = false;             ///< Legacy FAST-LIVO2 HILTI22 image decimation: keep every 4th frame.
   int max_buffer_size = 200000;      ///< Per-buffer hard cap [messages].
   bool gravity_align_enable = false; ///< Rotate initial gravity to the world z axis.
   bool imu_propagation_enable = true;///< Publish high-rate IMU propagated odometry.
@@ -92,6 +92,7 @@ struct VisionConfig
   int show_track = 0;                ///< Draw/debug tracking image.
   int flow_back = 0;                 ///< Enable forward-backward LK check.
   int use_fast_fisheye_undistort = 0;///< Use OpenCV fisheye undistort for KANNALA_BRANDT cameras.
+  int image_process_interval = 1;    ///< Process every Nth image before VIO frontend.
   int multiple_thread = 0;           ///< Enable legacy VINS processing thread.
   double max_solver_time = 0.04;     ///< Ceres time budget [s].
   int max_num_iterations = 8;        ///< Ceres iteration budget.

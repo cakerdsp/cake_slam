@@ -7,7 +7,7 @@
 common:
   lidar_enable: 1
   image_enable: 1
-  hilti_en: 1
+  hilti_en: 0
   ros_driver_bug_fix: 0
   imu_time_offset: 0.0
   image_time_offset: 0.0
@@ -18,7 +18,7 @@ common:
 imu:
   enable: 1
   topic: "/alphasense/imu"
-  acc_n: 0.02
+  acc_n: 0.50
   acc_w: 0.0001
   # HILTI22 /alphasense/imu already reports linear_acceleration in m/s^2.
   acc_scale: 1.0
@@ -61,16 +61,18 @@ vision:
   image_height: 540
   image_width: 720
   max_cnt: 250
-  min_dist: 30
+  min_dist: 20
   fisheye_mask: ""
   show_track: 0
   flow_back: 1
-  # Keep VINS-Fusion's camodocal liftProjective path for KANNALA_BRANDT by default.
-  # Set to 1 only when validating the OpenCV fisheye fast path.
-  use_fast_fisheye_undistort: 0
+  # The camodocal KANNALA_BRANDT liftProjective path is too slow in the fused
+  # node; keep the OpenCV fisheye path on and validate equivalence from the
+  # startup "fisheye model check" log.
+  use_fast_fisheye_undistort: 1
+  image_process_interval: 2
   multiple_thread: 0
   max_solver_time: 0.04
-  max_num_iterations: 5
+  max_num_iterations: 8
   keyframe_parallax: 10.0
   estimate_extrinsic: 0
   lidar_depth_enable: 1

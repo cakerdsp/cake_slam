@@ -86,7 +86,6 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "common.image_time_offset", config.common.image_time_offset);
   readIfPresent(fs, "time_offset.img_time_offset", config.common.image_time_offset);
   readIfPresent(fs, "common.hilti_en", config.common.hilti_en);
-  readIfPresent(fs, "preprocess.hilti_en", config.common.hilti_en);
   readIfPresent(fs, "common.max_buffer_size", config.common.max_buffer_size);
   readIfPresent(fs, "common.gravity_align_enable", config.common.gravity_align_enable);
   readIfPresent(fs, "uav.gravity_align_en", config.common.gravity_align_enable);
@@ -146,6 +145,7 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.show_track", config.vision.show_track);
   readIfPresent(fs, "vision.flow_back", config.vision.flow_back);
   readIfPresent(fs, "vision.use_fast_fisheye_undistort", config.vision.use_fast_fisheye_undistort);
+  readIfPresent(fs, "vision.image_process_interval", config.vision.image_process_interval);
   readIfPresent(fs, "vision.multiple_thread", config.vision.multiple_thread);
   readIfPresent(fs, "vision.max_solver_time", config.vision.max_solver_time);
   readIfPresent(fs, "vision.max_num_iterations", config.vision.max_num_iterations);
@@ -178,6 +178,9 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.max_vio_feedback_pos_delta", config.vision.max_vio_feedback_pos_delta);
   readIfPresent(fs, "vision.max_vio_feedback_z_delta", config.vision.max_vio_feedback_z_delta);
   readIfPresent(fs, "vision.max_vio_feedback_rot_delta_deg", config.vision.max_vio_feedback_rot_delta_deg);
+  if (config.vision.image_process_interval < 1) {
+    config.vision.image_process_interval = 1;
+  }
 
   // -------------------- 外参 --------------------
   // 这里把 OpenCV FileNode 序列平铺拷贝到 std::vector<double> 中。
