@@ -145,6 +145,7 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.min_dist", config.vision.min_dist);
   readIfPresent(fs, "vision.show_track", config.vision.show_track);
   readIfPresent(fs, "vision.flow_back", config.vision.flow_back);
+  readIfPresent(fs, "vision.use_fast_fisheye_undistort", config.vision.use_fast_fisheye_undistort);
   readIfPresent(fs, "vision.multiple_thread", config.vision.multiple_thread);
   readIfPresent(fs, "vision.max_solver_time", config.vision.max_solver_time);
   readIfPresent(fs, "vision.max_num_iterations", config.vision.max_num_iterations);

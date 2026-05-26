@@ -1015,8 +1015,44 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
                     0.0, mv, v0,
                     0.0, 0.0, 1.0);
                 fast_undistort_D.back() = (cv::Mat_<double>(4, 1) << k2, k3, k4, k5);
-                CAKE_INFO("FeatureTracker fast undistort: camera=%zu model=KANNALA_BRANDT backend=opencv_fisheye",
-                          i);
+
+                std::vector<cv::Point2f> sample_pts;
+                const int sample_col = COL > 0 ? COL : 720;
+                const int sample_row = ROW > 0 ? ROW : 540;
+                for (int sy = 1; sy <= 4; ++sy)
+                {
+                    for (int sx = 1; sx <= 4; ++sx)
+                    {
+                        sample_pts.emplace_back(sample_col * sx / 5.0f,
+                                                sample_row * sy / 5.0f);
+                    }
+                }
+
+                std::vector<cv::Point2f> opencv_un_pts;
+                cv::fisheye::undistortPoints(sample_pts, opencv_un_pts,
+                                              fast_undistort_K.back(),
+                                              fast_undistort_D.back());
+
+                double sum_delta = 0.0;
+                double max_delta = 0.0;
+                for (size_t sample_idx = 0; sample_idx < sample_pts.size(); ++sample_idx)
+                {
+                    Eigen::Vector3d camodocal_un_pt;
+                    camera->liftProjective(
+                        Eigen::Vector2d(sample_pts[sample_idx].x, sample_pts[sample_idx].y),
+                        camodocal_un_pt);
+                    const cv::Point2f camodocal_pt(
+                        static_cast<float>(camodocal_un_pt.x() / camodocal_un_pt.z()),
+                        static_cast<float>(camodocal_un_pt.y() / camodocal_un_pt.z()));
+                    const double delta = cv::norm(opencv_un_pts[sample_idx] - camodocal_pt);
+                    sum_delta += delta;
+                    max_delta = std::max(max_delta, delta);
+                }
+
+                CAKE_INFO("FeatureTracker fisheye model check: camera=%zu samples=%zu mean_norm_delta=%.9f max_norm_delta=%.9f",
+                          i, sample_pts.size(), sum_delta / sample_pts.size(), max_delta);
+                CAKE_INFO("FeatureTracker fisheye undistort: camera=%zu model=KANNALA_BRANDT backend=%s",
+                          i, USE_FAST_FISHEYE_UNDISTORT ? "opencv_fisheye" : "camodocal_liftProjective");
             }
             else
             {
@@ -1080,7 +1116,7 @@ vector<cv::Point2f> FeatureTracker::undistortedPts(vector<cv::Point2f> &pts, int
     un_pts.reserve(pts.size());
 
     if (camera_id >= 0 && camera_id < static_cast<int>(fast_undistort_model.size()) &&
-        fast_undistort_model[camera_id] == 1 && !pts.empty())
+        fast_undistort_model[camera_id] == 1 && USE_FAST_FISHEYE_UNDISTORT && !pts.empty())
     {
         cv::fisheye::undistortPoints(pts, un_pts,
                                       fast_undistort_K[camera_id],

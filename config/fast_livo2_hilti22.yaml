@@ -65,6 +65,9 @@ vision:
   fisheye_mask: ""
   show_track: 0
   flow_back: 1
+  # Keep VINS-Fusion's camodocal liftProjective path for KANNALA_BRANDT by default.
+  # Set to 1 only when validating the OpenCV fisheye fast path.
+  use_fast_fisheye_undistort: 0
   multiple_thread: 0
   max_solver_time: 0.04
   max_num_iterations: 5

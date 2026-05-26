@@ -91,6 +91,7 @@ struct VisionConfig
   int min_dist = 30;                 ///< Minimum feature spacing [pixel].
   int show_track = 0;                ///< Draw/debug tracking image.
   int flow_back = 0;                 ///< Enable forward-backward LK check.
+  int use_fast_fisheye_undistort = 0;///< Use OpenCV fisheye undistort for KANNALA_BRANDT cameras.
   int multiple_thread = 0;           ///< Enable legacy VINS processing thread.
   double max_solver_time = 0.04;     ///< Ceres time budget [s].
   int max_num_iterations = 8;        ///< Ceres iteration budget.

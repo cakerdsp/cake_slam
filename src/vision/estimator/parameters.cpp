@@ -51,6 +51,7 @@ int MAX_CNT;
 int MIN_DIST;
 int SHOW_TRACK;
 int FLOW_BACK;
+int USE_FAST_FISHEYE_UNDISTORT;
 int LIDAR_DEPTH_ENABLE;
 int LIDAR_PRIOR_FEATURE_ENABLE;
 int LIDAR_INV_DEPTH_OPTIMIZE;
@@ -253,6 +254,7 @@ void readParameters(std::string config_file)
     MIN_DIST = readOrDefault<int>(fsSettings, "vision.min_dist", 30);
     SHOW_TRACK = readOrDefault<int>(fsSettings, "vision.show_track", 0);
     FLOW_BACK = readOrDefault<int>(fsSettings, "vision.flow_back", 0);
+    USE_FAST_FISHEYE_UNDISTORT = readOrDefault<int>(fsSettings, "vision.use_fast_fisheye_undistort", 0);
     LIDAR_DEPTH_ENABLE = readOrDefault<int>(fsSettings, "vision.lidar_depth_enable", 1);
     LIDAR_PRIOR_FEATURE_ENABLE = readOrDefault<int>(fsSettings, "vision.lidar_prior_feature_enable",
                                                     readOrDefault<int>(fsSettings, "vision.lidar_prior_enable",

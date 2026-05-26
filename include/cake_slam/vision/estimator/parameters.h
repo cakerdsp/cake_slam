@@ -80,6 +80,7 @@ extern int MAX_CNT;
 extern int MIN_DIST;
 extern int SHOW_TRACK;
 extern int FLOW_BACK;
+extern int USE_FAST_FISHEYE_UNDISTORT;
 extern int LIDAR_DEPTH_ENABLE;
 extern int LIDAR_PRIOR_FEATURE_ENABLE;
 extern int LIDAR_INV_DEPTH_OPTIMIZE;
