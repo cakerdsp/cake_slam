@@ -7,6 +7,7 @@
       img_en: 1
       lidar_en: 1
       ros_driver_bug_fix: false
+      only_shade: 0
 
     extrin_calib:
       extrinsic_T: [0.04165, 0.02326, -0.0284]

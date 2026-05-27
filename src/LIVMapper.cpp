@@ -123,6 +123,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<int>("publish.pub_scan_num", 1);
   try_declare.template operator()<bool>("publish.pub_effect_point_en", false);
   try_declare.template operator()<bool>("publish.dense_map_en", false);
+  
+  try_declare.template operator()<int>("common.only_shade", false);
 
   // get parameter
   this->node->get_parameter("common.lid_topic", lid_topic);
@@ -181,6 +183,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("publish.pub_scan_num", pub_scan_num);
   this->node->get_parameter("publish.pub_effect_point_en", pub_effect_point_en);
   this->node->get_parameter("publish.dense_map_en", dense_map_en);
+
+  this->node->get_parameter("common.only_shade", only_shade);
 
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
@@ -379,7 +383,15 @@ void LIVMapper::handleVIO()
     vio_manager->plot_flag = false;
   }
 
-  vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+  if(only_shade) 
+  {
+    vio_manager->processFrameFake(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+  }
+  else 
+  {
+    vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+  }
+  
 
   if (imu_prop_enable) 
   {

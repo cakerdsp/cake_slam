@@ -1784,6 +1784,23 @@ void VIOManager::dumpDataForColmap()
   cnt++;
 }
 
+void VIOManager::processFrameFake(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time) 
+{
+  if (width != img.cols || height != img.rows)
+  {
+    if (img.empty()) printf("[ VIO ] Empty Image!\n");
+    cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
+  }
+  img_rgb = img.clone();
+  img_cp = img.clone();
+  // img_test = img.clone();
+
+  if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
+
+  new_frame_.reset(new Frame(cam, img));
+  updateFrameState(*state);
+  return;
+}
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
   if (width != img.cols || height != img.rows)
