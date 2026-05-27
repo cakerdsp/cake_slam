@@ -537,6 +537,34 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
         lio_full_priors_[frame_count].timestamp = header;
     if (lio_pose_priors_[frame_count].valid)
     {
+        const Eigen::Vector3d vio_pos_before = states_[frame_count].pos_end;
+        const Eigen::Vector3d vio_vel_before = states_[frame_count].vel_end;
+        const Eigen::Vector3d vio_ba_before = states_[frame_count].bias_a;
+        const Eigen::Vector3d vio_bg_before = states_[frame_count].bias_g;
+        if (lio_full_priors_[frame_count].valid)
+        {
+            const auto &full_prior = lio_full_priors_[frame_count];
+            const Eigen::Vector3d dp_prior = full_prior.p_WB - vio_pos_before;
+            const Eigen::Vector3d dv_prior = full_prior.v_WB - vio_vel_before;
+            const Eigen::Vector3d dba_prior = full_prior.ba - vio_ba_before;
+            const Eigen::Vector3d dbg_prior = full_prior.bg - vio_bg_before;
+            std::printf("VIO LIO PRIOR SNAP DEBUG stamp=%.6f frame=%d full=1 dpos=(% .6f % .6f % .6f) dvel=(% .6f % .6f % .6f) dba=(% .6f % .6f % .6f) dbg=(% .6f % .6f % .6f) prior_v=(% .6f % .6f % .6f) vio_v_before=(% .6f % .6f % .6f)\n",
+                        header, frame_count,
+                        dp_prior.x(), dp_prior.y(), dp_prior.z(),
+                        dv_prior.x(), dv_prior.y(), dv_prior.z(),
+                        dba_prior.x(), dba_prior.y(), dba_prior.z(),
+                        dbg_prior.x(), dbg_prior.y(), dbg_prior.z(),
+                        full_prior.v_WB.x(), full_prior.v_WB.y(), full_prior.v_WB.z(),
+                        vio_vel_before.x(), vio_vel_before.y(), vio_vel_before.z());
+        }
+        else
+        {
+            const Eigen::Vector3d dp_prior = lio_pose_priors_[frame_count].p_WB - vio_pos_before;
+            std::printf("VIO LIO PRIOR SNAP DEBUG stamp=%.6f frame=%d full=0 dpos=(% .6f % .6f % .6f) vio_v_before=(% .6f % .6f % .6f)\n",
+                        header, frame_count,
+                        dp_prior.x(), dp_prior.y(), dp_prior.z(),
+                        vio_vel_before.x(), vio_vel_before.y(), vio_vel_before.z());
+        }
         states_[frame_count].rot_end = lio_pose_priors_[frame_count].R_WB;
         states_[frame_count].pos_end = lio_pose_priors_[frame_count].p_WB;
     }
