@@ -15,9 +15,15 @@ which is included as part of this source code package.
 
 #include "voxel_map.h"
 #include "feature.h"
+#include <algorithm>
+#include <cmath>
+#include <deque>
+#include <map>
 #include <opencv2/imgproc/imgproc_c.h>
+#include <opencv2/video/tracking.hpp>
 #include <pcl/filters/voxel_grid.h>
 #include <set>
+#include <tuple>
 #include <vikit/math_utils.h>
 #include <vikit/robust_cost.h>
 #include <vikit/vision.h>
@@ -80,6 +86,30 @@ public:
   }
 };
 
+struct OpticalFlowObservation
+{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+  int frame_id = -1;
+  double timestamp = 0.0;
+  cv::Point2f px;
+  V3D bearing = V3D::Zero();
+  SE3<double> T_f_w;
+};
+
+struct OpticalFlowTrack
+{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+  int id = -1;
+  int age = 0;
+  bool triangulated = false;
+  bool rejected = false;
+  V3D point_w = V3D::Zero();
+  std::deque<cv::Point2f> history;
+  std::vector<OpticalFlowObservation, Eigen::aligned_allocator<OpticalFlowObservation>> observations;
+};
+
 class VIOManager
 {
 public:
@@ -130,6 +160,27 @@ public:
   vector<pointWithVar> append_voxel_points;
   FramePtr new_frame_;
   cv::Mat img_cp, img_rgb, img_test;
+  cv::Mat optical_flow_debug_img;
+
+  int frontend_mode = 0;
+  int optical_flow_max_cnt = 250;
+  int optical_flow_min_dist = 20;
+  int optical_flow_min_track_len_for_triangulation = 3;
+  int optical_flow_track_history_size = 20;
+  double optical_flow_quality_level = 0.01;
+  double optical_flow_f_threshold = 0.5;
+  bool optical_flow_flow_back = true;
+  int optical_flow_next_id = 0;
+  int optical_flow_frame_id = 0;
+  double optical_flow_prev_time = -1.0;
+  cv::Mat optical_flow_prev_img;
+  std::vector<cv::Point2f> optical_flow_prev_pts;
+  std::vector<cv::Point2f> optical_flow_cur_pts;
+  std::vector<int> optical_flow_ids;
+  std::vector<int> optical_flow_track_cnt;
+  std::map<int, OpticalFlowTrack> optical_flow_tracks;
+  PointCloudXYZI::Ptr optical_flow_points;
+  PointCloudXYZI::Ptr optical_flow_triangulated_points;
 
   enum CellType
   {
@@ -142,8 +193,17 @@ public:
   ~VIOManager();
   void updateStateInverse(cv::Mat img, int level);
   void updateState(cv::Mat img, int level);
+  void processFrameOpticalFlow(cv::Mat &img, double img_time);
   void processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
   void processFrameFake(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
+  bool inOpticalFlowBorder(const cv::Point2f &pt) const;
+  V3D getOpticalFlowBearing(const cv::Point2f &px) const;
+  void setOpticalFlowMask(cv::Mat &mask);
+  void addOpticalFlowObservation(OpticalFlowTrack &track, const cv::Point2f &px, double img_time);
+  bool triangulateOpticalFlowTrack(OpticalFlowTrack &track);
+  void updateOpticalFlowPointClouds();
+  void drawOpticalFlowDebugImage(const std::vector<cv::Point2f> &rejected_pts, int prev, int tracked, int flow_back_pass,
+                                 int border_pass, int mask_reject, int new_points, int final_points, int triangulated);
   void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg);
   void setImuToLidarExtrinsic(const V3D &transl, const M3D &rot);

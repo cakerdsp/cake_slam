@@ -86,6 +86,17 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<int>("vio.patch_pyrimid_level", 4);
   try_declare.template operator()<int>("vio.patch_size", 8);
   try_declare.template operator()<int>("vio.outlier_threshold", 100);
+  try_declare.template operator()<int>("vio.frontend_mode", 0);
+  try_declare.template operator()<int>("vio.opticalflow.max_cnt", 250);
+  try_declare.template operator()<int>("vio.opticalflow.min_dist", 20);
+  try_declare.template operator()<int>("vio.opticalflow.min_track_len_for_triangulation", 3);
+  try_declare.template operator()<int>("vio.opticalflow.track_history_size", 20);
+  try_declare.template operator()<double>("vio.opticalflow.quality_level", 0.01);
+  try_declare.template operator()<double>("vio.opticalflow.f_threshold", 0.5);
+  try_declare.template operator()<bool>("vio.opticalflow.flow_back", true);
+  try_declare.template operator()<std::string>("vio.opticalflow.feature_image_topic", "/fast_livo/feature_image");
+  try_declare.template operator()<std::string>("vio.opticalflow.optical_flow_points_topic", "/fast_livo/optical_flow_points");
+  try_declare.template operator()<std::string>("vio.opticalflow.triangulated_points_topic", "/fast_livo/triangulated_points");
   try_declare.template operator()<double>("time_offset.exposure_time_init", 0.0);
   try_declare.template operator()<double>("time_offset.img_time_offset", 0.0);
   try_declare.template operator()<bool>("uav.imu_rate_odom", false);
@@ -124,8 +135,6 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("publish.pub_effect_point_en", false);
   try_declare.template operator()<bool>("publish.dense_map_en", false);
   
-  try_declare.template operator()<int>("common.only_shade", false);
-
   // get parameter
   this->node->get_parameter("common.lid_topic", lid_topic);
   this->node->get_parameter("common.imu_topic", imu_topic);
@@ -146,6 +155,17 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.patch_pyrimid_level", patch_pyrimid_level);
   this->node->get_parameter("vio.patch_size", patch_size);
   this->node->get_parameter("vio.outlier_threshold", outlier_threshold);
+  this->node->get_parameter("vio.frontend_mode", frontend_mode);
+  this->node->get_parameter("vio.opticalflow.max_cnt", optical_flow_max_cnt);
+  this->node->get_parameter("vio.opticalflow.min_dist", optical_flow_min_dist);
+  this->node->get_parameter("vio.opticalflow.min_track_len_for_triangulation", optical_flow_min_track_len_for_triangulation);
+  this->node->get_parameter("vio.opticalflow.track_history_size", optical_flow_track_history_size);
+  this->node->get_parameter("vio.opticalflow.quality_level", optical_flow_quality_level);
+  this->node->get_parameter("vio.opticalflow.f_threshold", optical_flow_f_threshold);
+  this->node->get_parameter("vio.opticalflow.flow_back", optical_flow_flow_back);
+  this->node->get_parameter("vio.opticalflow.feature_image_topic", optical_flow_feature_image_topic);
+  this->node->get_parameter("vio.opticalflow.optical_flow_points_topic", optical_flow_points_topic);
+  this->node->get_parameter("vio.opticalflow.triangulated_points_topic", optical_flow_triangulated_points_topic);
   this->node->get_parameter("time_offset.exposure_time_init", exposure_time_init);
   this->node->get_parameter("time_offset.img_time_offset", img_time_offset);
   this->node->get_parameter("uav.imu_rate_odom", imu_prop_enable);
@@ -184,8 +204,6 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("publish.pub_effect_point_en", pub_effect_point_en);
   this->node->get_parameter("publish.dense_map_en", dense_map_en);
 
-  this->node->get_parameter("common.only_shade", only_shade);
-
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
 
@@ -223,6 +241,14 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
   vio_manager->exposure_estimate_en = exposure_estimate_en;
   vio_manager->colmap_output_en = colmap_output_en;
+  vio_manager->frontend_mode = frontend_mode;
+  vio_manager->optical_flow_max_cnt = optical_flow_max_cnt;
+  vio_manager->optical_flow_min_dist = optical_flow_min_dist;
+  vio_manager->optical_flow_min_track_len_for_triangulation = optical_flow_min_track_len_for_triangulation;
+  vio_manager->optical_flow_track_history_size = optical_flow_track_history_size;
+  vio_manager->optical_flow_quality_level = optical_flow_quality_level;
+  vio_manager->optical_flow_f_threshold = optical_flow_f_threshold;
+  vio_manager->optical_flow_flow_back = optical_flow_flow_back;
   vio_manager->initializeVIO();
 
   p_imu->set_extrinsic(extT, extR);
@@ -292,6 +318,9 @@ void LIVMapper::initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &node
   pubLaserCloudDynDbg = this->node->create_publisher<sensor_msgs::msg::PointCloud2>("/dyn_obj_dbg_hist", 100);
   mavros_pose_publisher = this->node->create_publisher<geometry_msgs::msg::PoseStamped>("/mavros/vision_pose/pose", 10);
   pubImage = it.advertise("/rgb_img", 1);
+  pubOpticalFlowImage = it.advertise(optical_flow_feature_image_topic, 1);
+  pubOpticalFlowPoints = this->node->create_publisher<sensor_msgs::msg::PointCloud2>(optical_flow_points_topic, 10);
+  pubTriangulatedPoints = this->node->create_publisher<sensor_msgs::msg::PointCloud2>(optical_flow_triangulated_points_topic, 10);
   pubImuPropOdom = this->node->create_publisher<nav_msgs::msg::Odometry>("/LIVO2/imu_propagate", 10000);
   imu_prop_timer = this->node->create_wall_timer(0.004s, std::bind(&LIVMapper::imu_prop_callback, this));
   voxelmap_manager->voxel_map_pub_= this->node->create_publisher<visualization_msgs::msg::MarkerArray>("/planes", 10000);
@@ -361,18 +390,31 @@ void LIVMapper::stateEstimationAndMapping()
 
 void LIVMapper::handleVIO() 
 {
+  int current_frontend_mode = frontend_mode;
+  if (current_frontend_mode < 0 || current_frontend_mode > 2)
+  {
+    printf(BOLDYELLOW "[ VIO ] Unknown frontend_mode=%d, fallback to direct frontend.\n" RESET, current_frontend_mode);
+    current_frontend_mode = 0;
+  }
+
   euler_cur = RotMtoEuler(_state.rot_end);
   fout_pre << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
             << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << std::endl;
     
-  if (pcl_w_wait_pub->empty() || (pcl_w_wait_pub == nullptr)) 
+  if ((pcl_w_wait_pub == nullptr || pcl_w_wait_pub->empty()) && current_frontend_mode == 0)
   {
     std::cout << "[ VIO ] No point!!!" << std::endl;
     return;
   }
-    
-  std::cout << "[ VIO ] Raw feature num: " << pcl_w_wait_pub->points.size() << std::endl;
+  if (pcl_w_wait_pub != nullptr && !pcl_w_wait_pub->empty())
+  {
+    std::cout << "[ VIO ] Raw feature num: " << pcl_w_wait_pub->points.size() << std::endl;
+  }
+  else
+  {
+    printf("[ VIO ] No lidar points, continue frontend_mode=%d image frontend.\n", current_frontend_mode);
+  }
 
   if (fabs((LidarMeasures.last_lio_update_time - _first_lidar_time) - plot_time) < (frame_cnt / 2 * 0.1)) 
   {
@@ -383,15 +425,19 @@ void LIVMapper::handleVIO()
     vio_manager->plot_flag = false;
   }
 
-  if(only_shade) 
+  switch (current_frontend_mode)
   {
-    vio_manager->processFrameFake(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+    case 1:
+      vio_manager->processFrameOpticalFlow(LidarMeasures.measures.back().img, LidarMeasures.last_lio_update_time - _first_lidar_time);
+      break;
+    case 2:
+      vio_manager->processFrameFake(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+      break;
+    case 0:
+    default:
+      vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+      break;
   }
-  else 
-  {
-    vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
-  }
-  
 
   if (imu_prop_enable) 
   {
@@ -415,6 +461,12 @@ void LIVMapper::handleVIO()
 
   publish_frame_world(pubLaserCloudFullRes, vio_manager);
   publish_img_rgb(pubImage, vio_manager);
+  if (current_frontend_mode == 1)
+  {
+    publish_optical_flow_image(pubOpticalFlowImage, vio_manager);
+    publish_optical_flow_points(pubOpticalFlowPoints, vio_manager->optical_flow_points);
+    publish_optical_flow_points(pubTriangulatedPoints, vio_manager->optical_flow_triangulated_points);
+  }
 
   euler_cur = RotMtoEuler(_state.rot_end);
   fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
@@ -1197,12 +1249,36 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 void LIVMapper::publish_img_rgb(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager)
 {
   cv::Mat img_rgb = vio_manager->img_cp;
+  if (img_rgb.empty()) return;
   cv_bridge::CvImage out_msg;
   out_msg.header.stamp = this->node->get_clock()->now();
   // out_msg.header.frame_id = "camera_init";
   out_msg.encoding = sensor_msgs::image_encodings::BGR8;
   out_msg.image = img_rgb;
   pubImage.publish(out_msg.toImageMsg());
+}
+
+void LIVMapper::publish_optical_flow_image(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager)
+{
+  cv::Mat img_debug = vio_manager->optical_flow_debug_img;
+  if (img_debug.empty()) return;
+  cv_bridge::CvImage out_msg;
+  out_msg.header.stamp = this->node->get_clock()->now();
+  out_msg.header.frame_id = "camera";
+  out_msg.encoding = sensor_msgs::image_encodings::BGR8;
+  out_msg.image = img_debug;
+  pubImage.publish(out_msg.toImageMsg());
+}
+
+void LIVMapper::publish_optical_flow_points(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubCloud,
+                                            const PointCloudXYZI::Ptr &cloud)
+{
+  if (pubCloud == nullptr || cloud == nullptr || cloud->empty()) return;
+  sensor_msgs::msg::PointCloud2 cloud_msg;
+  pcl::toROSMsg(*cloud, cloud_msg);
+  cloud_msg.header.stamp = this->node->get_clock()->now();
+  cloud_msg.header.frame_id = "camera_init";
+  pubCloud->publish(cloud_msg);
 }
 
 void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubLaserCloudFullRes, VIOManagerPtr vio_manager)

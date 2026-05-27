@@ -56,6 +56,9 @@ public:
   void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in);
   void img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in);
   void publish_img_rgb(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager);
+  void publish_optical_flow_image(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager);
+  void publish_optical_flow_points(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubCloud,
+                                   const PointCloudXYZI::Ptr &cloud);
   void publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubLaserCloudFullRes, VIOManagerPtr vio_manager);
   void publish_visual_sub_map(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubSubVisualMap);
   void publish_effect_world(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubLaserCloudEffect, const std::vector<PointToPlane> &ptpl_list);
@@ -119,6 +122,17 @@ public:
   int lidar_en = 1;
   bool is_first_frame = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;
+  int frontend_mode = 0;
+  int optical_flow_max_cnt = 250;
+  int optical_flow_min_dist = 20;
+  int optical_flow_min_track_len_for_triangulation = 3;
+  int optical_flow_track_history_size = 20;
+  double optical_flow_quality_level = 0.01;
+  double optical_flow_f_threshold = 0.5;
+  bool optical_flow_flow_back = true;
+  std::string optical_flow_feature_image_topic = "/fast_livo/feature_image";
+  std::string optical_flow_points_topic = "/fast_livo/optical_flow_points";
+  std::string optical_flow_triangulated_points_topic = "/fast_livo/triangulated_points";
   int outlier_threshold;
   double plot_time;
   int frame_cnt;
@@ -180,6 +194,9 @@ public:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudDynRmed;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudDynDbg;
   image_transport::Publisher pubImage;
+  image_transport::Publisher pubOpticalFlowImage;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubOpticalFlowPoints;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubTriangulatedPoints;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr mavros_pose_publisher;
   rclcpp::TimerBase::SharedPtr imu_prop_timer;
   rclcpp::Node::SharedPtr node;
@@ -189,7 +206,5 @@ public:
   double aver_time_icp = 0;
   double aver_time_map_inre = 0;
   bool colmap_output_en = false;
-
-  int only_shade = 0;
 };
 #endif

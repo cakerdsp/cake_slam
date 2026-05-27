@@ -7,7 +7,6 @@
       img_en: 1
       lidar_en: 1
       ros_driver_bug_fix: false
-      only_shade: 0
 
     extrin_calib:
       extrinsic_T: [0.04165, 0.02326, -0.0284]
@@ -32,6 +31,7 @@
       blind: 0.8
 
     vio:
+      frontend_mode: 0 # 0: direct, 1: optical_flow, 2: color_only
       max_iterations: 5
       outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
       img_point_cov: 100 # 100 1000 
@@ -42,6 +42,17 @@
       inverse_composition_en: false
       exposure_estimate_en: true
       inv_expo_cov: 0.1
+      opticalflow:
+        max_cnt: 250
+        min_dist: 20
+        quality_level: 0.01
+        flow_back: true
+        f_threshold: 0.5
+        min_track_len_for_triangulation: 3
+        track_history_size: 20
+        feature_image_topic: "/fast_livo/feature_image"
+        optical_flow_points_topic: "/fast_livo/optical_flow_points"
+        triangulated_points_topic: "/fast_livo/triangulated_points"
 
     imu:
       imu_en: true

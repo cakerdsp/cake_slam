@@ -16,6 +16,8 @@ using namespace Eigen;
 VIOManager::VIOManager()
 {
   // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
+  optical_flow_points.reset(new PointCloudXYZI());
+  optical_flow_triangulated_points.reset(new PointCloudXYZI());
 }
 
 VIOManager::~VIOManager()
@@ -1782,6 +1784,369 @@ void VIOManager::dumpDataForColmap()
             << cnt_str << ".png" << std::endl;
   fout_colmap << "0.0 0.0 -1" << std::endl;
   cnt++;
+}
+
+bool VIOManager::inOpticalFlowBorder(const cv::Point2f &pt) const
+{
+  const int img_x = cvRound(pt.x);
+  const int img_y = cvRound(pt.y);
+  const int border_size = 1;
+  return border_size <= img_x && img_x < width - border_size && border_size <= img_y && img_y < height - border_size;
+}
+
+V3D VIOManager::getOpticalFlowBearing(const cv::Point2f &px) const
+{
+  V3D bearing = cam->cam2world(px.x, px.y);
+  if (bearing.norm() > 1e-12) bearing.normalize();
+  return bearing;
+}
+
+void VIOManager::setOpticalFlowMask(cv::Mat &mask)
+{
+  mask = cv::Mat(height, width, CV_8UC1, cv::Scalar(255));
+
+  std::vector<std::tuple<int, cv::Point2f, int>> cnt_pts_id;
+  cnt_pts_id.reserve(optical_flow_cur_pts.size());
+  for (size_t i = 0; i < optical_flow_cur_pts.size(); i++)
+  {
+    cnt_pts_id.emplace_back(optical_flow_track_cnt[i], optical_flow_cur_pts[i], optical_flow_ids[i]);
+  }
+
+  std::sort(cnt_pts_id.begin(), cnt_pts_id.end(),
+            [](const std::tuple<int, cv::Point2f, int> &a, const std::tuple<int, cv::Point2f, int> &b) {
+              return std::get<0>(a) > std::get<0>(b);
+            });
+
+  optical_flow_cur_pts.clear();
+  optical_flow_ids.clear();
+  optical_flow_track_cnt.clear();
+
+  for (const auto &it : cnt_pts_id)
+  {
+    const cv::Point2f &pt = std::get<1>(it);
+    const int x = cvRound(pt.x);
+    const int y = cvRound(pt.y);
+    if (x < 0 || x >= width || y < 0 || y >= height) continue;
+    if (mask.at<uchar>(y, x) == 255)
+    {
+      optical_flow_track_cnt.push_back(std::get<0>(it));
+      optical_flow_cur_pts.push_back(pt);
+      optical_flow_ids.push_back(std::get<2>(it));
+      cv::circle(mask, cv::Point(x, y), optical_flow_min_dist, 0, -1);
+    }
+  }
+}
+
+void VIOManager::addOpticalFlowObservation(OpticalFlowTrack &track, const cv::Point2f &px, double img_time)
+{
+  OpticalFlowObservation obs;
+  obs.frame_id = optical_flow_frame_id;
+  obs.timestamp = img_time;
+  obs.px = px;
+  obs.bearing = getOpticalFlowBearing(px);
+  obs.T_f_w = new_frame_->T_f_w_;
+  track.observations.push_back(obs);
+
+  track.history.push_back(px);
+  while (static_cast<int>(track.history.size()) > optical_flow_track_history_size) track.history.pop_front();
+}
+
+bool VIOManager::triangulateOpticalFlowTrack(OpticalFlowTrack &track)
+{
+  const int obs_num = static_cast<int>(track.observations.size());
+  if (obs_num < optical_flow_min_track_len_for_triangulation) return false;
+
+  Eigen::MatrixXd A(obs_num * 2, 4);
+  for (int i = 0; i < obs_num; i++)
+  {
+    const OpticalFlowObservation &obs = track.observations[i];
+    Eigen::Matrix<double, 3, 4> pose;
+    pose.block<3, 3>(0, 0) = obs.T_f_w.rotationMatrix();
+    pose.block<3, 1>(0, 3) = obs.T_f_w.translation();
+    const V3D &f = obs.bearing;
+    A.row(i * 2) = f[0] * pose.row(2) - f[2] * pose.row(0);
+    A.row(i * 2 + 1) = f[1] * pose.row(2) - f[2] * pose.row(1);
+  }
+
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd(A, Eigen::ComputeFullV);
+  Eigen::Vector4d point_h = svd.matrixV().col(3);
+  if (std::fabs(point_h[3]) < 1e-8) return false;
+
+  V3D point_w = point_h.head<3>() / point_h[3];
+  if (!point_w.array().isFinite().all()) return false;
+
+  for (const auto &obs : track.observations)
+  {
+    V3D point_c = obs.T_f_w * point_w;
+    if (point_c[2] <= 0.05 || !point_c.array().isFinite().all()) return false;
+  }
+
+  track.point_w = point_w;
+  track.triangulated = true;
+  track.rejected = false;
+  return true;
+}
+
+void VIOManager::updateOpticalFlowPointClouds()
+{
+  optical_flow_points->clear();
+  optical_flow_triangulated_points->clear();
+
+  if (new_frame_ != nullptr)
+  {
+    SE3<double> T_w_f = new_frame_->T_f_w_.inverse();
+    optical_flow_points->reserve(optical_flow_cur_pts.size());
+    for (size_t i = 0; i < optical_flow_cur_pts.size(); i++)
+    {
+      V3D bearing = getOpticalFlowBearing(optical_flow_cur_pts[i]);
+      if (!bearing.array().isFinite().all() || bearing.norm() < 1e-12) continue;
+      V3D point_w = T_w_f * bearing;
+      PointType point;
+      point.x = point_w[0];
+      point.y = point_w[1];
+      point.z = point_w[2];
+      point.intensity = static_cast<float>(optical_flow_track_cnt[i]);
+      point.normal_x = point.normal_y = point.normal_z = 0.0f;
+      point.curvature = static_cast<float>(optical_flow_ids[i]);
+      optical_flow_points->push_back(point);
+    }
+  }
+
+  for (const auto &track_item : optical_flow_tracks)
+  {
+    const OpticalFlowTrack &track = track_item.second;
+    if (!track.triangulated) continue;
+    PointType point;
+    point.x = track.point_w[0];
+    point.y = track.point_w[1];
+    point.z = track.point_w[2];
+    point.intensity = static_cast<float>(track.id);
+    point.normal_x = point.normal_y = point.normal_z = 0.0f;
+    point.curvature = static_cast<float>(track.observations.size());
+    optical_flow_triangulated_points->push_back(point);
+  }
+}
+
+void VIOManager::drawOpticalFlowDebugImage(const std::vector<cv::Point2f> &rejected_pts, int prev, int tracked, int flow_back_pass,
+                                           int border_pass, int mask_reject, int new_points, int final_points, int triangulated)
+{
+  if (img_rgb.empty()) return;
+  if (img_rgb.channels() == 3)
+  {
+    optical_flow_debug_img = img_rgb.clone();
+  }
+  else
+  {
+    cv::cvtColor(img_rgb, optical_flow_debug_img, CV_GRAY2BGR);
+  }
+
+  for (const auto &pt : rejected_pts)
+  {
+    if (!inOpticalFlowBorder(pt)) continue;
+    cv::drawMarker(optical_flow_debug_img, pt, cv::Scalar(0, 0, 255), cv::MARKER_TILTED_CROSS, 12, 2);
+  }
+
+  for (size_t i = 0; i < optical_flow_cur_pts.size(); i++)
+  {
+    const int id = optical_flow_ids[i];
+    const int age = optical_flow_track_cnt[i];
+    const auto track_it = optical_flow_tracks.find(id);
+    const double ratio = std::min(1.0, static_cast<double>(age) / 20.0);
+    cv::Scalar age_color(255.0 * (1.0 - ratio), 255.0 * ratio, 80.0 + 120.0 * (1.0 - ratio));
+
+    if (track_it != optical_flow_tracks.end())
+    {
+      const OpticalFlowTrack &track = track_it->second;
+      for (size_t j = 1; j < track.history.size(); j++)
+      {
+        cv::line(optical_flow_debug_img, track.history[j - 1], track.history[j], age_color, 2, cv::LINE_AA);
+      }
+      if (track.rejected && !track.triangulated)
+      {
+        cv::circle(optical_flow_debug_img, optical_flow_cur_pts[i], 6, cv::Scalar(0, 0, 255), 3, cv::LINE_AA);
+      }
+    }
+
+    if (age <= 1)
+    {
+      cv::circle(optical_flow_debug_img, optical_flow_cur_pts[i], 4, cv::Scalar(0, 255, 255), -1, cv::LINE_AA);
+      cv::circle(optical_flow_debug_img, optical_flow_cur_pts[i], 6, cv::Scalar(0, 80, 80), 2, cv::LINE_AA);
+    }
+    else
+    {
+      cv::circle(optical_flow_debug_img, optical_flow_cur_pts[i], 4, age_color, -1, cv::LINE_AA);
+      cv::circle(optical_flow_debug_img, optical_flow_cur_pts[i], 6, age_color, 2, cv::LINE_AA);
+    }
+  }
+
+  char text[256];
+  snprintf(text, sizeof(text), "prev %d tracked %d fb %d border %d mask_rej %d new %d final %d tri %d",
+           prev, tracked, flow_back_pass, border_pass, mask_reject, new_points, final_points, triangulated);
+  cv::putText(optical_flow_debug_img, text, cv::Point(12, 28), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 0, 0), 4, cv::LINE_AA);
+  cv::putText(optical_flow_debug_img, text, cv::Point(12, 28), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+}
+
+void VIOManager::processFrameOpticalFlow(cv::Mat &img, double img_time)
+{
+  if (width != img.cols || height != img.rows)
+  {
+    if (img.empty()) printf("[ OpticalFlow ] Empty Image!\n");
+    cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
+  }
+
+  img_rgb = img.clone();
+  img_cp = img.clone();
+
+  cv::Mat cur_img;
+  if (img.channels() == 3)
+  {
+    cv::cvtColor(img, cur_img, CV_BGR2GRAY);
+  }
+  else
+  {
+    cur_img = img.clone();
+  }
+
+  new_frame_.reset(new Frame(cam, cur_img));
+  updateFrameState(*state);
+
+  const int prev = static_cast<int>(optical_flow_prev_pts.size());
+  int tracked = 0;
+  int flow_back_pass = 0;
+  int border_pass = 0;
+  int mask_reject = 0;
+  int new_points = 0;
+  int new_triangulated = 0;
+  int triangulation_reject = 0;
+  std::vector<cv::Point2f> rejected_pts;
+
+  std::vector<cv::Point2f> prev_pts = optical_flow_prev_pts;
+  std::vector<int> prev_ids = optical_flow_ids;
+  std::vector<int> prev_track_cnt = optical_flow_track_cnt;
+
+  optical_flow_cur_pts.clear();
+  optical_flow_ids.clear();
+  optical_flow_track_cnt.clear();
+
+  if (!optical_flow_prev_img.empty() && !prev_pts.empty())
+  {
+    std::vector<uchar> status;
+    std::vector<float> err;
+    cv::calcOpticalFlowPyrLK(optical_flow_prev_img, cur_img, prev_pts, optical_flow_cur_pts, status, err, cv::Size(21, 21), 3);
+
+    tracked = static_cast<int>(std::count(status.begin(), status.end(), static_cast<uchar>(1)));
+
+    if (optical_flow_flow_back)
+    {
+      std::vector<uchar> reverse_status;
+      std::vector<cv::Point2f> reverse_pts = prev_pts;
+      cv::calcOpticalFlowPyrLK(cur_img, optical_flow_prev_img, optical_flow_cur_pts, reverse_pts, reverse_status, err, cv::Size(21, 21), 1,
+                               cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01), cv::OPTFLOW_USE_INITIAL_FLOW);
+      for (size_t i = 0; i < status.size(); i++)
+      {
+        const double dx = prev_pts[i].x - reverse_pts[i].x;
+        const double dy = prev_pts[i].y - reverse_pts[i].y;
+        const double fb_dist = std::sqrt(dx * dx + dy * dy);
+        if (!(status[i] && reverse_status[i] && fb_dist <= optical_flow_f_threshold))
+        {
+          if (i < optical_flow_cur_pts.size()) rejected_pts.push_back(optical_flow_cur_pts[i]);
+          status[i] = 0;
+        }
+      }
+    }
+
+    flow_back_pass = static_cast<int>(std::count(status.begin(), status.end(), static_cast<uchar>(1)));
+
+    for (size_t i = 0; i < optical_flow_cur_pts.size(); i++)
+    {
+      if (status[i] && !inOpticalFlowBorder(optical_flow_cur_pts[i]))
+      {
+        rejected_pts.push_back(optical_flow_cur_pts[i]);
+        status[i] = 0;
+      }
+    }
+
+    border_pass = static_cast<int>(std::count(status.begin(), status.end(), static_cast<uchar>(1)));
+
+    auto reduce_by_status = [](auto &data, const std::vector<uchar> &status_vec) {
+      int j = 0;
+      for (int i = 0; i < static_cast<int>(data.size()); i++)
+      {
+        if (status_vec[i]) data[j++] = data[i];
+      }
+      data.resize(j);
+    };
+
+    optical_flow_ids = prev_ids;
+    optical_flow_track_cnt = prev_track_cnt;
+    reduce_by_status(prev_pts, status);
+    reduce_by_status(optical_flow_cur_pts, status);
+    reduce_by_status(optical_flow_ids, status);
+    reduce_by_status(optical_flow_track_cnt, status);
+  }
+
+  for (auto &track_count : optical_flow_track_cnt) track_count++;
+
+  cv::Mat mask;
+  const int before_mask = static_cast<int>(optical_flow_cur_pts.size());
+  setOpticalFlowMask(mask);
+  mask_reject = before_mask - static_cast<int>(optical_flow_cur_pts.size());
+
+  const int need_new_points = optical_flow_max_cnt - static_cast<int>(optical_flow_cur_pts.size());
+  std::vector<cv::Point2f> n_pts;
+  if (need_new_points > 0)
+  {
+    cv::goodFeaturesToTrack(cur_img, n_pts, need_new_points, optical_flow_quality_level, optical_flow_min_dist, mask);
+  }
+
+  new_points = static_cast<int>(n_pts.size());
+  for (const auto &pt : n_pts)
+  {
+    optical_flow_cur_pts.push_back(pt);
+    optical_flow_ids.push_back(optical_flow_next_id++);
+    optical_flow_track_cnt.push_back(1);
+  }
+
+  for (size_t i = 0; i < optical_flow_cur_pts.size(); i++)
+  {
+    const int id = optical_flow_ids[i];
+    OpticalFlowTrack &track = optical_flow_tracks[id];
+    if (track.id < 0) track.id = id;
+    track.age = optical_flow_track_cnt[i];
+    addOpticalFlowObservation(track, optical_flow_cur_pts[i], img_time);
+
+    if (!track.triangulated && static_cast<int>(track.observations.size()) >= optical_flow_min_track_len_for_triangulation)
+    {
+      if (triangulateOpticalFlowTrack(track))
+      {
+        new_triangulated++;
+      }
+      else
+      {
+        track.rejected = true;
+        triangulation_reject++;
+      }
+    }
+  }
+
+  updateOpticalFlowPointClouds();
+  drawOpticalFlowDebugImage(rejected_pts, prev, tracked, flow_back_pass, border_pass, mask_reject, new_points,
+                            static_cast<int>(optical_flow_cur_pts.size()), static_cast<int>(optical_flow_triangulated_points->size()));
+
+  printf(BOLDWHITE "[ OpticalFlow ] stamp=%.6f " BOLDBLUE "prev=%d " BOLDGREEN "tracked=%d "
+         BOLDCYAN "flow_back_pass=%d " BOLDMAGENTA "border_pass=%d " BOLDYELLOW "mask_reject=%d "
+         BOLDREDPURPLE "new_points=%d " BOLDWHITE "final=%zu " BOLDGREEN "triangulated=%zu "
+         BOLDCYAN "new_tri=%d " BOLDRED "rejected/outlier={lk=%d flow_back=%d border=%d triangulation=%d}\n" RESET,
+         img_time, prev, tracked, flow_back_pass, border_pass, mask_reject, new_points, optical_flow_cur_pts.size(),
+         optical_flow_triangulated_points->size(), new_triangulated, prev - tracked, tracked - flow_back_pass,
+         flow_back_pass - border_pass, triangulation_reject);
+
+  // TODO: build optical-flow reprojection residuals and feed them into the IESKF update.
+
+  optical_flow_prev_img = cur_img.clone();
+  optical_flow_prev_pts = optical_flow_cur_pts;
+  optical_flow_prev_time = img_time;
+  optical_flow_frame_id++;
 }
 
 void VIOManager::processFrameFake(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time) 
