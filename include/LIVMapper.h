@@ -57,7 +57,7 @@ public:
   void img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in);
   void publish_img_rgb(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager);
   void publish_optical_flow_image(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager);
-  void publish_optical_flow_points(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubCloud,
+  void publish_triangulated_points(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubCloud,
                                    const PointCloudXYZI::Ptr &cloud);
   void publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubLaserCloudFullRes, VIOManagerPtr vio_manager);
   void publish_visual_sub_map(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubSubVisualMap);
@@ -131,7 +131,6 @@ public:
   double optical_flow_f_threshold = 0.5;
   bool optical_flow_flow_back = true;
   std::string optical_flow_feature_image_topic = "/fast_livo/feature_image";
-  std::string optical_flow_points_topic = "/fast_livo/optical_flow_points";
   std::string optical_flow_triangulated_points_topic = "/fast_livo/triangulated_points";
   int outlier_threshold;
   double plot_time;
@@ -195,7 +194,6 @@ public:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudDynDbg;
   image_transport::Publisher pubImage;
   image_transport::Publisher pubOpticalFlowImage;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubOpticalFlowPoints;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubTriangulatedPoints;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr mavros_pose_publisher;
   rclcpp::TimerBase::SharedPtr imu_prop_timer;

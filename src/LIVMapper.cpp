@@ -95,7 +95,6 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<double>("vio.opticalflow.f_threshold", 0.5);
   try_declare.template operator()<bool>("vio.opticalflow.flow_back", true);
   try_declare.template operator()<std::string>("vio.opticalflow.feature_image_topic", "/fast_livo/feature_image");
-  try_declare.template operator()<std::string>("vio.opticalflow.optical_flow_points_topic", "/fast_livo/optical_flow_points");
   try_declare.template operator()<std::string>("vio.opticalflow.triangulated_points_topic", "/fast_livo/triangulated_points");
   try_declare.template operator()<double>("time_offset.exposure_time_init", 0.0);
   try_declare.template operator()<double>("time_offset.img_time_offset", 0.0);
@@ -164,7 +163,6 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.opticalflow.f_threshold", optical_flow_f_threshold);
   this->node->get_parameter("vio.opticalflow.flow_back", optical_flow_flow_back);
   this->node->get_parameter("vio.opticalflow.feature_image_topic", optical_flow_feature_image_topic);
-  this->node->get_parameter("vio.opticalflow.optical_flow_points_topic", optical_flow_points_topic);
   this->node->get_parameter("vio.opticalflow.triangulated_points_topic", optical_flow_triangulated_points_topic);
   this->node->get_parameter("time_offset.exposure_time_init", exposure_time_init);
   this->node->get_parameter("time_offset.img_time_offset", img_time_offset);
@@ -319,7 +317,6 @@ void LIVMapper::initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &node
   mavros_pose_publisher = this->node->create_publisher<geometry_msgs::msg::PoseStamped>("/mavros/vision_pose/pose", 10);
   pubImage = it.advertise("/rgb_img", 1);
   pubOpticalFlowImage = it.advertise(optical_flow_feature_image_topic, 1);
-  pubOpticalFlowPoints = this->node->create_publisher<sensor_msgs::msg::PointCloud2>(optical_flow_points_topic, 10);
   pubTriangulatedPoints = this->node->create_publisher<sensor_msgs::msg::PointCloud2>(optical_flow_triangulated_points_topic, 10);
   pubImuPropOdom = this->node->create_publisher<nav_msgs::msg::Odometry>("/LIVO2/imu_propagate", 10000);
   imu_prop_timer = this->node->create_wall_timer(0.004s, std::bind(&LIVMapper::imu_prop_callback, this));
@@ -464,8 +461,7 @@ void LIVMapper::handleVIO()
   if (current_frontend_mode == 1)
   {
     publish_optical_flow_image(pubOpticalFlowImage, vio_manager);
-    publish_optical_flow_points(pubOpticalFlowPoints, vio_manager->optical_flow_points);
-    publish_optical_flow_points(pubTriangulatedPoints, vio_manager->optical_flow_triangulated_points);
+    publish_triangulated_points(pubTriangulatedPoints, vio_manager->optical_flow_triangulated_points);
   }
 
   euler_cur = RotMtoEuler(_state.rot_end);
@@ -1270,7 +1266,7 @@ void LIVMapper::publish_optical_flow_image(const image_transport::Publisher &pub
   pubImage.publish(out_msg.toImageMsg());
 }
 
-void LIVMapper::publish_optical_flow_points(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubCloud,
+void LIVMapper::publish_triangulated_points(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubCloud,
                                             const PointCloudXYZI::Ptr &cloud)
 {
   if (pubCloud == nullptr || cloud == nullptr || cloud->empty()) return;

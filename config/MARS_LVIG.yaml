@@ -75,7 +75,6 @@
         min_track_len_for_triangulation: 3
         track_history_size: 20
         feature_image_topic: "/fast_livo/feature_image"
-        optical_flow_points_topic: "/fast_livo/optical_flow_points"
         triangulated_points_topic: "/fast_livo/triangulated_points"
 
     imu:

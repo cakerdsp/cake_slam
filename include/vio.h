@@ -179,7 +179,6 @@ public:
   std::vector<int> optical_flow_ids;
   std::vector<int> optical_flow_track_cnt;
   std::map<int, OpticalFlowTrack> optical_flow_tracks;
-  PointCloudXYZI::Ptr optical_flow_points;
   PointCloudXYZI::Ptr optical_flow_triangulated_points;
 
   enum CellType

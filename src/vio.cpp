@@ -16,7 +16,6 @@ using namespace Eigen;
 VIOManager::VIOManager()
 {
   // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
-  optical_flow_points.reset(new PointCloudXYZI());
   optical_flow_triangulated_points.reset(new PointCloudXYZI());
 }
 
@@ -1889,32 +1888,14 @@ bool VIOManager::triangulateOpticalFlowTrack(OpticalFlowTrack &track)
 
 void VIOManager::updateOpticalFlowPointClouds()
 {
-  optical_flow_points->clear();
   optical_flow_triangulated_points->clear();
 
-  if (new_frame_ != nullptr)
+  optical_flow_triangulated_points->reserve(optical_flow_cur_pts.size());
+  for (const int id : optical_flow_ids)
   {
-    SE3<double> T_w_f = new_frame_->T_f_w_.inverse();
-    optical_flow_points->reserve(optical_flow_cur_pts.size());
-    for (size_t i = 0; i < optical_flow_cur_pts.size(); i++)
-    {
-      V3D bearing = getOpticalFlowBearing(optical_flow_cur_pts[i]);
-      if (!bearing.array().isFinite().all() || bearing.norm() < 1e-12) continue;
-      V3D point_w = T_w_f * bearing;
-      PointType point;
-      point.x = point_w[0];
-      point.y = point_w[1];
-      point.z = point_w[2];
-      point.intensity = static_cast<float>(optical_flow_track_cnt[i]);
-      point.normal_x = point.normal_y = point.normal_z = 0.0f;
-      point.curvature = static_cast<float>(optical_flow_ids[i]);
-      optical_flow_points->push_back(point);
-    }
-  }
-
-  for (const auto &track_item : optical_flow_tracks)
-  {
-    const OpticalFlowTrack &track = track_item.second;
+    const auto track_item = optical_flow_tracks.find(id);
+    if (track_item == optical_flow_tracks.end()) continue;
+    const OpticalFlowTrack &track = track_item->second;
     if (!track.triangulated) continue;
     PointType point;
     point.x = track.point_w[0];
@@ -2130,15 +2111,20 @@ void VIOManager::processFrameOpticalFlow(cv::Mat &img, double img_time)
   }
 
   updateOpticalFlowPointClouds();
+  int total_triangulated = 0;
+  for (const auto &track_item : optical_flow_tracks)
+  {
+    if (track_item.second.triangulated) total_triangulated++;
+  }
   drawOpticalFlowDebugImage(rejected_pts, prev, tracked, flow_back_pass, border_pass, mask_reject, new_points,
                             static_cast<int>(optical_flow_cur_pts.size()), static_cast<int>(optical_flow_triangulated_points->size()));
 
   printf(BOLDWHITE "[ OpticalFlow ] stamp=%.6f " BOLDBLUE "prev=%d " BOLDGREEN "tracked=%d "
          BOLDCYAN "flow_back_pass=%d " BOLDMAGENTA "border_pass=%d " BOLDYELLOW "mask_reject=%d "
-         BOLDREDPURPLE "new_points=%d " BOLDWHITE "final=%zu " BOLDGREEN "triangulated=%zu "
-         BOLDCYAN "new_tri=%d " BOLDRED "rejected/outlier={lk=%d flow_back=%d border=%d triangulation=%d}\n" RESET,
+         BOLDREDPURPLE "new_points=%d " BOLDWHITE "final=%zu " BOLDGREEN "triangulated_current=%zu "
+         BOLDCYAN "triangulated_total=%d new_tri=%d " BOLDRED "rejected/outlier={lk=%d flow_back=%d border=%d triangulation=%d}\n" RESET,
          img_time, prev, tracked, flow_back_pass, border_pass, mask_reject, new_points, optical_flow_cur_pts.size(),
-         optical_flow_triangulated_points->size(), new_triangulated, prev - tracked, tracked - flow_back_pass,
+         optical_flow_triangulated_points->size(), total_triangulated, new_triangulated, prev - tracked, tracked - flow_back_pass,
          flow_back_pass - border_pass, triangulation_reject);
 
   // TODO: build optical-flow reprojection residuals and feed them into the IESKF update.
