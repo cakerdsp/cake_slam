@@ -932,20 +932,32 @@ void SlamNode::handleVIO()
       }
 
       if (accept_vio_feedback) {
+        const Eigen::Vector3d feedback_dp = vio_state.pos_end - lio_state_before_vio.pos_end;
+        const Eigen::Vector3d feedback_dv = vio_state.vel_end - lio_state_before_vio.vel_end;
+        const Eigen::Vector3d feedback_dba = vio_state.bias_a - lio_state_before_vio.bias_a;
+        const Eigen::Vector3d feedback_dbg = vio_state.bias_g - lio_state_before_vio.bias_g;
+        const Eigen::Vector3d feedback_dg = vio_state.gravity - lio_state_before_vio.gravity;
+        std::printf("VIO FEEDBACK STATE DELTA stamp=%.6f dpos=(% .6f % .6f % .6f) dvel=(% .6f % .6f % .6f) dba=(% .6f % .6f % .6f) dbg=(% .6f % .6f % .6f) dgravity=(% .6f % .6f % .6f) lio_vel=(% .6f % .6f % .6f) vio_vel=(% .6f % .6f % .6f)\n",
+                    measure.vio_time,
+                    feedback_dp.x(), feedback_dp.y(), feedback_dp.z(),
+                    feedback_dv.x(), feedback_dv.y(), feedback_dv.z(),
+                    feedback_dba.x(), feedback_dba.y(), feedback_dba.z(),
+                    feedback_dbg.x(), feedback_dbg.y(), feedback_dbg.z(),
+                    feedback_dg.x(), feedback_dg.y(), feedback_dg.z(),
+                    lio_state_before_vio.vel_end.x(), lio_state_before_vio.vel_end.y(), lio_state_before_vio.vel_end.z(),
+                    vio_state.vel_end.x(), vio_state.vel_end.y(), vio_state.vel_end.z());
         const double fused_z_before = state_.pos_end.z();
+        state_ = vio_state;
         if (use_lidar_) {
-          state_ = lio_state_before_vio;
-          state_.rot_end = vio_state.rot_end;
-          state_.pos_end = vio_state.pos_end;
+          state_.gravity = lio_state_before_vio.gravity;
+          state_.inv_expo_time = lio_state_before_vio.inv_expo_time;
+          state_.cov = lio_state_before_vio.cov;
           lio_.SetState(state_);
           state_last_written_by_vio_feedback_ = true;
           last_vio_feedback_write_time_ = measure.vio_time;
-        } else {
-          state_ = vio_state;
         }
-        std::printf("VIO FEEDBACK APPLY stamp=%.6f write_lio=%d pose_only=%d keep_lio_cov=%d z_before=% .6f z_after=% .6f dz_write=% .6f visual_residuals=%d opt_features=%d opt_lidar=%d\n",
+        std::printf("VIO FEEDBACK APPLY stamp=%.6f write_lio=%d keep_lio_cov=%d z_before=% .6f z_after=% .6f dz_write=% .6f visual_residuals=%d opt_features=%d opt_lidar=%d\n",
                     measure.vio_time,
-                    use_lidar_ ? 1 : 0,
                     use_lidar_ ? 1 : 0,
                     use_lidar_ ? 1 : 0,
                     fused_z_before,
