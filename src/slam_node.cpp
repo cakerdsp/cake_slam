@@ -935,6 +935,8 @@ void SlamNode::handleVIO()
         const double fused_z_before = state_.pos_end.z();
         state_ = vio_state;
         if (use_lidar_) {
+          state_.gravity = lio_state_before_vio.gravity;
+          state_.inv_expo_time = lio_state_before_vio.inv_expo_time;
           state_.cov = lio_state_before_vio.cov;
           lio_.SetState(state_);
           state_last_written_by_vio_feedback_ = true;
