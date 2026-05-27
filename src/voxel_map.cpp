@@ -10,15 +10,8 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
-// 模块功能：体素地图与平面匹配实现，
-// 用于局部地图维护与残差构建。
-
-#include "cake_slam/voxel_map.h"
-namespace {
-int voxel_plane_id = 0;
-} // namespace
-
-// 根据量测距离误差和角度误差，把激光点的原始测量不确定性传播成 3x3 空间协方差。
+#include "voxel_map.h"
+using namespace Eigen;
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov)
 {
   if (pb[2] == 0) pb[2] = 0.0001;
@@ -40,13 +33,56 @@ void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_
   cov = direction * range_var * direction.transpose() + A * direction_var * A.transpose();
 }
 
+void loadVoxelConfig(rclcpp::Node::SharedPtr &node, VoxelMapConfig &voxel_config)
+{
+  auto try_declare = [node]<typename ParameterT>(const std::string & name,
+    const ParameterT & default_value)
+  {
+    if (!node->has_parameter(name))
+    {
+      return node->declare_parameter<ParameterT>(name, default_value);
+    }
+    else
+    {
+      return node->get_parameter(name).get_value<ParameterT>();
+    }
+  };
+
+  // declare parameter
+  try_declare.template operator()<bool>("publish.pub_plane_en", false);
+  try_declare.template operator()<int>("lio.max_layer", 1);
+  try_declare.template operator()<double>("lio.voxel_size", 0.5);
+  try_declare.template operator()<double>("lio.min_eigen_value", 0.01);
+  try_declare.template operator()<double>("lio.sigma_num", 3);
+  try_declare.template operator()<double>("lio.beam_err", 0.02);
+  try_declare.template operator()<double>("lio.dept_err", 0.05);
+
+  // Declaration of parameter of type std::vector<int> won't build, https://github.com/ros2/rclcpp/issues/1585  
+  try_declare.template operator()<vector<int64_t>>("lio.layer_init_num", std::vector<int64_t>{5,5,5,5,5}); 
+  try_declare.template operator()<int>("lio.max_points_num", 50);
+  try_declare.template operator()<int>("lio.min_iterations", 5);
+  try_declare.template operator()<bool>("local_map.map_sliding_en", false);
+  try_declare.template operator()<int>("local_map.half_map_size", 100);
+  try_declare.template operator()<double>("local_map.sliding_thresh", 8.0);
+
+  // get parameter
+  node->get_parameter("publish.pub_plane_en", voxel_config.is_pub_plane_map_);
+  node->get_parameter("lio.max_layer", voxel_config.max_layer_);
+  node->get_parameter("lio.voxel_size", voxel_config.max_voxel_size_);
+  node->get_parameter("lio.min_eigen_value", voxel_config.planner_threshold_);
+  node->get_parameter("lio.sigma_num", voxel_config.sigma_num_);
+  node->get_parameter("lio.beam_err", voxel_config.beam_err_);
+  node->get_parameter("lio.dept_err", voxel_config.dept_err_);
+  node->get_parameter("lio.layer_init_num", voxel_config.layer_init_num_);
+  node->get_parameter("lio.max_points_num", voxel_config.max_points_num_);
+  node->get_parameter("lio.min_iterations", voxel_config.max_iterations_);
+  node->get_parameter("local_map.map_sliding_en", voxel_config.map_sliding_en);
+  node->get_parameter("local_map.half_map_size", voxel_config.half_map_size);
+  node->get_parameter("local_map.sliding_thresh", voxel_config.sliding_thresh);
+}
+
 void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane)
 {
-  // 平面初始化步骤：
-  // 1. 统计点云质心和协方差；
-  // 2. 做特征值分解；
-  // 3. 若最小特征值足够小，则认为点集近似共面；
-  // 4. 进一步传播平面参数不确定性。
   plane->plane_var_ = Eigen::Matrix<double, 6, 6>::Zero();
   plane->covariance_ = Eigen::Matrix3d::Zero();
   plane->center_ = Eigen::Vector3d::Zero();
@@ -129,8 +165,6 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
 
 void VoxelOctoTree::init_octo_tree()
 {
-  // 如果当前节点点数足够多，则尝试直接拟合平面；
-  // 拟合失败再继续细分为更小的体素。
   if (temp_points_.size() > points_size_threshold_)
   {
     init_plane(temp_points_, plane_ptr_);
@@ -157,7 +191,6 @@ void VoxelOctoTree::init_octo_tree()
 
 void VoxelOctoTree::cut_octo_tree()
 {
-  // 八叉树细分：按点相对体素中心的符号落入 8 个子节点。
   if (layer_ >= max_layer_)
   {
     octo_state_ = 0;
@@ -214,8 +247,6 @@ void VoxelOctoTree::cut_octo_tree()
 
 void VoxelOctoTree::UpdateOctoTree(const pointWithVar &pv)
 {
-  // 已初始化的节点优先尝试原地更新；
-  // 若当前节点不是稳定平面，则继续把点分发到更细层级。
   if (!init_octo_)
   {
     new_points_++;
@@ -289,7 +320,6 @@ void VoxelOctoTree::UpdateOctoTree(const pointWithVar &pv)
 
 VoxelOctoTree *VoxelOctoTree::find_correspond(Eigen::Vector3d pw)
 {
-  // 递归查找世界点 pw 所对应的最细可用节点。
   if (!init_octo_ || plane_ptr_->is_plane_ || (layer_ >= max_layer_)) return this;
 
   int xyz[3] = {0, 0, 0};
@@ -305,7 +335,6 @@ VoxelOctoTree *VoxelOctoTree::find_correspond(Eigen::Vector3d pw)
 
 VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
 {
-  // 插入点并返回最终落入的节点，便于上层构造残差时复用搜索结果。
   if ((!init_octo_) || (init_octo_ && plane_ptr_->is_plane_) || (init_octo_ && (!plane_ptr_->is_plane_) && (layer_ >= max_layer_)))
   {
     new_points_++;
@@ -337,11 +366,6 @@ VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
 
 void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
-  // 这是 LIO 后端的核心：
-  // 1. 基于当前预测状态把点云投到地图中；
-  // 2. 构造点到面的残差；
-  // 3. 迭代更新误差状态；
-  // 4. 得到当前帧优化后的状态。
   cross_mat_list_.clear();
   cross_mat_list_.reserve(feats_down_size_);
   body_cov_list_.clear();
@@ -377,7 +401,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   for (int iterCount = 0; iterCount < config_setting_.max_iterations_; iterCount++)
   {
     double total_residual = 0.0;
-    PointCloudXYZI::Ptr world_lidar(new PointCloudXYZI);
+    pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(new pcl::PointCloud<pcl::PointXYZI>);
     TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, world_lidar);
     M3D rot_var = state_.cov.block<3, 3>(0, 0);
     M3D t_var = state_.cov.block<3, 3>(3, 3);
@@ -411,10 +435,10 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
      * ***/
-    Eigen::MatrixXd Hsub(effct_feat_num_, 6);
-    Eigen::MatrixXd Hsub_T_R_inv(6, effct_feat_num_);
-    Eigen::VectorXd R_inv(effct_feat_num_);
-    Eigen::VectorXd meas_vec(effct_feat_num_);
+    MatrixXd Hsub(effct_feat_num_, 6);
+    MatrixXd Hsub_T_R_inv(6, effct_feat_num_);
+    VectorXd R_inv(effct_feat_num_);
+    VectorXd meas_vec(effct_feat_num_);
     meas_vec.setZero();
     for (int i = 0; i < effct_feat_num_; i++)
     {
@@ -464,12 +488,12 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     EKF_stop_flg = false;
     flg_EKF_converged = false;
     /*** Iterative Kalman Filter Update ***/
-    Eigen::MatrixXd K(DIM_STATE, effct_feat_num_);
+    MatrixXd K(DIM_STATE, effct_feat_num_);
     // auto &&Hsub_T = Hsub.transpose();
     auto &&HTz = Hsub_T_R_inv * meas_vec;
     // fout_dbg<<"HTz: "<<HTz<<endl;
     H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
-    // Eigen::EigenSolver<Eigen::Matrix<double, 6, 6>> es(H_T_H.block<6, 6>(0, 0));
+    // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
     MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H.block<DIM_STATE, DIM_STATE>(0, 0) + state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).inverse()).inverse();
     G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
     auto vec = state_propagat - state_;
@@ -516,32 +540,26 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 }
 
 void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
-                      PointCloudXYZI::Ptr &trans_cloud)
+                                     pcl::PointCloud<pcl::PointXYZI>::Ptr &trans_cloud)
 {
-  // 按给定位姿把点云从机体系转换到世界系。
-  PointCloudXYZI().swap(*trans_cloud);
+  pcl::PointCloud<pcl::PointXYZI>().swap(*trans_cloud);
   trans_cloud->reserve(input_cloud->size());
   for (size_t i = 0; i < input_cloud->size(); i++)
   {
-    PointType p_c = input_cloud->points[i];
+    pcl::PointXYZINormal p_c = input_cloud->points[i];
     Eigen::Vector3d p(p_c.x, p_c.y, p_c.z);
     p = (rot * (extR_ * p + extT_) + t);
-    PointType pi;
+    pcl::PointXYZI pi;
     pi.x = p(0);
     pi.y = p(1);
     pi.z = p(2);
     pi.intensity = p_c.intensity;
-    pi.normal_x = p_c.normal_x;
-    pi.normal_y = p_c.normal_y;
-    pi.normal_z = p_c.normal_z;
-    pi.curvature = p_c.curvature;
     trans_cloud->points.push_back(pi);
   }
 }
 
 void VoxelMapManager::BuildVoxelMap()
 {
-  // 首帧建图：把当前下采样点云逐个插入体素地图。
   float voxel_size = config_setting_.max_voxel_size_;
   float planer_threshold = config_setting_.planner_threshold_;
   int max_layer = config_setting_.max_layer_;
@@ -603,7 +621,6 @@ void VoxelMapManager::BuildVoxelMap()
 
 V3F VoxelMapManager::RGBFromVoxel(const V3D &input_point)
 {
-  // 根据空间位置生成稳定伪彩，用于可视化区分不同体素。
   int64_t loc_xyz[3];
   for (int j = 0; j < 3; j++)
   {
@@ -620,7 +637,6 @@ V3F VoxelMapManager::RGBFromVoxel(const V3D &input_point)
 
 void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_points)
 {
-  // 将当前帧新观测点并入已有地图，必要时触发体素内平面更新或细分。
   float voxel_size = config_setting_.max_voxel_size_;
   float planer_threshold = config_setting_.planner_threshold_;
   int max_layer = config_setting_.max_layer_;
@@ -655,7 +671,6 @@ void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_poin
 
 void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, std::vector<PointToPlane> &ptpl_list)
 {
-  // 并行遍历所有点，为每个点在体素地图中寻找局部平面并生成残差候选。
   int max_layer = config_setting_.max_layer_;
   double voxel_size = config_setting_.max_voxel_size_;
   double sigma_num = config_setting_.sigma_num_;
@@ -725,12 +740,8 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
 }
 
 void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTree *current_octo, const int current_layer, bool &is_sucess,
-                                             double &prob, PointToPlane &single_ptpl)
+                                            double &prob, PointToPlane &single_ptpl)
 {
-  // 对单个点进行局部匹配：
-  // 1. 递归查找合适体素；
-  // 2. 检查平面有效性；
-  // 3. 计算点到平面的距离与协方差。
   int max_layer = config_setting_.max_layer_;
   double sigma_num = config_setting_.sigma_num_;
 
@@ -805,7 +816,6 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
 
 void VoxelMapManager::pubVoxelMap()
 {
-  // 收集当前地图中的有效平面并发布 MarkerArray。
   double max_trace = 0.25;
   double pow_num = 0.2;
   rclcpp::Rate loop(500);
@@ -838,7 +848,6 @@ void VoxelMapManager::pubVoxelMap()
 
 void VoxelMapManager::GetUpdatePlane(const VoxelOctoTree *current_octo, const int pub_max_voxel_layer, std::vector<VoxelPlane> &plane_list)
 {
-  // 递归收集指定层数以内、且已经更新过的平面。
   if (current_octo->layer_ > pub_max_voxel_layer) { return; }
   if (current_octo->plane_ptr_->is_update_) { plane_list.push_back(*current_octo->plane_ptr_); }
   if (current_octo->layer_ < current_octo->max_layer_)
@@ -857,7 +866,6 @@ void VoxelMapManager::GetUpdatePlane(const VoxelOctoTree *current_octo, const in
 void VoxelMapManager::pubSinglePlane(visualization_msgs::msg::MarkerArray &plane_pub, const std::string plane_ns, const VoxelPlane &single_plane,
                                      const float alpha, const Eigen::Vector3d rgb)
 {
-  // 把一个局部平面编码为可视化 Marker。
   visualization_msgs::msg::Marker plane;
   plane.header.frame_id = "camera_init";
   plane.header.stamp = rclcpp::Time();
@@ -885,7 +893,6 @@ void VoxelMapManager::pubSinglePlane(visualization_msgs::msg::MarkerArray &plane
 void VoxelMapManager::CalcVectQuation(const Eigen::Vector3d &x_vec, const Eigen::Vector3d &y_vec, const Eigen::Vector3d &z_vec,
                                       geometry_msgs::msg::Quaternion &q)
 {
-  // 由三个正交方向向量构造姿态四元数。
   Eigen::Matrix3d rot;
   rot << x_vec(0), x_vec(1), x_vec(2), y_vec(0), y_vec(1), y_vec(2), z_vec(0), z_vec(1), z_vec(2);
   Eigen::Matrix3d rotation = rot.transpose();
@@ -898,7 +905,6 @@ void VoxelMapManager::CalcVectQuation(const Eigen::Vector3d &x_vec, const Eigen:
 
 void VoxelMapManager::mapJet(double v, double vmin, double vmax, uint8_t &r, uint8_t &g, uint8_t &b)
 {
-  // 经典 Jet 伪彩映射。
   r = 255;
   g = 255;
   b = 255;
@@ -946,7 +952,6 @@ void VoxelMapManager::mapJet(double v, double vmin, double vmax, uint8_t &r, uin
 
 void VoxelMapManager::mapSliding()
 {
-  // 当平台移动超过阈值时，平移局部地图窗口并释放超界体素。
   if((position_last_ - last_slide_position).norm() < config_setting_.sliding_thresh)
   {
     std::cout<<RED<<"[DEBUG]: Last sliding length "<<(position_last_ - last_slide_position).norm()<<RESET<<"\n";
@@ -973,7 +978,6 @@ void VoxelMapManager::mapSliding()
 
 void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const int& y_max,const int& y_min,const int& z_max,const int& z_min )
 {
-  // 删除体素索引超出局部地图包围盒的节点，控制内存增长。
   int delete_voxel_cout = 0;
   // double delete_time = 0;
   // double last_delete_time = 0;

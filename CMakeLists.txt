@@ -1,179 +1,215 @@
-cmake_minimum_required(VERSION 3.8)
-project(cake_slam)
+cmake_minimum_required(VERSION 3.10)
+project(fast_livo)
+
+set(CMAKE_BUILD_TYPE "Release")
+message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
+IF("$ENV{ROS_DISTRO}" STRLESS "iron")
+  add_definitions(-DPRE_ROS_IRON)
+ENDIF()
+
+# Set common compile options
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -fexceptions")
+
+# Specific settings for Debug build
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -g")
+
+# Detect CPU architecture
+message(STATUS "Current CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+
+# Specific settings for Release build
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64|ARM|AARCH64)")
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+    # 64-bit ARM optimizations (e.g., RK3588 and Jetson Orin NX)
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -ffast-math")
+    message(STATUS "Using 64-bit ARM optimizations: -O3 -mcpu=native -mtune=native -ffast-math")
+  else()
+    # 32-bit ARM optimizations with NEON support
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
+    message(STATUS "Using 32-bit ARM optimizations: -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
+  endif()
+  add_definitions(-DARM_ARCH)
+else()
+  # x86-64 (Intel/AMD) optimizations
+  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -funroll-loops") #-flto
+  message(STATUS "Using general x86 optimizations: -O3 -march=native -mtune=native -funroll-loops") 
+  add_definitions(-DX86_ARCH)
+endif()
+
+# Define project root directory
 add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
 
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
+# Detect CPU core count for potential multithreading optimization
+include(ProcessorCount)
+ProcessorCount(N)
+message(STATUS "Processor count: ${N}")
+
+# Set the number of cores for multithreading
+if(N GREATER 4)
+  math(EXPR PROC_NUM "4")
+  add_definitions(-DMP_EN -DMP_PROC_NUM=${PROC_NUM})
+  message(STATUS "Multithreading enabled. Cores: ${PROC_NUM}")
+elseif(N GREATER 1)
+  math(EXPR PROC_NUM "${N}")
+  add_definitions(-DMP_EN -DMP_PROC_NUM=${PROC_NUM})
+  message(STATUS "Multithreading enabled. Cores: ${PROC_NUM}")
+else()
+  add_definitions(-DMP_PROC_NUM=1)
+  message(STATUS "Single core detected. Multithreading disabled.")
 endif()
 
-# 1. 查找依赖
+# Check for OpenMP support
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+  message(STATUS "OpenMP found")
+  add_compile_options(${OpenMP_CXX_FLAGS})
+else()
+  message(STATUS "OpenMP not found, proceeding without it")
+endif()
+
+# Check for mimalloc support
+find_package(mimalloc QUIET)
+if(mimalloc_FOUND)
+  message(STATUS "mimalloc found")
+else()
+  message(STATUS "mimalloc not found, proceeding without it")
+endif()
+
+# Find ament and required dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(nav_msgs REQUIRED)
+find_package(rclpy REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(std_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
-find_package(tf2 REQUIRED)
-find_package(tf2_ros REQUIRED)
-find_package(tf2_geometry_msgs REQUIRED)
-find_package(message_filters REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common io filters)
-find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
-find_package(Eigen3 REQUIRED)
-find_package(OpenCV REQUIRED)
+find_package(pcl_conversions REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(livox_ros_driver2 REQUIRED)
+find_package(vikit_common REQUIRED)
+find_package(vikit_ros REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
-find_package(camera_models REQUIRED)
-find_package(Ceres REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(PCL REQUIRED)
+find_package(OpenCV REQUIRED)
 find_package(Sophus REQUIRED)
-find_package(livox_ros_driver2 REQUIRED)
-find_package(OpenMP REQUIRED)
+find_package(Boost REQUIRED COMPONENTS thread)
 
-# 2. QHULL 补丁（防止 PCL 报错找不到目标）
-find_package(Qhull REQUIRED)
-if(NOT TARGET QHULL::QHULL)
-    add_library(QHULL::QHULL UNKNOWN IMPORTED)
-    set_target_properties(QHULL::QHULL PROPERTIES
-        INTERFACE_INCLUDE_DIRECTORIES "${QHULL_INCLUDE_DIRS}"
-        IMPORTED_LOCATION "/usr/lib/x86_64-linux-gnu/libqhull_r.so"
-    )
-endif()
-
-# 3. 包含路径
+# Include directories for dependencies
 include_directories(
-  include
-  include/cake_slam
-  include/cake_slam/utils
-  include/cake_slam/vision/estimator
-  include/cake_slam/vision/featureTracker
-  include/cake_slam/vision/factor
-  include/cake_slam/vision/initial
-  include/cake_slam/vision/utility
+  ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
-  ${CERES_INCLUDE_DIRS}
-  ${EIGEN3_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
+  ${Sophus_INCLUDE_DIRS}
+  ${vikit_common_INCLUDE_DIRS}
+  ${vikit_ros_INCLUDE_DIRS}
+  include
 )
 
-add_definitions(${PCL_DEFINITIONS})
-
-# 4. 收集源码
-file(GLOB_RECURSE VISION_SOURCES
-  src/vision/estimator/*.cpp
-  src/vision/featureTracker/*.cpp
-  src/vision/factor/*.cpp
-  src/vision/initial/*.cpp
-  src/vision/utility/*.cpp
-)
-
-set(cake_slam_SOURCES
-  src/config.cpp
-  src/imu_processor.cpp
-  src/lidar_visual_selector.cpp
-  src/lidar_preprocess.cpp
-  src/lio_core.cpp
-  src/vision/factor/lio_full_state_prior_factor.cpp
-  src/utils.cpp
-  src/voxel_map.cpp
-  ${VISION_SOURCES}
-)
-
-# 5. 构建核心库
-add_library(cake_slam_core ${cake_slam_SOURCES})
-
-# ROS2 依赖链接（底层使用 plain signature）
-ament_target_dependencies(cake_slam_core
+set(dependencies
   rclcpp
-  sensor_msgs
-  nav_msgs
+  rclpy
   geometry_msgs
-  std_msgs
+  nav_msgs
+  sensor_msgs
   visualization_msgs
-  tf2
-  tf2_ros
-  tf2_geometry_msgs
-  message_filters
-  pcl_conversions
-  pcl_ros
-  Eigen3
-  OpenCV
   cv_bridge
+  vikit_common
+  vikit_ros
   image_transport
-  camera_models
-  Ceres
-  Sophus
+  pcl_ros
+  pcl_conversions
+  tf2_ros
   livox_ros_driver2
 )
 
-# 【核心修正】：手动链接其他非 ROS2 包，全部删掉 PUBLIC/PRIVATE 关键字
-target_link_libraries(cake_slam_core
+set(COMMON_DEPENDENCIES OpenMP::OpenMP_CXX)
+
+# link_directories(${COMMON_DEPENDENCIES}
+#   ${vikit_common_LIBRARIES}/libvikit_common.so
+#   ${vikit_ros_LIBRARIES}/libvikit_ros.so
+# )
+
+# Add libraries
+add_library(vio src/vio.cpp src/frame.cpp src/visual_point.cpp)
+add_library(lio src/voxel_map.cpp)
+add_library(pre src/preprocess.cpp)
+add_library(imu_proc src/IMU_Processing.cpp)
+add_library(laser_mapping src/LIVMapper.cpp)
+add_library(utils src/utils.cpp)
+
+ament_target_dependencies(vio ${dependencies} )
+ament_target_dependencies(lio ${dependencies})
+ament_target_dependencies(pre ${dependencies})
+ament_target_dependencies(imu_proc ${dependencies})
+ament_target_dependencies(laser_mapping ${dependencies})
+
+# linking libraries or executables to public dependencies
+target_link_libraries(laser_mapping 
+    ${CMAKE_SOURCE_DIR}/../../install/vikit_common/lib/libvikit_common.so 
+    ${CMAKE_SOURCE_DIR}/../../install/vikit_ros/lib/libvikit_ros.so
+    ${COMMON_DEPENDENCIES}
+)
+target_link_libraries(vio ${COMMON_DEPENDENCIES})
+target_link_libraries(lio utils ${COMMON_DEPENDENCIES})
+target_link_libraries(pre ${COMMON_DEPENDENCIES})
+target_link_libraries(imu_proc ${COMMON_DEPENDENCIES})
+
+# Add the main executable
+add_executable(fastlivo_mapping src/main.cpp)
+
+ament_target_dependencies(fastlivo_mapping ${dependencies})
+
+# Link libraries to the executable
+target_link_libraries(fastlivo_mapping
+  laser_mapping
+  vio
+  lio
+  pre
+  imu_proc
   ${PCL_LIBRARIES}
-  ${CERES_LIBRARIES}
-  ${OpenCV_LIBS}
-  OpenMP::OpenMP_CXX
-  QHULL::QHULL
+  ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES}
+  ${Boost_LIBRARIES}
 )
 
-if(TARGET Sophus::Sophus)
-  target_link_libraries(cake_slam_core Sophus::Sophus)
+# Link mimalloc if found
+if(mimalloc_FOUND)
+  target_link_libraries(fastlivo_mapping mimalloc)
 endif()
 
-# 6. 构建节点
-add_executable(cake_slam_node src/slam_node.cpp)
-
-ament_target_dependencies(cake_slam_node
-  rclcpp
-  sensor_msgs
-  nav_msgs
-  geometry_msgs
-  tf2_ros
-  pcl_conversions
-  cv_bridge
-  livox_ros_driver2
-)
-
-target_link_libraries(cake_slam_node cake_slam_core)
-
-# 7. 安装与导出
-install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
-
+# Install the executable
 install(TARGETS
-  cake_slam_core
-  cake_slam_node
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION lib/${PROJECT_NAME}
+  fastlivo_mapping
+  DESTINATION lib/${PROJECT_NAME}
 )
 
+install(
+  DIRECTORY config launch rviz_cfg
+  DESTINATION share/${PROJECT_NAME}
+)
+
+# Export dependencies
 ament_export_dependencies(
   rclcpp
-  sensor_msgs
-  nav_msgs
+  rclpy
   geometry_msgs
-  std_msgs
-  visualization_msgs
-  tf2
-  tf2_ros
-  tf2_geometry_msgs
-  message_filters
-  PCL
-  pcl_conversions
+  nav_msgs
+  sensor_msgs
   pcl_ros
-  Eigen3
-  OpenCV
-  cv_bridge
-  image_transport
-  camera_models
-  Ceres
-  Sophus
+  pcl_conversions
+  tf2_ros
   livox_ros_driver2
+  Eigen3
+  PCL
+  OpenCV 
+  Sophus
 )
 
 ament_package()

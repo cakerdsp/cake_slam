@@ -1,13 +1,17 @@
-// 模块功能：ROS2 进程入口占位实现，
-// 保持最小化启动与退出流程。
-
-#include <rclcpp/rclcpp.hpp>
+#include "LIVMapper.h"
 
 int main(int argc, char **argv)
 {
-  // The installed node entrypoint is src/slam_node.cpp. This file is kept only as a
-  // minimal standalone lifecycle stub and is not listed in CMakeLists.txt.
   rclcpp::init(argc, argv);
+  rclcpp::NodeOptions options;
+  options.allow_undeclared_parameters(true);
+  options.automatically_declare_parameters_from_overrides(true);
+
+  rclcpp::Node::SharedPtr nh;
+  image_transport::ImageTransport it_(nh);
+  LIVMapper mapper(nh, "laserMapping", options);
+  mapper.initializeSubscribersAndPublishers(nh, it_);
+  mapper.run(nh);
   rclcpp::shutdown();
   return 0;
 }
