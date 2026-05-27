@@ -933,17 +933,19 @@ void SlamNode::handleVIO()
 
       if (accept_vio_feedback) {
         const double fused_z_before = state_.pos_end.z();
-        state_ = vio_state;
         if (use_lidar_) {
-          state_.gravity = lio_state_before_vio.gravity;
-          state_.inv_expo_time = lio_state_before_vio.inv_expo_time;
-          state_.cov = lio_state_before_vio.cov;
+          state_ = lio_state_before_vio;
+          state_.rot_end = vio_state.rot_end;
+          state_.pos_end = vio_state.pos_end;
           lio_.SetState(state_);
           state_last_written_by_vio_feedback_ = true;
           last_vio_feedback_write_time_ = measure.vio_time;
+        } else {
+          state_ = vio_state;
         }
-        std::printf("VIO FEEDBACK APPLY stamp=%.6f write_lio=%d keep_lio_cov=%d z_before=% .6f z_after=% .6f dz_write=% .6f visual_residuals=%d opt_features=%d opt_lidar=%d\n",
+        std::printf("VIO FEEDBACK APPLY stamp=%.6f write_lio=%d pose_only=%d keep_lio_cov=%d z_before=% .6f z_after=% .6f dz_write=% .6f visual_residuals=%d opt_features=%d opt_lidar=%d\n",
                     measure.vio_time,
+                    use_lidar_ ? 1 : 0,
                     use_lidar_ ? 1 : 0,
                     use_lidar_ ? 1 : 0,
                     fused_z_before,
