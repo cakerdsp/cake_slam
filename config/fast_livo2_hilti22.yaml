@@ -69,14 +69,14 @@ vision:
   # node; keep the OpenCV fisheye path on and validate equivalence from the
   # startup "fisheye model check" log.
   use_fast_fisheye_undistort: 1
-  image_process_interval: 2
+  image_process_interval: 4
   multiple_thread: 0
   max_solver_time: 0.04
   max_num_iterations: 8
   keyframe_parallax: 10.0
   estimate_extrinsic: 0
-  lidar_depth_enable: 1
-  lidar_prior_feature_enable: 1
+  lidar_depth_enable: 0
+  lidar_prior_feature_enable: 0
   optimize_lidar_inv_depth: 1
   max_lidar_features: 250
   min_lidar_depth: 0.6

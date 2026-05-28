@@ -153,7 +153,7 @@ vision:
   # LIO 位姿先验方差下限 [rad^2 或 m^2]。
   min_lio_pose_prior_var: 1.0e-15
   # LiDAR-primary mode: keep VIO diagnostics/outputs, but do not overwrite LIO state unless enabled.
-  vio_state_feedback_enable: 0
+  vio_state_feedback_enable: 1
   max_vio_feedback_pos_delta: 5.0
   max_vio_feedback_rot_delta_deg: 20.0
 

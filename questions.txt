@@ -678,3 +678,11 @@ trackImage() 里的左右目去畸变调用已改为查表路径：feature_track
 预期现象：启动或图像尺寸变化时会打印一次 FeatureTracker undistort lookup...，之后 FEATURE TRACKER DEBUG stages_ms 里的 undist 应从几百 ms 降到很小，TrackAndOptimize 会随之下降。
 我只做了静态验证：git diff --check -- src include config 通过；按你的要求没有尝试编译或运行。
 另外，日志里的 opt_features=0 / visual_residuals=0 / max_track_len=3 说明视觉残差仍然没有进入优化，这是另一个问题，但它不是这次 TrackAndOptimize=0.3s 的直接耗时来源。
+
+
+
+
+5.21 
+明天准备一下纯fastlio2 的着色，我对比一下效果。
+
+明天完善一下理论。
