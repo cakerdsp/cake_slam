@@ -695,9 +695,8 @@ void SlamNode::handleLIO()
 
   const auto t_lio_start = std::chrono::steady_clock::now();
   const double update_time = measures_.measures.back().lio_time;
-  const bool lio_input_from_vio_feedback = state_last_written_by_vio_feedback_;
-  const double lio_input_vio_feedback_dt =
-      (last_vio_feedback_write_time_ >= 0.0) ? update_time - last_vio_feedback_write_time_ : -1.0;
+  const bool lio_input_from_vio_feedback = false;
+  const double lio_input_vio_feedback_dt = -1.0;
   handleFirstFrame();
   const StatesGroup lio_input_state = state_;
   lio_.SetState(state_);
@@ -712,7 +711,6 @@ void SlamNode::handleLIO()
   if (lio_imu_initialized) {
     gravityAlignment();
   }
-  state_last_written_by_vio_feedback_ = false;
   latest_ekf_state_ = state_;
   latest_ekf_time_ = update_time;
   const auto t_lio_process_end = std::chrono::steady_clock::now();
@@ -806,7 +804,8 @@ void SlamNode::handleLIO()
             static_cast<int>(slam_mode_));
 }
 
-// 执行一次 VIO 更新并回写融合状态。
+// Run one VIO update. In LIVO mode this is feed-forward: LIO exports priors to
+// VIO, and VIO publishes its optimized state without writing back into LioCore.
 void SlamNode::handleVIO()
 {
   // Sequential update stage 2: feed IMU samples, LiDAR visual candidates, and
@@ -822,7 +821,7 @@ void SlamNode::handleVIO()
   const LioFullStatePrior lio_full_prior = use_lidar_ ? FindClosestLioState(measure.vio_time) : LioFullStatePrior();
   const bool has_lio_full_prior = lio_full_prior.valid;
   const double lio_full_prior_dt = has_lio_full_prior ? std::abs(lio_full_prior.timestamp - measure.vio_time) : -1.0;
-  const bool vio_state_feedback_enabled = !use_lidar_ || config_.vision.vio_state_feedback_enable;
+  const bool vio_feed_forward = use_lidar_;
 
   // VINS-Fusion 风格入口：先送 IMU，再送单目图像。
   // inputImage 内部会调用 featureTracker.trackImage，外部不负责提特征。
@@ -848,81 +847,37 @@ void SlamNode::handleVIO()
       const int opt_features = vio_->getLastOptimizationFeatureCount();
       const int opt_lidar_features = vio_->getLastOptimizationLidarFeatureCount();
       const int opt_visual_residuals = vio_->getLastOptimizationVisualResidualCount();
-      bool accept_vio_feedback = true;
       const StatesGroup lio_state_before_vio = state_;
       if (use_lidar_) {
-        const bool feedback_enabled = vio_state_feedback_enabled;
         const Eigen::Matrix3d dR = lio_state_before_vio.rot_end.transpose() * vio_state.rot_end;
         const double cos_angle = std::clamp((dR.trace() - 1.0) * 0.5, -1.0, 1.0);
         constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
         const double rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
         const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
         const double z_delta = vio_state.pos_end.z() - lio_state_before_vio.pos_end.z();
-        const double abs_z_delta = std::abs(z_delta);
-        const bool visual_ok =
-            opt_visual_residuals >= config_.vision.min_vio_feedback_visual_residuals;
-        const bool pos_ok = pos_delta <= config_.vision.max_vio_feedback_pos_delta;
-        const bool z_ok = abs_z_delta <= config_.vision.max_vio_feedback_z_delta;
-        const bool rot_ok = rot_delta_deg <= config_.vision.max_vio_feedback_rot_delta_deg;
-        accept_vio_feedback =
-            feedback_enabled &&
-            visual_ok &&
-            pos_ok &&
-            z_ok &&
-            rot_ok;
-        std::printf("VIO FEEDBACK DEBUG stamp=%.6f enabled=%d accept=%d pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_z=%.6f limit_rot=%.6f tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d min_visual_residuals=%d lio_z=% .6f vio_z=% .6f\n",
+        std::printf("VIO FEEDFORWARD DEBUG stamp=%.6f publish_vio=1 write_lio=0 pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d lio_z=% .6f vio_z=% .6f lio_full_prior=%d lio_full_dt=%.6f lidar_candidates=%zu\n",
                     measure.vio_time,
-                    feedback_enabled ? 1 : 0,
-                    static_cast<int>(accept_vio_feedback),
                     pos_delta,
                     z_delta,
                     rot_delta_deg,
-                    config_.vision.max_vio_feedback_pos_delta,
-                    config_.vision.max_vio_feedback_z_delta,
-                    config_.vision.max_vio_feedback_rot_delta_deg,
                     vio_->getLastTrackedFeatureCount(),
                     vio_->getLastDepthFeatureCount(),
                     opt_features,
                     opt_lidar_features,
                     opt_visual_residuals,
-                    config_.vision.min_vio_feedback_visual_residuals,
                     lio_state_before_vio.pos_end.z(),
-                    vio_state.pos_end.z());
-        std::printf("VIO FEEDBACK REASON stamp=%.6f enabled=%d visual_ok=%d pos_ok=%d z_ok=%d rot_ok=%d reject_disabled=%d reject_visual=%d reject_pos=%d reject_z=%d reject_rot=%d would_accept_without_z=%d would_accept_without_pos=%d would_accept_without_visual=%d lio_full_prior=%d lio_full_dt=%.6f lidar_candidates=%zu\n",
-                    measure.vio_time,
-                    feedback_enabled ? 1 : 0,
-                    visual_ok ? 1 : 0,
-                    pos_ok ? 1 : 0,
-                    z_ok ? 1 : 0,
-                    rot_ok ? 1 : 0,
-                    feedback_enabled ? 0 : 1,
-                    visual_ok ? 0 : 1,
-                    pos_ok ? 0 : 1,
-                    z_ok ? 0 : 1,
-                    rot_ok ? 0 : 1,
-                    (visual_ok && pos_ok && rot_ok) ? 1 : 0,
-                    (visual_ok && z_ok && rot_ok) ? 1 : 0,
-                    (pos_ok && z_ok && rot_ok) ? 1 : 0,
+                    vio_state.pos_end.z(),
                     has_lio_full_prior ? 1 : 0,
                     lio_full_prior_dt,
                     lidar_candidate_count);
         CAKE_INFO_THROTTLE_MS(
             2000,
-            "VIO feedback: stamp=%.6f pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d visual_residuals=%d "
+            "VIO feed-forward: stamp=%.6f write_lio=0 pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d visual_residuals=%d "
             "lio_pos=(%.3f %.3f %.3f) vio_pos=(%.3f %.3f %.3f)",
             measure.vio_time, pos_delta, rot_delta_deg, vio_->getLastTrackedFeatureCount(),
             vio_->getLastDepthFeatureCount(), opt_visual_residuals, lio_state_before_vio.pos_end.x(),
             lio_state_before_vio.pos_end.y(), lio_state_before_vio.pos_end.z(),
             vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
-        if (!accept_vio_feedback) {
-          CAKE_INFO(
-              "Reject VIO feedback: stamp=%.6f enabled=%d pos_delta=%.4f limit=%.4f z_delta=%.4f limit=%.4f rot_delta_deg=%.3f limit=%.3f visual_residuals=%d min=%d",
-              measure.vio_time, feedback_enabled ? 1 : 0,
-              pos_delta, config_.vision.max_vio_feedback_pos_delta,
-              z_delta, config_.vision.max_vio_feedback_z_delta,
-              rot_delta_deg, config_.vision.max_vio_feedback_rot_delta_deg,
-              opt_visual_residuals, config_.vision.min_vio_feedback_visual_residuals);
-        }
       } else {
         CAKE_INFO_THROTTLE_MS(
             2000,
@@ -931,67 +886,20 @@ void SlamNode::handleVIO()
             opt_visual_residuals, vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
       }
 
-      if (accept_vio_feedback) {
-        const Eigen::Vector3d feedback_dp = vio_state.pos_end - lio_state_before_vio.pos_end;
-        const Eigen::Vector3d feedback_dv = vio_state.vel_end - lio_state_before_vio.vel_end;
-        const Eigen::Vector3d feedback_dba = vio_state.bias_a - lio_state_before_vio.bias_a;
-        const Eigen::Vector3d feedback_dbg = vio_state.bias_g - lio_state_before_vio.bias_g;
-        const Eigen::Vector3d feedback_dg = vio_state.gravity - lio_state_before_vio.gravity;
-        std::printf("VIO FEEDBACK STATE DELTA stamp=%.6f dpos=(% .6f % .6f % .6f) dvel=(% .6f % .6f % .6f) dba=(% .6f % .6f % .6f) dbg=(% .6f % .6f % .6f) dgravity=(% .6f % .6f % .6f) lio_vel=(% .6f % .6f % .6f) vio_vel=(% .6f % .6f % .6f)\n",
-                    measure.vio_time,
-                    feedback_dp.x(), feedback_dp.y(), feedback_dp.z(),
-                    feedback_dv.x(), feedback_dv.y(), feedback_dv.z(),
-                    feedback_dba.x(), feedback_dba.y(), feedback_dba.z(),
-                    feedback_dbg.x(), feedback_dbg.y(), feedback_dbg.z(),
-                    feedback_dg.x(), feedback_dg.y(), feedback_dg.z(),
-                    lio_state_before_vio.vel_end.x(), lio_state_before_vio.vel_end.y(), lio_state_before_vio.vel_end.z(),
-                    vio_state.vel_end.x(), vio_state.vel_end.y(), vio_state.vel_end.z());
-        const double fused_z_before = state_.pos_end.z();
+      if (!use_lidar_) {
         state_ = vio_state;
-        if (use_lidar_) {
-          state_.gravity = lio_state_before_vio.gravity;
-          state_.inv_expo_time = lio_state_before_vio.inv_expo_time;
-          state_.cov = lio_state_before_vio.cov;
-          lio_.SetState(state_);
-          state_last_written_by_vio_feedback_ = true;
-          last_vio_feedback_write_time_ = measure.vio_time;
-        }
-        std::printf("VIO FEEDBACK APPLY stamp=%.6f write_lio=%d keep_lio_cov=%d z_before=% .6f z_after=% .6f dz_write=% .6f visual_residuals=%d opt_features=%d opt_lidar=%d\n",
-                    measure.vio_time,
-                    use_lidar_ ? 1 : 0,
-                    use_lidar_ ? 1 : 0,
-                    fused_z_before,
-                    state_.pos_end.z(),
-                    state_.pos_end.z() - fused_z_before,
-                    opt_visual_residuals,
-                    opt_features,
-                    opt_lidar_features);
-        latest_ekf_state_ = state_;
-        latest_ekf_time_ = measure.vio_time;
-        state_update_flag_ = true;
-        ekf_finish_once_ = true;
-        publishOdometry(measure.vio_time);
-        publishPath(measure.vio_time);
-        publishTf(measure.vio_time);
-        publishMavrosPose(measure.vio_time);
-        publishVisualSubmap(measure.vio_time);
-        publishVioWindowVisualization(measure.vio_time);
-        t_vio_publish_end = std::chrono::steady_clock::now();
-      } else if (use_lidar_) {
-        // Keep the public body/world TF synchronized with the LIO state even
-        // when the VIO correction is rejected. Otherwise RViz shows a static
-        // body frame with a moving world-frame cloud, which looks like a frame
-        // error while the real issue is the rejected VIO update.
-        latest_ekf_state_ = state_;
-        latest_ekf_time_ = measure.vio_time;
-        state_update_flag_ = true;
-        ekf_finish_once_ = true;
-        publishOdometry(measure.vio_time);
-        publishPath(measure.vio_time);
-        publishTf(measure.vio_time);
-        publishMavrosPose(measure.vio_time);
-        t_vio_publish_end = std::chrono::steady_clock::now();
       }
+      latest_ekf_state_ = vio_state;
+      latest_ekf_time_ = measure.vio_time;
+      state_update_flag_ = true;
+      ekf_finish_once_ = true;
+      publishOdometry(measure.vio_time, vio_state);
+      publishPath(measure.vio_time, vio_state);
+      publishTf(measure.vio_time, vio_state);
+      publishMavrosPose(measure.vio_time, vio_state);
+      publishVisualSubmap(measure.vio_time);
+      publishVioWindowVisualization(measure.vio_time);
+      t_vio_publish_end = std::chrono::steady_clock::now();
     }
   }
 
@@ -1012,13 +920,13 @@ void SlamNode::handleVIO()
                   {"TrackAndOptimize", image_sec},
                   {"PublishOutputs", publish_sec}},
                  total_sec, vio_average_total);
-  CAKE_INFO("VIO summary: stamp=%.6f imu=%zu tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d lidar_candidates=%zu lio_prior=%d lio_full_prior=%d lio_full_dt=%.6f feedback_enabled=%d mode=%d",
+  CAKE_INFO("VIO summary: stamp=%.6f imu=%zu tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d lidar_candidates=%zu lio_prior=%d lio_full_prior=%d lio_full_dt=%.6f feed_forward=%d write_lio=0 mode=%d",
             measure.vio_time, measure.imu.size(), vio_->getLastTrackedFeatureCount(),
             vio_->getLastDepthFeatureCount(), vio_->getLastOptimizationFeatureCount(),
             vio_->getLastOptimizationLidarFeatureCount(), vio_->getLastOptimizationVisualResidualCount(),
             lidar_candidate_count, static_cast<int>(has_lio_prior),
             static_cast<int>(has_lio_full_prior), lio_full_prior_dt,
-            vio_state_feedback_enabled ? 1 : 0,
+            vio_feed_forward ? 1 : 0,
             static_cast<int>(slam_mode_));
   CAKE_INFO_THROTTLE_MS(
       2000,
@@ -1535,6 +1443,11 @@ void SlamNode::gravityAlignment()
 
 void SlamNode::publishOdometry(double stamp)
 {
+  publishOdometry(stamp, state_);
+}
+
+void SlamNode::publishOdometry(double stamp, const StatesGroup &state)
+{
   if (!pub_odom_) {
     return;
   }
@@ -1542,21 +1455,26 @@ void SlamNode::publishOdometry(double stamp)
   odom.header.stamp = secToStamp(stamp);
   odom.header.frame_id = config_.frame.world;
   odom.child_frame_id = config_.frame.body;
-  odom.pose.pose.position.x = state_.pos_end.x();
-  odom.pose.pose.position.y = state_.pos_end.y();
-  odom.pose.pose.position.z = state_.pos_end.z();
-  const Eigen::Quaterniond q(state_.rot_end);
+  odom.pose.pose.position.x = state.pos_end.x();
+  odom.pose.pose.position.y = state.pos_end.y();
+  odom.pose.pose.position.z = state.pos_end.z();
+  const Eigen::Quaterniond q(state.rot_end);
   odom.pose.pose.orientation.x = q.x();
   odom.pose.pose.orientation.y = q.y();
   odom.pose.pose.orientation.z = q.z();
   odom.pose.pose.orientation.w = q.w();
-  odom.twist.twist.linear.x = state_.vel_end.x();
-  odom.twist.twist.linear.y = state_.vel_end.y();
-  odom.twist.twist.linear.z = state_.vel_end.z();
+  odom.twist.twist.linear.x = state.vel_end.x();
+  odom.twist.twist.linear.y = state.vel_end.y();
+  odom.twist.twist.linear.z = state.vel_end.z();
   pub_odom_->publish(odom);
 }
 
 void SlamNode::publishPath(double stamp)
+{
+  publishPath(stamp, state_);
+}
+
+void SlamNode::publishPath(double stamp, const StatesGroup &state)
 {
   if (!pub_path_) {
     return;
@@ -1564,10 +1482,10 @@ void SlamNode::publishPath(double stamp)
   geometry_msgs::msg::PoseStamped pose;
   pose.header.stamp = secToStamp(stamp);
   pose.header.frame_id = config_.frame.world;
-  pose.pose.position.x = state_.pos_end.x();
-  pose.pose.position.y = state_.pos_end.y();
-  pose.pose.position.z = state_.pos_end.z();
-  const Eigen::Quaterniond q(state_.rot_end);
+  pose.pose.position.x = state.pos_end.x();
+  pose.pose.position.y = state.pos_end.y();
+  pose.pose.position.z = state.pos_end.z();
+  const Eigen::Quaterniond q(state.rot_end);
   pose.pose.orientation.x = q.x();
   pose.pose.orientation.y = q.y();
   pose.pose.orientation.z = q.z();
@@ -1579,16 +1497,21 @@ void SlamNode::publishPath(double stamp)
 
 void SlamNode::publishMavrosPose(double stamp)
 {
+  publishMavrosPose(stamp, state_);
+}
+
+void SlamNode::publishMavrosPose(double stamp, const StatesGroup &state)
+{
   if (!pub_mavros_pose_) {
     return;
   }
   geometry_msgs::msg::PoseStamped pose;
   pose.header.stamp = secToStamp(stamp);
   pose.header.frame_id = config_.frame.world;
-  pose.pose.position.x = state_.pos_end.x();
-  pose.pose.position.y = state_.pos_end.y();
-  pose.pose.position.z = state_.pos_end.z();
-  const Eigen::Quaterniond q(state_.rot_end);
+  pose.pose.position.x = state.pos_end.x();
+  pose.pose.position.y = state.pos_end.y();
+  pose.pose.position.z = state.pos_end.z();
+  const Eigen::Quaterniond q(state.rot_end);
   pose.pose.orientation.x = q.x();
   pose.pose.orientation.y = q.y();
   pose.pose.orientation.z = q.z();
@@ -1598,6 +1521,11 @@ void SlamNode::publishMavrosPose(double stamp)
 
 void SlamNode::publishTf(double stamp)
 {
+  publishTf(stamp, state_);
+}
+
+void SlamNode::publishTf(double stamp, const StatesGroup &state)
+{
   if (!tf_broadcaster_) {
     return;
   }
@@ -1605,10 +1533,10 @@ void SlamNode::publishTf(double stamp)
   tf.header.stamp = secToStamp(stamp);
   tf.header.frame_id = config_.frame.world;
   tf.child_frame_id = config_.frame.body;
-  tf.transform.translation.x = state_.pos_end.x();
-  tf.transform.translation.y = state_.pos_end.y();
-  tf.transform.translation.z = state_.pos_end.z();
-  const Eigen::Quaterniond q(state_.rot_end);
+  tf.transform.translation.x = state.pos_end.x();
+  tf.transform.translation.y = state.pos_end.y();
+  tf.transform.translation.z = state.pos_end.z();
+  const Eigen::Quaterniond q(state.rot_end);
   tf.transform.rotation.x = q.x();
   tf.transform.rotation.y = q.y();
   tf.transform.rotation.z = q.z();

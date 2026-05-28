@@ -121,9 +121,13 @@ private:
   // Publishers.
   void publishRawCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar);
   void publishOdometry(double stamp);
+  void publishOdometry(double stamp, const StatesGroup &state);
   void publishPath(double stamp);
+  void publishPath(double stamp, const StatesGroup &state);
   void publishMavrosPose(double stamp);
+  void publishMavrosPose(double stamp, const StatesGroup &state);
   void publishTf(double stamp);
+  void publishTf(double stamp, const StatesGroup &state);
   void publishStaticTf();
   void publishClouds(double stamp);
   void publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar);
@@ -160,8 +164,6 @@ private:
   double first_lidar_time_ = -1.0;
   double latest_ekf_time_ = -1.0;
   double last_imu_prop_time_ = -1.0;
-  bool state_last_written_by_vio_feedback_ = false;
-  double last_vio_feedback_write_time_ = -1.0;
 
   // Extrinsics used by the main node.
   Eigen::Matrix3d lidar_to_imu_R_ = Eigen::Matrix3d::Identity();     ///< R_I_L.
