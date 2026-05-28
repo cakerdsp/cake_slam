@@ -11,7 +11,7 @@
 #include "cake_slam/common_lib.h"
 #include "cake_slam/config.h"
 #include "cake_slam/imu_processor.h"
-#include "cake_slam/voxel_map.h"
+#include "cake_slam/local_voxel_map.h"
 
 namespace cake_slam {
 
@@ -19,9 +19,9 @@ namespace cake_slam {
  * @brief FAST-LIVO2-style LiDAR-inertial odometry core.
  *
  * Inputs are already synchronized LiDAR/IMU packets from SlamNode. The class
- * owns IMU propagation/undistortion, voxel-map registration, downsampling, and
- * the latest IESKF state/covariance. It intentionally does not subscribe to ROS
- * topics or convert ROS messages.
+ * owns IMU propagation/undistortion, downsampling, and the latest IESKF
+ * state/covariance. The local voxel map is injected from outside so frontend
+ * odometry and later local BA can share the same map manager explicitly.
  */
 class LioCore
 {
@@ -34,6 +34,8 @@ public:
    * @param config Unified YAML configuration. Translations are [m].
    */
   void Configure(const Config &config);
+  /** @brief Inject the independently owned local voxel map used by LIO queries. */
+  void SetLocalMap(const LocalVoxelMapPtr &local_map);
 
   /**
    * @brief Run one LIO update on a synchronized LiDAR/IMU packet.
@@ -67,7 +69,7 @@ private:
   // IMU 初始化、传播和去畸变模块。
   ImuProcessPtr imu_proc_;
   // 体素地图构建、配准和滑窗管理模块。
-  VoxelMapManagerPtr voxel_manager_;
+  LocalVoxelMapPtr local_map_;
 
   // 当前帧优化后的状态。
   StatesGroup state_;

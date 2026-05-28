@@ -77,6 +77,7 @@ set(cake_slam_SOURCES
   src/imu_processor.cpp
   src/lidar_visual_selector.cpp
   src/lidar_preprocess.cpp
+  src/local_voxel_map.cpp
   src/lio_core.cpp
   src/vision/factor/lio_full_state_prior_factor.cpp
   src/utils.cpp

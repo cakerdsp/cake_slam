@@ -121,7 +121,11 @@ void SlamNode::configureModules()
     preprocess_->blind = config_.lidar.blind;
     preprocess_->blind_sqr = config_.lidar.blind * config_.lidar.blind;
 
-    // LIO 内部会配置 ImuProcess、体素地图和下采样器。
+    // The local voxel map is owned by SlamNode and injected into LIO, so later
+    // local BA can update the same map without going through the odometry core.
+    local_voxel_map_ = std::make_shared<LocalVoxelMap>();
+    local_voxel_map_->Configure(config_, lidar_to_imu_R_, lidar_to_imu_t_);
+    lio_.SetLocalMap(local_voxel_map_);
     lio_.Configure(config_);
     if (use_image_) {
       lidar_visual_selector_.Configure(config_);

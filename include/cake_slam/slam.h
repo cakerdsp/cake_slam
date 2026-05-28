@@ -147,6 +147,7 @@ private:
 
   // Owned processing modules.
   PreprocessPtr preprocess_;
+  LocalVoxelMapPtr local_voxel_map_;
   LioCore lio_;
   LidarVisualSelector lidar_visual_selector_;
   std::unique_ptr<Estimator> vio_;

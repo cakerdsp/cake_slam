@@ -44,29 +44,22 @@ void LioCore::Configure(const Config &config)
     imu_proc_->disable_bias_est();
   }
 
-  // 3. Build the voxel-map configuration.
-  VoxelMapConfig map_cfg;
-  map_cfg.max_layer_ = config.map.max_layer;
-  map_cfg.max_voxel_size_ = config.map.voxel_size;
-  map_cfg.planner_threshold_ = config.map.min_eigen_value;
-  map_cfg.sigma_num_ = config.map.sigma_num;
-  map_cfg.beam_err_ = config.map.beam_err;
-  map_cfg.dept_err_ = config.map.dept_err;
-  map_cfg.layer_init_num_.assign(config.map.layer_init_num.begin(), config.map.layer_init_num.end());
-  map_cfg.max_points_num_ = config.map.max_points_num;
-  map_cfg.max_iterations_ = config.map.min_iterations;
-  map_cfg.map_sliding_en = config.map.sliding_enable;
-  map_cfg.half_map_size = config.map.half_map_size;
-  map_cfg.sliding_thresh = config.map.sliding_thresh;
-  map_cfg.is_pub_plane_map_ = false;
-
-  std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map;
-  voxel_manager_.reset(new VoxelMapManager(map_cfg, voxel_map));
-  voxel_manager_->extT_ = extT_;
-  voxel_manager_->extR_ = extR_;
+  // 3. Ensure a local voxel map exists. SlamNode normally owns and injects it,
+  // but this fallback keeps LioCore usable in isolation.
+  if (!local_map_) {
+    local_map_.reset(new LocalVoxelMap());
+  }
+  if (!local_map_->IsConfigured()) {
+    local_map_->Configure(config, extR_, extT_);
+  }
 
   // 4. Configure body-frame point-cloud downsampling resolution [m].
   downsample_filter_.setLeafSize(config.lidar.filter_size_surf, config.lidar.filter_size_surf, config.lidar.filter_size_surf);
+}
+
+void LioCore::SetLocalMap(const LocalVoxelMapPtr &local_map)
+{
+  local_map_ = local_map;
 }
 
 // LIO 主入口：处理一次同步测量包并更新状态。
@@ -91,8 +84,10 @@ void LioCore::ProcessImu(FusionMeasureGroup &meas)
   // Process2 会原位更新 state_，并把去畸变后的点云写入 feats_undistort_。
   imu_proc_->Process2(meas, state_, feats_undistort_);
   state_propagat_ = state_;
-  voxel_manager_->state_ = state_;
-  voxel_manager_->feats_undistort_ = feats_undistort_;
+  if (local_map_) {
+    local_map_->SetFrameState(state_);
+    local_map_->SetUndistortedCloud(feats_undistort_);
+  }
 }
 
 // 下采样并生成世界系点云用于匹配。
@@ -101,19 +96,20 @@ void LioCore::Downsample()
   // 1. 先在 LiDAR/body 系下做体素下采样。
   downsample_filter_.setInputCloud(feats_undistort_);
   downsample_filter_.filter(*feats_down_body_);
-  voxel_manager_->feats_down_body_ = feats_down_body_;
+  if (!local_map_) {
+    return;
+  }
 
   // 2. 再把下采样结果变换到世界系，供地图匹配与更新使用。
-  voxel_manager_->TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, feats_down_world_);
-  voxel_manager_->feats_down_world_ = feats_down_world_;
-  voxel_manager_->feats_down_size_ = feats_down_body_->points.size();
+  local_map_->TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, feats_down_world_);
+  local_map_->SetDownsampledClouds(feats_down_body_, feats_down_world_);
 }
 
 // 地图匹配与状态更新的核心流程。
 void LioCore::ProcessLio()
 {
   // 没有点云就直接返回，避免后续匹配器处理空输入。
-  if (!feats_undistort_ || feats_undistort_->empty()) {
+  if (!local_map_ || !feats_undistort_ || feats_undistort_->empty()) {
     return;
   }
 
@@ -122,17 +118,14 @@ void LioCore::ProcessLio()
   // 第一帧只负责建图，不进行常规匹配更新。
   if (!map_inited_) {
     map_inited_ = true;
-    voxel_manager_->BuildVoxelMap();
+    local_map_->BuildInitialMap();
   }
 
   // 常规流程：状态估计 -> 回写状态 -> 地图更新 -> 视需要滑动地图。
-  voxel_manager_->StateEstimation(state_propagat_);
-  state_ = voxel_manager_->state_;
-  voxel_manager_->UpdateVoxelMap(voxel_manager_->pv_list_);
-
-  if (voxel_manager_->config_setting_.map_sliding_en) {
-    voxel_manager_->mapSliding();
-  }
+  local_map_->EstimateState(state_propagat_);
+  state_ = local_map_->State();
+  local_map_->UpdateFromLatestFrame();
+  local_map_->SlideIfNeeded();
 }
 
 const StatesGroup &LioCore::GetState() const
@@ -149,8 +142,8 @@ void LioCore::SetState(const StatesGroup &state)
 {
   state_ = state;
   state_propagat_ = state;
-  if (voxel_manager_) {
-    voxel_manager_->state_ = state_;
+  if (local_map_) {
+    local_map_->SetFrameState(state_);
   }
 }
 
@@ -171,7 +164,8 @@ PointCloudXYZI::Ptr LioCore::GetDownsampledWorldCloud() const
 
 const std::vector<PointToPlane> &LioCore::GetEffectPoints() const
 {
-  return voxel_manager_->ptpl_list_;
+  static const std::vector<PointToPlane> empty_points;
+  return local_map_ ? local_map_->LatestResiduals() : empty_points;
 }
 
 } // namespace cake_slam
