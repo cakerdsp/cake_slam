@@ -7,9 +7,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <functional>
+#include <iomanip>
 #include <limits>
 #include <stdexcept>
+#include <system_error>
 
 #include <opencv2/imgproc.hpp>
 #include <sensor_msgs/image_encodings.hpp>
@@ -45,6 +48,7 @@ void SlamNode::initialize()
   configureModules();
   createSubscriptions();
   createPublishers();
+  openTrajectoryLogs();
   configured_ = true;
   startSyncProcessThread();
 }
@@ -203,6 +207,54 @@ void SlamNode::createPublishers()
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
   static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
   publishStaticTf();
+}
+
+// Open optional TUM-format trajectory logs for later ATE/RPE evaluation.
+void SlamNode::openTrajectoryLogs()
+{
+  if (!config_.output.record_trajectory) {
+    return;
+  }
+
+  const auto resolve_output_file = [this](const std::string &file_name) {
+    std::filesystem::path file_path(file_name);
+    if (file_path.is_absolute()) {
+      return file_path;
+    }
+    const std::filesystem::path output_dir = config_.output.path.empty()
+        ? std::filesystem::path(".")
+        : std::filesystem::path(config_.output.path);
+    return output_dir / file_path;
+  };
+
+  const auto open_file = [](std::ofstream &stream, const std::filesystem::path &file_path, const char *label) {
+    std::error_code ec;
+    const std::filesystem::path parent = file_path.parent_path();
+    if (!parent.empty()) {
+      std::filesystem::create_directories(parent, ec);
+      if (ec) {
+        CAKE_INFO("Trajectory logging disabled for %s: cannot create directory %s (%s)",
+                  label, parent.string().c_str(), ec.message().c_str());
+        return;
+      }
+    }
+
+    stream.open(file_path, std::ios::out);
+    if (!stream.is_open()) {
+      CAKE_INFO("Trajectory logging disabled for %s: cannot open %s",
+                label, file_path.string().c_str());
+      return;
+    }
+    stream << std::fixed << std::setprecision(9);
+    CAKE_INFO("Trajectory logging enabled for %s: %s", label, file_path.string().c_str());
+  };
+
+  if (use_lidar_) {
+    open_file(lio_trajectory_file_, resolve_output_file(config_.output.lio_trajectory_file), "LIO");
+  }
+  if (use_image_) {
+    open_file(vio_trajectory_file_, resolve_output_file(config_.output.vio_trajectory_file), "VIO");
+  }
 }
 
 // 启动数据同步与主处理线程。
@@ -1451,6 +1503,20 @@ void SlamNode::gravityAlignment()
   CAKE_INFO("Gravity alignment finished.");
 }
 
+void SlamNode::writeTumTrajectory(std::ofstream &stream, double stamp, const StatesGroup &state)
+{
+  if (!stream.is_open()) {
+    return;
+  }
+
+  Eigen::Quaterniond q(state.rot_end);
+  q.normalize();
+  stream << std::fixed << std::setprecision(9)
+         << stamp << " "
+         << state.pos_end.x() << " " << state.pos_end.y() << " " << state.pos_end.z() << " "
+         << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << '\n';
+}
+
 void SlamNode::publishLioOdometry(double stamp)
 {
   if (!pub_lio_odom_) {
@@ -1472,6 +1538,7 @@ void SlamNode::publishLioOdometry(double stamp)
   odom.twist.twist.linear.y = state_.vel_end.y();
   odom.twist.twist.linear.z = state_.vel_end.z();
   pub_lio_odom_->publish(odom);
+  writeTumTrajectory(lio_trajectory_file_, stamp, state_);
 }
 
 void SlamNode::publishLioPath(double stamp)
@@ -1555,6 +1622,7 @@ void SlamNode::publishVioOdometry(double stamp, const StatesGroup &state)
   odom.twist.twist.linear.y = state.vel_end.y();
   odom.twist.twist.linear.z = state.vel_end.z();
   pub_vio_odom_->publish(odom);
+  writeTumTrajectory(vio_trajectory_file_, stamp, state);
 }
 
 void SlamNode::publishVioPath(double stamp, const StatesGroup &state)

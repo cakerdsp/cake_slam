@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -71,6 +72,7 @@ private:
   void configureModules();
   void createSubscriptions();
   void createPublishers();
+  void openTrajectoryLogs();
   void startSyncProcessThread();
   void stopSyncProcessThread();
 
@@ -136,6 +138,7 @@ private:
   void imuPropagationTimer();
   void propagateImuOnce(StatesGroup &state, double dt, const Eigen::Vector3d &acc,
                         const Eigen::Vector3d &gyr) const;
+  void writeTumTrajectory(std::ofstream &stream, double stamp, const StatesGroup &state);
 
   Config config_;
   std::string config_file_;
@@ -206,6 +209,8 @@ private:
 
   nav_msgs::msg::Path lio_path_msg_;
   nav_msgs::msg::Path vio_path_msg_;
+  std::ofstream lio_trajectory_file_;
+  std::ofstream vio_trajectory_file_;
 
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_livox_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_;

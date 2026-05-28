@@ -196,6 +196,9 @@ frame:
 output:
   # 输出目录；用于保存轨迹与标定结果。
   path: "."
+  record_trajectory: 1
+  lio_trajectory_file: "lio_tum.txt"
+  vio_trajectory_file: "vio_tum.txt"
 
 visualization:
   lio_odom_topic: "/aft_mapped_to_init"

@@ -204,6 +204,9 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "frame.camera", config.frame.camera);
 
   readIfPresent(fs, "output.path", config.output.path);
+  readIfPresent(fs, "output.record_trajectory", config.output.record_trajectory);
+  readIfPresent(fs, "output.lio_trajectory_file", config.output.lio_trajectory_file);
+  readIfPresent(fs, "output.vio_trajectory_file", config.output.vio_trajectory_file);
 
   readIfPresent(fs, "visualization.lio_odom_topic", config.visualization.lio_odom_topic);
   readIfPresent(fs, "visualization.lio_path_topic", config.visualization.lio_path_topic);

@@ -157,6 +157,9 @@ struct FrameConfig
 struct OutputConfig
 {
   std::string path;
+  bool record_trajectory = false;
+  std::string lio_trajectory_file = "lio_tum.txt";
+  std::string vio_trajectory_file = "vio_tum.txt";
 };
 
 /**
