@@ -68,6 +68,13 @@ void SlamNode::loadConfiguration()
   // VINS-Fusion 视觉模块仍使用全局参数表；这里让它也从同一个 yaml 读取。
   readParameters(config_file_);
 
+  if (config_.vision.vio_state_feedback_enable) {
+    RCLCPP_WARN(get_logger(),
+                "vision.vio_state_feedback_enable is deprecated and ignored: LIVO is feed-forward, "
+                "so VIO will not overwrite the LiDAR/IESKF state.");
+    config_.vision.vio_state_feedback_enable = false;
+  }
+
   use_lidar_ = config_.common.lidar_enable && !config_.lidar.topic.empty();
   use_image_ = config_.common.image_enable && !config_.vision.image_topic.empty();
   use_imu_ = config_.imu.enable && !config_.imu.topic.empty();
@@ -181,9 +188,12 @@ void SlamNode::createPublishers()
   pub_vio_window_path_ = create_publisher<nav_msgs::msg::Path>(config_.visualization.vio_window_path_topic, 10);
   pub_vio_window_poses_ = create_publisher<geometry_msgs::msg::PoseArray>(config_.visualization.vio_window_poses_topic, 10);
   pub_cloud_effect_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 100);
-  pub_odom_ = create_publisher<nav_msgs::msg::Odometry>("/aft_mapped_to_init", 10);
-  pub_path_ = create_publisher<nav_msgs::msg::Path>("/path", 10);
-  pub_mavros_pose_ = create_publisher<geometry_msgs::msg::PoseStamped>("/mavros/vision_pose/pose", 10);
+  pub_lio_odom_ = create_publisher<nav_msgs::msg::Odometry>(config_.visualization.lio_odom_topic, 10);
+  pub_lio_path_ = create_publisher<nav_msgs::msg::Path>(config_.visualization.lio_path_topic, 10);
+  pub_mavros_pose_ = create_publisher<geometry_msgs::msg::PoseStamped>(config_.visualization.mavros_pose_topic, 10);
+  pub_vio_odom_ = create_publisher<nav_msgs::msg::Odometry>(config_.visualization.vio_odom_topic, 10);
+  pub_vio_path_ = create_publisher<nav_msgs::msg::Path>(config_.visualization.vio_path_topic, 10);
+  pub_vio_pose_ = create_publisher<geometry_msgs::msg::PoseStamped>(config_.visualization.vio_pose_topic, 10);
   pub_imu_prop_odom_ = create_publisher<nav_msgs::msg::Odometry>("/cake_slam/imu_propagate", 1000);
   pub_feature_image_ = image_transport::create_publisher(this, "/cake_slam/feature_image");
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -695,8 +705,6 @@ void SlamNode::handleLIO()
 
   const auto t_lio_start = std::chrono::steady_clock::now();
   const double update_time = measures_.measures.back().lio_time;
-  const bool lio_input_from_vio_feedback = false;
-  const double lio_input_vio_feedback_dt = -1.0;
   handleFirstFrame();
   const StatesGroup lio_input_state = state_;
   lio_.SetState(state_);
@@ -749,7 +757,7 @@ void SlamNode::handleLIO()
   const double lio_dt_from_prev =
       has_last_lio_output_state ? update_time - last_lio_output_time
                                 : std::numeric_limits<double>::quiet_NaN();
-  std::printf("LIO STATE DEBUG stamp=%.6f input_z=% .6f output_z=% .6f dz_input=% .6f dz_prev=% .6f dt_prev=%.6f vel_z=% .6f gravity_z=% .6f imu_init=%d input_from_vio=%d vio_write_dt=%.6f visual_candidates=%zu lio_history=%zu\n",
+  std::printf("LIO STATE DEBUG stamp=%.6f input_z=% .6f output_z=% .6f dz_input=% .6f dz_prev=% .6f dt_prev=%.6f vel_z=% .6f gravity_z=% .6f imu_init=%d visual_candidates=%zu lio_history=%zu\n",
               update_time,
               lio_input_state.pos_end.z(),
               lio_output_z,
@@ -759,8 +767,6 @@ void SlamNode::handleLIO()
               state_.vel_end.z(),
               state_.gravity.z(),
               lio_imu_initialized ? 1 : 0,
-              lio_input_from_vio_feedback ? 1 : 0,
-              lio_input_vio_feedback_dt,
               pending_lidar_visual_candidates_.size(),
               lio_full_state_history_.size());
   has_last_lio_output_state = true;
@@ -772,14 +778,10 @@ void SlamNode::handleLIO()
   ekf_finish_once_ = true;
 
   publishClouds(update_time);
-  const bool publish_lio_pose_direct =
-      !use_image_ || !vio_ || vio_->solver_flag != Estimator::NON_LINEAR;
-  if (publish_lio_pose_direct) {
-    publishOdometry(update_time);
-    publishPath(update_time);
-    publishTf(update_time);
-    publishMavrosPose(update_time);
-  }
+  publishLioOdometry(update_time);
+  publishLioPath(update_time);
+  publishLioTf(update_time);
+  publishLioMavrosPose(update_time);
 
   const auto t_lio_end = std::chrono::steady_clock::now();
   static int lio_time_count = 0;
@@ -795,12 +797,11 @@ void SlamNode::handleLIO()
                   {"BuildVisualPrior", prior_sec},
                   {"PublishOutputs", publish_sec}},
                  total_sec, lio_average_total);
-  CAKE_INFO("LIO summary: stamp=%.6f imu=%zu cur_pts=%zu next_pts=%zu lidar_prior_candidates=%zu input_from_vio=%d mode=%d",
+  CAKE_INFO("LIO summary: stamp=%.6f imu=%zu cur_pts=%zu next_pts=%zu lidar_prior_candidates=%zu mode=%d",
             update_time, measures_.measures.back().imu.size(),
             measures_.pcl_proc_cur ? measures_.pcl_proc_cur->size() : 0,
             measures_.pcl_proc_next ? measures_.pcl_proc_next->size() : 0,
             pending_lidar_visual_candidates_.size(),
-            lio_input_from_vio_feedback ? 1 : 0,
             static_cast<int>(slam_mode_));
 }
 
@@ -888,15 +889,18 @@ void SlamNode::handleVIO()
 
       if (!use_lidar_) {
         state_ = vio_state;
+        latest_ekf_state_ = vio_state;
+        latest_ekf_time_ = measure.vio_time;
+        state_update_flag_ = true;
+        ekf_finish_once_ = true;
+        publishLioOdometry(measure.vio_time);
+        publishLioPath(measure.vio_time);
+        publishLioTf(measure.vio_time);
+        publishLioMavrosPose(measure.vio_time);
       }
-      latest_ekf_state_ = vio_state;
-      latest_ekf_time_ = measure.vio_time;
-      state_update_flag_ = true;
-      ekf_finish_once_ = true;
-      publishOdometry(measure.vio_time, vio_state);
-      publishPath(measure.vio_time, vio_state);
-      publishTf(measure.vio_time, vio_state);
-      publishMavrosPose(measure.vio_time, vio_state);
+      publishVioOdometry(measure.vio_time, vio_state);
+      publishVioPath(measure.vio_time, vio_state);
+      publishVioPose(measure.vio_time, vio_state);
       publishVisualSubmap(measure.vio_time);
       publishVioWindowVisualization(measure.vio_time);
       t_vio_publish_end = std::chrono::steady_clock::now();
@@ -1001,6 +1005,8 @@ void SlamNode::resetSyncStateLocked()
   pending_lio_pose_prior_ = LioPosePrior();
   lio_full_state_history_.clear();
   lio_full_state_prior_ready_ = false;
+  lio_path_msg_.poses.clear();
+  vio_path_msg_.poses.clear();
 }
 
 double SlamNode::newestLidarEndTimeLocked() const
@@ -1441,14 +1447,92 @@ void SlamNode::gravityAlignment()
   CAKE_INFO("Gravity alignment finished.");
 }
 
-void SlamNode::publishOdometry(double stamp)
+void SlamNode::publishLioOdometry(double stamp)
 {
-  publishOdometry(stamp, state_);
+  if (!pub_lio_odom_) {
+    return;
+  }
+  nav_msgs::msg::Odometry odom;
+  odom.header.stamp = secToStamp(stamp);
+  odom.header.frame_id = config_.frame.world;
+  odom.child_frame_id = config_.frame.body;
+  odom.pose.pose.position.x = state_.pos_end.x();
+  odom.pose.pose.position.y = state_.pos_end.y();
+  odom.pose.pose.position.z = state_.pos_end.z();
+  const Eigen::Quaterniond q(state_.rot_end);
+  odom.pose.pose.orientation.x = q.x();
+  odom.pose.pose.orientation.y = q.y();
+  odom.pose.pose.orientation.z = q.z();
+  odom.pose.pose.orientation.w = q.w();
+  odom.twist.twist.linear.x = state_.vel_end.x();
+  odom.twist.twist.linear.y = state_.vel_end.y();
+  odom.twist.twist.linear.z = state_.vel_end.z();
+  pub_lio_odom_->publish(odom);
 }
 
-void SlamNode::publishOdometry(double stamp, const StatesGroup &state)
+void SlamNode::publishLioPath(double stamp)
 {
-  if (!pub_odom_) {
+  if (!pub_lio_path_) {
+    return;
+  }
+  geometry_msgs::msg::PoseStamped pose;
+  pose.header.stamp = secToStamp(stamp);
+  pose.header.frame_id = config_.frame.world;
+  pose.pose.position.x = state_.pos_end.x();
+  pose.pose.position.y = state_.pos_end.y();
+  pose.pose.position.z = state_.pos_end.z();
+  const Eigen::Quaterniond q(state_.rot_end);
+  pose.pose.orientation.x = q.x();
+  pose.pose.orientation.y = q.y();
+  pose.pose.orientation.z = q.z();
+  pose.pose.orientation.w = q.w();
+  lio_path_msg_.header = pose.header;
+  lio_path_msg_.poses.push_back(pose);
+  pub_lio_path_->publish(lio_path_msg_);
+}
+
+void SlamNode::publishLioMavrosPose(double stamp)
+{
+  if (!pub_mavros_pose_) {
+    return;
+  }
+  geometry_msgs::msg::PoseStamped pose;
+  pose.header.stamp = secToStamp(stamp);
+  pose.header.frame_id = config_.frame.world;
+  pose.pose.position.x = state_.pos_end.x();
+  pose.pose.position.y = state_.pos_end.y();
+  pose.pose.position.z = state_.pos_end.z();
+  const Eigen::Quaterniond q(state_.rot_end);
+  pose.pose.orientation.x = q.x();
+  pose.pose.orientation.y = q.y();
+  pose.pose.orientation.z = q.z();
+  pose.pose.orientation.w = q.w();
+  pub_mavros_pose_->publish(pose);
+}
+
+void SlamNode::publishLioTf(double stamp)
+{
+  if (!tf_broadcaster_) {
+    return;
+  }
+  geometry_msgs::msg::TransformStamped tf;
+  tf.header.stamp = secToStamp(stamp);
+  tf.header.frame_id = config_.frame.world;
+  tf.child_frame_id = config_.frame.body;
+  tf.transform.translation.x = state_.pos_end.x();
+  tf.transform.translation.y = state_.pos_end.y();
+  tf.transform.translation.z = state_.pos_end.z();
+  const Eigen::Quaterniond q(state_.rot_end);
+  tf.transform.rotation.x = q.x();
+  tf.transform.rotation.y = q.y();
+  tf.transform.rotation.z = q.z();
+  tf.transform.rotation.w = q.w();
+  tf_broadcaster_->sendTransform(tf);
+}
+
+void SlamNode::publishVioOdometry(double stamp, const StatesGroup &state)
+{
+  if (!pub_vio_odom_) {
     return;
   }
   nav_msgs::msg::Odometry odom;
@@ -1466,17 +1550,12 @@ void SlamNode::publishOdometry(double stamp, const StatesGroup &state)
   odom.twist.twist.linear.x = state.vel_end.x();
   odom.twist.twist.linear.y = state.vel_end.y();
   odom.twist.twist.linear.z = state.vel_end.z();
-  pub_odom_->publish(odom);
+  pub_vio_odom_->publish(odom);
 }
 
-void SlamNode::publishPath(double stamp)
+void SlamNode::publishVioPath(double stamp, const StatesGroup &state)
 {
-  publishPath(stamp, state_);
-}
-
-void SlamNode::publishPath(double stamp, const StatesGroup &state)
-{
-  if (!pub_path_) {
+  if (!pub_vio_path_) {
     return;
   }
   geometry_msgs::msg::PoseStamped pose;
@@ -1490,19 +1569,14 @@ void SlamNode::publishPath(double stamp, const StatesGroup &state)
   pose.pose.orientation.y = q.y();
   pose.pose.orientation.z = q.z();
   pose.pose.orientation.w = q.w();
-  path_msg_.header = pose.header;
-  path_msg_.poses.push_back(pose);
-  pub_path_->publish(path_msg_);
+  vio_path_msg_.header = pose.header;
+  vio_path_msg_.poses.push_back(pose);
+  pub_vio_path_->publish(vio_path_msg_);
 }
 
-void SlamNode::publishMavrosPose(double stamp)
+void SlamNode::publishVioPose(double stamp, const StatesGroup &state)
 {
-  publishMavrosPose(stamp, state_);
-}
-
-void SlamNode::publishMavrosPose(double stamp, const StatesGroup &state)
-{
-  if (!pub_mavros_pose_) {
+  if (!pub_vio_pose_) {
     return;
   }
   geometry_msgs::msg::PoseStamped pose;
@@ -1516,32 +1590,7 @@ void SlamNode::publishMavrosPose(double stamp, const StatesGroup &state)
   pose.pose.orientation.y = q.y();
   pose.pose.orientation.z = q.z();
   pose.pose.orientation.w = q.w();
-  pub_mavros_pose_->publish(pose);
-}
-
-void SlamNode::publishTf(double stamp)
-{
-  publishTf(stamp, state_);
-}
-
-void SlamNode::publishTf(double stamp, const StatesGroup &state)
-{
-  if (!tf_broadcaster_) {
-    return;
-  }
-  geometry_msgs::msg::TransformStamped tf;
-  tf.header.stamp = secToStamp(stamp);
-  tf.header.frame_id = config_.frame.world;
-  tf.child_frame_id = config_.frame.body;
-  tf.transform.translation.x = state.pos_end.x();
-  tf.transform.translation.y = state.pos_end.y();
-  tf.transform.translation.z = state.pos_end.z();
-  const Eigen::Quaterniond q(state.rot_end);
-  tf.transform.rotation.x = q.x();
-  tf.transform.rotation.y = q.y();
-  tf.transform.rotation.z = q.z();
-  tf.transform.rotation.w = q.w();
-  tf_broadcaster_->sendTransform(tf);
+  pub_vio_pose_->publish(pose);
 }
 
 void SlamNode::publishStaticTf()

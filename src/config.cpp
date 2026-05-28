@@ -205,6 +205,12 @@ bool LoadConfig(const std::string &path, Config &config)
 
   readIfPresent(fs, "output.path", config.output.path);
 
+  readIfPresent(fs, "visualization.lio_odom_topic", config.visualization.lio_odom_topic);
+  readIfPresent(fs, "visualization.lio_path_topic", config.visualization.lio_path_topic);
+  readIfPresent(fs, "visualization.mavros_pose_topic", config.visualization.mavros_pose_topic);
+  readIfPresent(fs, "visualization.vio_odom_topic", config.visualization.vio_odom_topic);
+  readIfPresent(fs, "visualization.vio_path_topic", config.visualization.vio_path_topic);
+  readIfPresent(fs, "visualization.vio_pose_topic", config.visualization.vio_pose_topic);
   readIfPresent(fs, "visualization.vio_landmarks_topic", config.visualization.vio_landmarks_topic);
   readIfPresent(fs, "visualization.vio_window_path_topic", config.visualization.vio_window_path_topic);
   readIfPresent(fs, "visualization.vio_window_poses_topic", config.visualization.vio_window_poses_topic);

@@ -112,6 +112,12 @@ output:
   path: "."
 
 visualization:
+  lio_odom_topic: "/aft_mapped_to_init"
+  lio_path_topic: "/path"
+  mavros_pose_topic: "/mavros/vision_pose/pose"
+  vio_odom_topic: "/cake_slam/vio/odom"
+  vio_path_topic: "/cake_slam/vio/path"
+  vio_pose_topic: "/cake_slam/vio/pose"
   # Optimized VIO landmarks in world frame for RViz PointCloud2 display.
   vio_landmarks_topic: "/cake_slam/vio/landmarks"
   # Sliding-window VIO trajectory segment in world frame for RViz Path display.

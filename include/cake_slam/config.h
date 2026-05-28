@@ -164,6 +164,12 @@ struct OutputConfig
  */
 struct VisualizationConfig
 {
+  std::string lio_odom_topic = "/aft_mapped_to_init";
+  std::string lio_path_topic = "/path";
+  std::string mavros_pose_topic = "/mavros/vision_pose/pose";
+  std::string vio_odom_topic = "/cake_slam/vio/odom";
+  std::string vio_path_topic = "/cake_slam/vio/path";
+  std::string vio_pose_topic = "/cake_slam/vio/pose";
   std::string vio_landmarks_topic = "/cake_slam/vio/landmarks";
   std::string vio_window_path_topic = "/cake_slam/vio/window_path";
   std::string vio_window_poses_topic = "/cake_slam/vio/window_poses";

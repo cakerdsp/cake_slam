@@ -120,14 +120,13 @@ private:
 
   // Publishers.
   void publishRawCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar);
-  void publishOdometry(double stamp);
-  void publishOdometry(double stamp, const StatesGroup &state);
-  void publishPath(double stamp);
-  void publishPath(double stamp, const StatesGroup &state);
-  void publishMavrosPose(double stamp);
-  void publishMavrosPose(double stamp, const StatesGroup &state);
-  void publishTf(double stamp);
-  void publishTf(double stamp, const StatesGroup &state);
+  void publishLioOdometry(double stamp);
+  void publishLioPath(double stamp);
+  void publishLioMavrosPose(double stamp);
+  void publishLioTf(double stamp);
+  void publishVioOdometry(double stamp, const StatesGroup &state);
+  void publishVioPath(double stamp, const StatesGroup &state);
+  void publishVioPose(double stamp, const StatesGroup &state);
   void publishStaticTf();
   void publishClouds(double stamp);
   void publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar);
@@ -204,15 +203,19 @@ private:
   LioPosePrior pending_lio_pose_prior_;
   std::deque<LioFullStatePrior> lio_full_state_history_;
 
-  nav_msgs::msg::Path path_msg_;
+  nav_msgs::msg::Path lio_path_msg_;
+  nav_msgs::msg::Path vio_path_msg_;
 
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_livox_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_image_;
-  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
-  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_lio_odom_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_lio_path_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pub_mavros_pose_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_vio_odom_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_vio_path_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pub_vio_pose_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_imu_prop_odom_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_raw_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_registered_;
