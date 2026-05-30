@@ -1557,20 +1557,8 @@ void Estimator::optimization()
 
         for (int i = 0; i < frame_count + 1; ++i)
         {
-            if (lio_pose_priors_[i].valid)
-            {
-                const auto &prior = lio_pose_priors_[i];
-                const Eigen::Vector3d p(para_Pose[i][0], para_Pose[i][1], para_Pose[i][2]);
-                const Eigen::Quaterniond q(para_Pose[i][6], para_Pose[i][3], para_Pose[i][4], para_Pose[i][5]);
-                const Eigen::Quaterniond q_prior(prior.R_WB);
-                const Eigen::Quaterniond dq = q_prior.conjugate() * q;
-                Eigen::Matrix<double, 6, 1> raw;
-                raw.segment<3>(0) = 2.0 * Eigen::Vector3d(dq.x(), dq.y(), dq.z());
-                raw.segment<3>(3) = prior.R_WB.transpose() * (p - prior.p_WB);
-                const Eigen::Matrix<double, 6, 1> whitened = prior.sqrt_information * raw;
-                add_cost_block(lio_pose_cost, whitened.squaredNorm());
-            }
-            if (USE_IMU && lio_full_priors_[i].valid)
+            const bool use_full_prior = use_lio_full_prior_factor && lio_full_priors_[i].valid;
+            if (use_full_prior)
             {
                 const auto &prior = lio_full_priors_[i];
                 const Eigen::Vector3d p(para_Pose[i][0], para_Pose[i][1], para_Pose[i][2]);
@@ -1593,6 +1581,19 @@ void Estimator::optimization()
                 lio_full_vel_sq += whitened.segment<3>(6).squaredNorm();
                 lio_full_ba_sq += whitened.segment<3>(9).squaredNorm();
                 lio_full_bg_sq += whitened.segment<3>(12).squaredNorm();
+            }
+            else if (lio_pose_priors_[i].valid)
+            {
+                const auto &prior = lio_pose_priors_[i];
+                const Eigen::Vector3d p(para_Pose[i][0], para_Pose[i][1], para_Pose[i][2]);
+                const Eigen::Quaterniond q(para_Pose[i][6], para_Pose[i][3], para_Pose[i][4], para_Pose[i][5]);
+                const Eigen::Quaterniond q_prior(prior.R_WB);
+                const Eigen::Quaterniond dq = q_prior.conjugate() * q;
+                Eigen::Matrix<double, 6, 1> raw;
+                raw.segment<3>(0) = 2.0 * Eigen::Vector3d(dq.x(), dq.y(), dq.z());
+                raw.segment<3>(3) = prior.R_WB.transpose() * (p - prior.p_WB);
+                const Eigen::Matrix<double, 6, 1> whitened = prior.sqrt_information * raw;
+                add_cost_block(lio_pose_cost, whitened.squaredNorm());
             }
         }
 
@@ -1785,16 +1786,16 @@ void Estimator::optimization()
     }
     for (int i = 0; i < frame_count + 1; i++)
     {
-        if (lio_pose_priors_[i].valid)
-        {
-            problem.AddResidualBlock(cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[i]), NULL, para_Pose[i]);
-            ++lio_pose_prior_count;
-        }
         if (use_lio_full_prior_factor && lio_full_priors_[i].valid)
         {
             problem.AddResidualBlock(cake_slam::LioFullStatePriorFactor::Create(lio_full_priors_[i]), NULL,
                                      para_Pose[i], para_SpeedBias[i]);
             ++lio_full_prior_count;
+        }
+        else if (lio_pose_priors_[i].valid)
+        {
+            problem.AddResidualBlock(cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[i]), NULL, para_Pose[i]);
+            ++lio_pose_prior_count;
         }
     }
 
@@ -2066,20 +2067,20 @@ void Estimator::optimization()
                 marginalization_info->addResidualBlockInfo(residual_block_info);
             }
         }
-        if (lio_pose_priors_[0].valid)
-        {
-            ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
-                cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[0]), NULL,
-                vector<double *>{para_Pose[0]},
-                vector<int>{0});
-            marginalization_info->addResidualBlockInfo(residual_block_info);
-        }
         if (use_lio_full_prior_factor && lio_full_priors_[0].valid)
         {
             ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
                 cake_slam::LioFullStatePriorFactor::Create(lio_full_priors_[0]), NULL,
                 vector<double *>{para_Pose[0], para_SpeedBias[0]},
                 vector<int>{0, 1});
+            marginalization_info->addResidualBlockInfo(residual_block_info);
+        }
+        else if (lio_pose_priors_[0].valid)
+        {
+            ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
+                cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[0]), NULL,
+                vector<double *>{para_Pose[0]},
+                vector<int>{0});
             marginalization_info->addResidualBlockInfo(residual_block_info);
         }
 
@@ -2186,20 +2187,20 @@ void Estimator::optimization()
 
                 marginalization_info->addResidualBlockInfo(residual_block_info);
             }
-            if (lio_pose_priors_[WINDOW_SIZE - 1].valid)
-            {
-                ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
-                    cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[WINDOW_SIZE - 1]), NULL,
-                    vector<double *>{para_Pose[WINDOW_SIZE - 1]},
-                    vector<int>{0});
-                marginalization_info->addResidualBlockInfo(residual_block_info);
-            }
             if (use_lio_full_prior_factor && lio_full_priors_[WINDOW_SIZE - 1].valid)
             {
                 ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
                     cake_slam::LioFullStatePriorFactor::Create(lio_full_priors_[WINDOW_SIZE - 1]), NULL,
                     vector<double *>{para_Pose[WINDOW_SIZE - 1], para_SpeedBias[WINDOW_SIZE - 1]},
                     vector<int>{0, 1});
+                marginalization_info->addResidualBlockInfo(residual_block_info);
+            }
+            else if (lio_pose_priors_[WINDOW_SIZE - 1].valid)
+            {
+                ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
+                    cake_slam::LioPosePriorFactor::Create(lio_pose_priors_[WINDOW_SIZE - 1]), NULL,
+                    vector<double *>{para_Pose[WINDOW_SIZE - 1]},
+                    vector<int>{0});
                 marginalization_info->addResidualBlockInfo(residual_block_info);
             }
 
