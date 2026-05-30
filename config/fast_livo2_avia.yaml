@@ -130,6 +130,10 @@ vision:
   lidar_prior_feature_enable: 1
   # 是否优化 LiDAR 先验点的逆深度；关闭则固定先验深度。
   optimize_lidar_inv_depth: 1
+  # 0: LocalVoxelMap assisted depth, 1: current scan, 2: disabled.
+  lidar_depth_source: 0
+  visual_feature_depth_prior_enable: 1
+  voxel_raycast_enable: 1
   # 每帧最多使用的 LiDAR 先验点数量。
   max_lidar_features: 250
   # 最小 LiDAR 深度 [m]；小于该值不参与视觉先验。
@@ -144,12 +148,24 @@ vision:
   shi_tomasi_min_score: 1.0e-6
   # LiDAR 先验点在图像上的最小间隔半径 [pixel]。
   lidar_mask_radius: 20.0
+  lidar_depth_grid_rows: 12
+  lidar_depth_grid_cols: 16
+  max_lidar_depth_ratio: 0.6
+  depth_search_radius: 8.0
+  visual_depth_min_track_cnt: 2
+  max_depth_update_features: 250
+  max_raycast_features: 120
+  max_raycast_steps: 160
+  raycast_step: 0.5
+  raycast_min_cos: 0.15
+  raycast_plane_radius_scale: 3.0
+  depth_prior_update_var_ratio: 0.7
   # LIO 位姿先验重投影门限 [pixel]。
   lio_prior_reproj_threshold: 3.0
   # LiDAR 深度先验标准差 [m]。
-  lidar_depth_std: 1.0e-8
+  lidar_depth_std: 0.10
   # 逆深度先验方差下限 [1/m^2]。
-  min_inv_depth_var: 1.0e-15
+  min_inv_depth_var: 1.0e-6
   # LIO 位姿先验方差下限 [rad^2 或 m^2]。
   min_lio_pose_prior_var: 1.0e-15
   # Deprecated in feed-forward LIVO: VIO publishes diagnostics/outputs and never overwrites LIO state.

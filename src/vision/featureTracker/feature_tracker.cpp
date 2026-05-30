@@ -18,6 +18,8 @@
 #include <cmath>
 #include <limits>
 
+#include "cake_slam/local_voxel_map.h"
+
 // 判断点是否落在图像有效区域内。
 bool FeatureTracker::inBorder(const cv::Point2f &pt)
 {
@@ -73,6 +75,11 @@ FeatureTracker::FeatureTracker()
 void FeatureTracker::setLidarDepthCandidates(const vector<cake_slam::LidarVisualCandidate> &candidates)
 {
     pending_lidar_candidates = candidates;
+}
+
+void FeatureTracker::setLidarDepthFrame(const cake_slam::LidarDepthFrame &depth_frame)
+{
+    pending_lidar_depth_frame = depth_frame;
 }
 
 void FeatureTracker::setLioPriorGate(const cake_slam::LioPosePrior &prior,
@@ -190,6 +197,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     last_rejected_by_lio_prior_count = 0;
     last_added_lidar_count = 0;
     last_added_visual_count = 0;
+    last_visual_depth_prior_update_count = 0;
     last_pending_lidar_candidate_count = static_cast<int>(pending_lidar_candidates.size());
     for (const int id : ids)
     {
@@ -395,7 +403,12 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
             n_max_cnt > 0 && !pending_lidar_candidates.empty())
         {
             TicToc t_lidar_add;
-            const int added_lidar = addLidarCandidatePoints(n_max_cnt);
+            const double max_lidar_ratio = pending_lidar_depth_frame.max_lidar_depth_ratio > 0.0
+                                               ? pending_lidar_depth_frame.max_lidar_depth_ratio
+                                               : 1.0;
+            const int max_lidar_total = static_cast<int>(std::ceil(MAX_CNT * std::min(1.0, max_lidar_ratio)));
+            const int lidar_quota = std::max(0, max_lidar_total - last_tracked_lidar_count);
+            const int added_lidar = addLidarCandidatePoints(std::min(n_max_cnt, lidar_quota));
             last_timing.add_lidar_ms = t_lidar_add.toc();
             last_added_lidar_count = added_lidar;
             last_timing.added_lidar = added_lidar;
@@ -474,6 +487,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     TicToc t_velocity;
     pts_velocity = ptsVelocity(ids, cur_un_pts, cur_un_pts_map, prev_un_pts_map);
     last_timing.velocity_ms = t_velocity.toc();
+    last_visual_depth_prior_update_count = attachDepthPriorsToTrackedFeatures();
 
     if(!_img1.empty() && stereo_cam)
     {
@@ -592,6 +606,7 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     prev_time = cur_time;
     hasPrediction = false;
     pending_lidar_candidates.clear();
+    pending_lidar_depth_frame = cake_slam::LidarDepthFrame();
 
     prevLeftPtsMap.clear();
     for(size_t i = 0; i < cur_pts.size(); i++)
@@ -744,31 +759,268 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     return featureFrame;
 }
 
+bool FeatureTracker::queryProjectedDepth(const cv::Point2f &pixel, cake_slam::LidarDepthPrior &prior) const
+{
+    prior = cake_slam::LidarDepthPrior();
+    const auto &frame = pending_lidar_depth_frame;
+    if (!frame.valid || frame.cells.empty() || frame.cell_cols <= 0 || frame.cell_rows <= 0 ||
+        frame.search_radius <= 0.0)
+        return false;
+
+    const int u = cvRound(pixel.x);
+    const int v = cvRound(pixel.y);
+    if (u < 0 || v < 0 || u >= frame.cols || v >= frame.rows)
+        return false;
+
+    const int center_x = std::min(frame.cell_cols - 1, std::max(0, u / frame.cell_size));
+    const int center_y = std::min(frame.cell_rows - 1, std::max(0, v / frame.cell_size));
+    const int radius_cells = std::max(0, static_cast<int>(std::ceil(frame.search_radius / frame.cell_size)));
+    const double radius_sq = frame.search_radius * frame.search_radius;
+    double best_score = std::numeric_limits<double>::infinity();
+    const cake_slam::LidarDepthCell *best = nullptr;
+
+    for (int dy = -radius_cells; dy <= radius_cells; ++dy)
+    {
+        const int cy = center_y + dy;
+        if (cy < 0 || cy >= frame.cell_rows)
+            continue;
+        for (int dx = -radius_cells; dx <= radius_cells; ++dx)
+        {
+            const int cx = center_x + dx;
+            if (cx < 0 || cx >= frame.cell_cols)
+                continue;
+            const int idx = cy * frame.cell_cols + cx;
+            if (idx < 0 || idx >= static_cast<int>(frame.cells.size()))
+                continue;
+            const auto &cell = frame.cells[static_cast<size_t>(idx)];
+            if (!cell.valid || !cell.depth_prior_allowed ||
+                cell.depth <= frame.min_depth || cell.depth >= frame.max_depth)
+                continue;
+            const double ddx = static_cast<double>(cell.pixel.x - pixel.x);
+            const double ddy = static_cast<double>(cell.pixel.y - pixel.y);
+            const double dist_sq = ddx * ddx + ddy * ddy;
+            if (dist_sq > radius_sq)
+                continue;
+            const double score = dist_sq + 1000.0 * cell.inv_depth_var;
+            if (score < best_score)
+            {
+                best_score = score;
+                best = &cell;
+            }
+        }
+    }
+
+    if (!best)
+        return false;
+    const std::vector<cake_slam::LidarDepthCell> &occlusion_cells =
+        !frame.occlusion_cells.empty() ? frame.occlusion_cells : frame.cells;
+    if (!occlusion_cells.empty())
+    {
+        const int occ_idx = center_y * frame.cell_cols + center_x;
+        if (occ_idx >= 0 && occ_idx < static_cast<int>(occlusion_cells.size()))
+        {
+            const auto &occ = occlusion_cells[static_cast<size_t>(occ_idx)];
+            if (occ.valid && best->depth > occ.depth + frame.z_buffer_depth_tolerance)
+                return false;
+        }
+    }
+    prior.valid = true;
+    prior.depth = best->depth;
+    prior.inv_depth = 1.0 / best->depth;
+    prior.inv_depth_var = std::max(frame.min_inv_depth_var, best->inv_depth_var);
+    prior.P_W_init = best->P_W_init;
+    prior.source = best->source;
+    prior.lio_gate = false;
+    prior.quality = best->quality;
+    return true;
+}
+
+bool FeatureTracker::queryVoxelRaycastDepth(const cv::Point2f &pixel,
+                                            const Eigen::Vector3d &bearing,
+                                            cake_slam::LidarDepthPrior &prior) const
+{
+    prior = cake_slam::LidarDepthPrior();
+    const auto &frame = pending_lidar_depth_frame;
+    if (!frame.valid || !frame.voxel_raycast_enable || frame.source_mode != 0 ||
+        !frame.local_map || bearing.z() <= 1e-9)
+        return false;
+
+    Eigen::Vector3d ray_cam = bearing / bearing.z();
+    const Eigen::Vector3d origin_w = frame.R_WB * frame.t_I_C + frame.p_WB;
+    const Eigen::Vector3d dir_w = (frame.R_WB * (frame.R_I_C * ray_cam)).normalized();
+
+    cake_slam::LocalVoxelMap::RaycastOptions options;
+    options.min_depth = frame.min_depth;
+    options.max_depth = frame.max_depth;
+    options.step = frame.raycast_step > 0.0 ? frame.raycast_step : frame.local_map->VoxelSize();
+    options.min_cos = frame.raycast_min_cos;
+    options.plane_radius_scale = frame.raycast_plane_radius_scale;
+    options.max_steps = frame.max_raycast_steps;
+    options.allow_point_fallback = true;
+    cake_slam::LocalVoxelMap::RaycastHit hit;
+    if (!frame.local_map->Raycast(origin_w, dir_w, options, hit) || !hit.valid)
+        return false;
+
+    const Eigen::Vector3d p_body = frame.R_WB.transpose() * (hit.point_w - frame.p_WB);
+    const Eigen::Vector3d p_cam = frame.R_I_C.transpose() * (p_body - frame.t_I_C);
+    const double depth = p_cam.z();
+    if (depth <= frame.min_depth || depth >= frame.max_depth)
+        return false;
+
+    const std::vector<cake_slam::LidarDepthCell> &occlusion_cells =
+        !frame.occlusion_cells.empty() ? frame.occlusion_cells : frame.cells;
+    if (!occlusion_cells.empty() && frame.cell_cols > 0 && frame.cell_rows > 0)
+    {
+        const int u = cvRound(pixel.x);
+        const int v = cvRound(pixel.y);
+        const int cx = std::min(frame.cell_cols - 1, std::max(0, u / frame.cell_size));
+        const int cy = std::min(frame.cell_rows - 1, std::max(0, v / frame.cell_size));
+        const int idx = cy * frame.cell_cols + cx;
+        if (idx >= 0 && idx < static_cast<int>(occlusion_cells.size()))
+        {
+            const auto &cell = occlusion_cells[static_cast<size_t>(idx)];
+            if (cell.valid && depth > cell.depth + frame.z_buffer_depth_tolerance)
+                return false;
+        }
+    }
+
+    const double depth4 = std::max(1e-6, depth * depth * depth * depth);
+    const double distance_sigma = frame.lidar_depth_std * (1.0 + 0.02 * std::max(0.0, depth));
+    const double incidence_scale = 1.0 / std::max(0.1, hit.incidence_cos);
+    const double sigma_z2 = distance_sigma * distance_sigma * incidence_scale * incidence_scale +
+                            std::max(0.0, hit.plane_var_scalar);
+
+    prior.valid = true;
+    prior.depth = depth;
+    prior.inv_depth = 1.0 / depth;
+    prior.inv_depth_var = std::max(frame.min_inv_depth_var, sigma_z2 / depth4);
+    prior.P_W_init = hit.point_w;
+    prior.source = 0;
+    prior.lio_gate = false;
+    prior.quality = hit.from_plane ? 1.0 : 0.5;
+    return true;
+}
+
+bool FeatureTracker::shouldReplaceDepthPrior(int id, const cake_slam::LidarDepthPrior &candidate) const
+{
+    if (!candidate.valid || candidate.depth <= 0.0 || candidate.inv_depth <= 0.0)
+        return false;
+    const auto it = active_lidar_priors.find(id);
+    if (it == active_lidar_priors.end() || !it->second.valid)
+        return true;
+    if (candidate.source < it->second.source &&
+        candidate.inv_depth_var <= it->second.inv_depth_var * 1.5)
+        return true;
+    const double ratio = pending_lidar_depth_frame.prior_update_var_ratio > 0.0
+                             ? pending_lidar_depth_frame.prior_update_var_ratio
+                             : 1.0;
+    return candidate.inv_depth_var < std::max(MIN_INV_DEPTH_VAR, it->second.inv_depth_var * ratio);
+}
+
+int FeatureTracker::attachDepthPriorsToTrackedFeatures()
+{
+    const auto &frame = pending_lidar_depth_frame;
+    if (!frame.valid || !frame.visual_feature_depth_prior_enable ||
+        frame.max_depth_update_features <= 0 || ids.empty() || cur_pts.empty() || cur_un_pts.empty())
+        return 0;
+
+    int tested = 0;
+    int projected_hits = 0;
+    int raycast_attempts = 0;
+    int raycast_hits = 0;
+    int updated = 0;
+    int kept_old = 0;
+    int rejected = 0;
+    for (size_t i = 0; i < ids.size() && i < cur_pts.size() && i < cur_un_pts.size() && i < track_cnt.size(); ++i)
+    {
+        if (tested >= frame.max_depth_update_features)
+            break;
+        if (track_cnt[i] < frame.min_track_cnt)
+            continue;
+
+        tested++;
+        cake_slam::LidarDepthPrior prior;
+        bool found = queryProjectedDepth(cur_pts[i], prior);
+        if (found)
+        {
+            projected_hits++;
+        }
+        else if (frame.voxel_raycast_enable && frame.source_mode == 0 && raycast_attempts < frame.max_raycast_features)
+        {
+            raycast_attempts++;
+            const Eigen::Vector3d bearing(cur_un_pts[i].x, cur_un_pts[i].y, 1.0);
+            found = queryVoxelRaycastDepth(cur_pts[i], bearing, prior);
+            if (found)
+                raycast_hits++;
+        }
+
+        if (!found || !prior.valid)
+        {
+            rejected++;
+            continue;
+        }
+        if (!shouldReplaceDepthPrior(ids[i], prior))
+        {
+            kept_old++;
+            continue;
+        }
+        const auto old_prior_it = active_lidar_priors.find(ids[i]);
+        if (old_prior_it != active_lidar_priors.end() && old_prior_it->second.lio_gate)
+            prior.lio_gate = true;
+        active_lidar_priors[ids[i]] = prior;
+        current_lidar_priors[ids[i]] = prior;
+        updated++;
+    }
+
+    if (tested > 0 || updated > 0)
+    {
+        std::printf("VISUAL DEPTH PRIOR DEBUG stamp=%.6f enabled=1 source=%d tested=%d projected_hits=%d raycast_attempts=%d raycast_hits=%d updated=%d kept_old=%d rejected=%d active=%zu\n",
+                    cur_time,
+                    frame.source_mode,
+                    tested,
+                    projected_hits,
+                    raycast_attempts,
+                    raycast_hits,
+                    updated,
+                    kept_old,
+                    rejected,
+                    active_lidar_priors.size());
+    }
+    return updated;
+}
+
 void FeatureTracker::rejectWithLioPrior(vector<uchar> &status)
 {
     // LiDAR-seeded tracks have a world anchor from the LIO update. Reproject
     // that anchor through the current LIO pose prior and reject tracks whose
     // LK result moved too far in pixels. This replaces the old F-matrix gate.
+    int active_gated_tracks = 0;
+    for (const auto &kv : active_lidar_priors)
+    {
+        if (kv.second.valid && kv.second.lio_gate)
+            active_gated_tracks++;
+    }
     const bool gate_enabled =
-        lio_prior_gate.valid && !active_lidar_priors.empty() && !m_camera.empty() &&
+        lio_prior_gate.valid && active_gated_tracks > 0 && !m_camera.empty() &&
         LIDAR_PRIOR_REPROJ_THRESHOLD > 0.0;
     if (!gate_enabled)
     {
-        if (!active_lidar_priors.empty() || last_prev_lidar_track_count > 0)
+        if (active_gated_tracks > 0 || last_prev_lidar_track_count > 0)
         {
             const char *reason = "none";
             if (!lio_prior_gate.valid)
                 reason = "no_lio_prior";
-            else if (active_lidar_priors.empty())
+            else if (active_gated_tracks == 0)
                 reason = "no_lidar_tracks";
             else if (m_camera.empty())
                 reason = "no_camera";
             else if (LIDAR_PRIOR_REPROJ_THRESHOLD <= 0.0)
                 reason = "disabled_threshold";
-            std::printf("LIO PRIOR GATE DEBUG stamp=%.6f enabled=0 reason=%s active=%zu prev_lidar=%d status=%zu threshold=%.3f prior_valid=%d camera=%d\n",
+            std::printf("LIO PRIOR GATE DEBUG stamp=%.6f enabled=0 reason=%s active_depth=%zu active_gated=%d prev_lidar=%d status=%zu threshold=%.3f prior_valid=%d camera=%d\n",
                         cur_time,
                         reason,
                         active_lidar_priors.size(),
+                        active_gated_tracks,
                         last_prev_lidar_track_count,
                         status.size(),
                         LIDAR_PRIOR_REPROJ_THRESHOLD,
@@ -788,7 +1040,7 @@ void FeatureTracker::rejectWithLioPrior(vector<uchar> &status)
     for (size_t i = 0; i < ids.size() && i < cur_pts.size() && i < status.size(); ++i)
     {
         const auto it = active_lidar_priors.find(ids[i]);
-        if (it == active_lidar_priors.end() || !it->second.valid)
+        if (it == active_lidar_priors.end() || !it->second.valid || !it->second.lio_gate)
             continue;
         if (!status[i])
         {
@@ -836,9 +1088,10 @@ void FeatureTracker::rejectWithLioPrior(vector<uchar> &status)
         const double alpha = idx - static_cast<double>(lo);
         return reproj_errors[lo] * (1.0 - alpha) + reproj_errors[hi] * alpha;
     };
-    std::printf("LIO PRIOR GATE DEBUG stamp=%.6f enabled=1 active=%zu prev_lidar=%d tested=%d kept=%d reject_reproj=%d reject_behind=%d already_failed=%d threshold=%.3f err_med=%.3f err_p90=%.3f err_max=%.3f prior_z=%.6f\n",
+    std::printf("LIO PRIOR GATE DEBUG stamp=%.6f enabled=1 active_depth=%zu active_gated=%d prev_lidar=%d tested=%d kept=%d reject_reproj=%d reject_behind=%d already_failed=%d threshold=%.3f err_med=%.3f err_p90=%.3f err_max=%.3f prior_z=%.6f\n",
                 cur_time,
                 active_lidar_priors.size(),
+                active_gated_tracks,
                 last_prev_lidar_track_count,
                 tested,
                 kept,

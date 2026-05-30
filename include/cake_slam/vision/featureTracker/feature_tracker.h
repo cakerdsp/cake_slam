@@ -110,6 +110,8 @@ public:
 
     /** @brief Set LiDAR-projected candidates [pixel, depth m] for this frame. */
     void setLidarDepthCandidates(const vector<cake_slam::LidarVisualCandidate> &candidates);
+    /** @brief Set sparse/projected and voxel-raycast depth lookup data for this frame. */
+    void setLidarDepthFrame(const cake_slam::LidarDepthFrame &depth_frame);
 
     /** @brief Set current LIO pose prior gate, replacing legacy F-matrix gating. */
     void setLioPriorGate(const cake_slam::LioPosePrior &prior,
@@ -166,6 +168,7 @@ public:
     int getLastRejectedByLioPriorCount() const { return last_rejected_by_lio_prior_count; }
     int getLastAddedLidarCount() const { return last_added_lidar_count; }
     int getLastAddedVisualCount() const { return last_added_visual_count; }
+    int getLastVisualDepthPriorUpdateCount() const { return last_visual_depth_prior_update_count; }
     int getLastPendingLidarCandidateCount() const { return last_pending_lidar_candidate_count; }
     const FeatureTrackerTiming &getLastTiming() const { return last_timing; }
 
@@ -183,6 +186,12 @@ public:
 
     /** @brief Draw feature/depth association diagnostics for the latest frame. */
     void drawFeatureDebugImage(const std::map<int, cv::Point2f> &previous_points);
+    int attachDepthPriorsToTrackedFeatures();
+    bool queryProjectedDepth(const cv::Point2f &pixel, cake_slam::LidarDepthPrior &prior) const;
+    bool queryVoxelRaycastDepth(const cv::Point2f &pixel,
+                                const Eigen::Vector3d &bearing,
+                                cake_slam::LidarDepthPrior &prior) const;
+    bool shouldReplaceDepthPrior(int id, const cake_slam::LidarDepthPrior &candidate) const;
 
     int row = 0;
     int col = 0;
@@ -220,10 +229,12 @@ public:
     int last_rejected_by_lio_prior_count = 0;
     int last_added_lidar_count = 0;
     int last_added_visual_count = 0;
+    int last_visual_depth_prior_update_count = 0;
     int last_pending_lidar_candidate_count = 0;
     FeatureTrackerTiming last_timing;
 
     vector<cake_slam::LidarVisualCandidate> pending_lidar_candidates;
+    cake_slam::LidarDepthFrame pending_lidar_depth_frame;
     std::unordered_map<int, cake_slam::LidarDepthPrior> active_lidar_priors;
     std::unordered_map<int, cake_slam::LidarDepthPrior> current_lidar_priors;
     cake_slam::LioPosePrior lio_prior_gate;

@@ -75,9 +75,13 @@ vision:
   max_num_iterations: 8
   keyframe_parallax: 10.0
   estimate_extrinsic: 0
-  lidar_depth_enable: 0
-  lidar_prior_feature_enable: 0
+  lidar_depth_enable: 1
+  lidar_prior_feature_enable: 1
   optimize_lidar_inv_depth: 1
+  # 0: LocalVoxelMap assisted depth, 1: current scan, 2: disabled.
+  lidar_depth_source: 0
+  visual_feature_depth_prior_enable: 1
+  voxel_raycast_enable: 1
   max_lidar_features: 250
   min_lidar_depth: 0.6
   max_lidar_depth: 80.0
@@ -85,6 +89,18 @@ vision:
   z_buffer_depth_tolerance: 0.3
   shi_tomasi_min_score: 1.0e-6
   lidar_mask_radius: 20.0
+  lidar_depth_grid_rows: 12
+  lidar_depth_grid_cols: 16
+  max_lidar_depth_ratio: 0.6
+  depth_search_radius: 8.0
+  visual_depth_min_track_cnt: 2
+  max_depth_update_features: 250
+  max_raycast_features: 120
+  max_raycast_steps: 160
+  raycast_step: 0.5
+  raycast_min_cos: 0.15
+  raycast_plane_radius_scale: 3.0
+  depth_prior_update_var_ratio: 0.7
   lio_prior_reproj_threshold: 3.0
   # These are diagnostic priors, not ground truth. Extremely small variances
   # over-constrain HILTI22 and can dominate the IMU/visual factors.

@@ -793,6 +793,7 @@ void SlamNode::handleLIO()
     lio_full_state_prior_ready_ = false;
     lio_full_state_history_.clear();
     pending_lio_pose_prior_ = LioPosePrior();
+    pending_lidar_depth_frame_ = LidarDepthFrame();
     pending_lidar_visual_candidates_.clear();
     static double last_lio_prior_skip_log_time = -1.0;
     if (last_lio_prior_skip_log_time < 0.0 ||
@@ -893,10 +894,12 @@ void SlamNode::handleVIO()
       vio_->initFirstPose(state_.pos_end, state_.rot_end);
     }
     vio_->inputImage(measure.vio_time, measure.img,
-                     pending_lidar_visual_candidates_, pending_lio_pose_prior_, lio_full_prior);
+                     pending_lidar_visual_candidates_, pending_lidar_depth_frame_,
+                     pending_lio_pose_prior_, lio_full_prior);
     publishFeatureImage(measure.vio_time);
     t_vio_image_end = std::chrono::steady_clock::now();
     pending_lidar_visual_candidates_.clear();
+    pending_lidar_depth_frame_ = LidarDepthFrame();
     pending_lio_pose_prior_ = LioPosePrior();
     last_vio_update_time_ = measure.vio_time;
     if (vio_->solver_flag == Estimator::NON_LINEAR) {
@@ -1203,10 +1206,12 @@ void SlamNode::loadExtrinsicsForMain()
             camera_to_imu_R_(1, 0), camera_to_imu_R_(1, 1), camera_to_imu_R_(1, 2),
             camera_to_imu_R_(2, 0), camera_to_imu_R_(2, 1), camera_to_imu_R_(2, 2),
             camera_to_imu_t_.x(), camera_to_imu_t_.y(), camera_to_imu_t_.z());
-  CAKE_INFO("Image config: topic=%s target=%dx%d image_time_offset=%.6f td=%.6f cam0_calib=%s lidar_prior_feature_enable=%d",
+  CAKE_INFO("Image config: topic=%s target=%dx%d image_time_offset=%.6f td=%.6f cam0_calib=%s lidar_depth_source=%d lidar_prior_feature_enable=%d visual_depth_prior=%d",
             config_.vision.image_topic.c_str(), config_.vision.image_width, config_.vision.image_height,
             config_.common.image_time_offset, config_.time_offset.td, config_.vision.cam0_calib.c_str(),
-            config_.vision.lidar_prior_feature_enable ? 1 : 0);
+            config_.vision.lidar_depth_source,
+            config_.vision.lidar_prior_feature_enable ? 1 : 0,
+            config_.vision.visual_feature_depth_prior_enable ? 1 : 0);
 }
 
 LioPosePrior SlamNode::makeLioPosePrior(double stamp) const
@@ -1373,8 +1378,13 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
   // Project the latest LIO cloud into the synchronized image and keep only
   // candidates that pass valid-mask, z-buffer, texture, and spacing checks.
   pending_lidar_visual_candidates_.clear();
+  pending_lidar_depth_frame_ = LidarDepthFrame();
+  const bool depth_assist_requested =
+      config_.vision.lidar_prior_feature_enable ||
+      config_.vision.visual_feature_depth_prior_enable;
   if (!use_image_ || !vio_ || !config_.vision.lidar_depth_enable ||
-      !config_.vision.lidar_prior_feature_enable || latest_sync_mono_image_.empty()) {
+      config_.vision.lidar_depth_source == 2 ||
+      !depth_assist_requested || latest_sync_mono_image_.empty()) {
     const char *reason = "disabled";
     if (!use_image_)
       reason = "image_disabled";
@@ -1382,17 +1392,21 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
       reason = "vio_missing";
     else if (!config_.vision.lidar_depth_enable)
       reason = "lidar_depth_disabled";
-    else if (!config_.vision.lidar_prior_feature_enable)
-      reason = "lidar_prior_disabled";
+    else if (config_.vision.lidar_depth_source == 2)
+      reason = "lidar_depth_source_off";
+    else if (!depth_assist_requested)
+      reason = "depth_assist_disabled";
     else if (latest_sync_mono_image_.empty())
       reason = "image_empty";
-    std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=1 reason=%s use_image=%d vio=%d lidar_depth_enable=%d lidar_prior_feature_enable=%d image_empty=%d state_z=% .6f\n",
+    std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=1 reason=%s use_image=%d vio=%d lidar_depth_enable=%d lidar_depth_source=%d lidar_prior_feature_enable=%d visual_depth_prior=%d image_empty=%d state_z=% .6f\n",
                 stamp,
                 reason,
                 use_image_ ? 1 : 0,
                 vio_ ? 1 : 0,
                 config_.vision.lidar_depth_enable ? 1 : 0,
+                config_.vision.lidar_depth_source,
                 config_.vision.lidar_prior_feature_enable ? 1 : 0,
+                config_.vision.visual_feature_depth_prior_enable ? 1 : 0,
                 latest_sync_mono_image_.empty() ? 1 : 0,
                 state_.pos_end.z());
     return;
@@ -1421,8 +1435,15 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
                 state_.pos_end.z());
     return;
   }
-  pending_lidar_visual_candidates_ = lidar_visual_selector_.Select(
-      source_cloud, state_, latest_sync_mono_image_, vio_->getUndistortedValidMask(), camera);
+  if (config_.vision.lidar_depth_source == 0) {
+    pending_lidar_visual_candidates_ = lidar_visual_selector_.SelectFromLocalMap(
+        local_voxel_map_, source_cloud, state_, latest_sync_mono_image_,
+        vio_->getUndistortedValidMask(), camera, &pending_lidar_depth_frame_);
+  } else {
+    pending_lidar_visual_candidates_ = lidar_visual_selector_.Select(
+        source_cloud, state_, latest_sync_mono_image_, vio_->getUndistortedValidMask(),
+        camera, &pending_lidar_depth_frame_);
+  }
 
   const auto &stats = lidar_visual_selector_.lastStats();
   const double depth_ratio = stats.input_points > 0
@@ -1441,8 +1462,9 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
                                 ? static_cast<double>(stats.mask_kept) /
                                       static_cast<double>(stats.texture_kept)
                                 : 0.0;
-  std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=0 source_points=%zu input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d selected=%zu depth_ratio=%.3f image_ratio=%.3f texture_ratio=%.3f mask_ratio=%.3f image_size=%dx%d state_z=% .6f min_depth=%.3f max_depth=%.3f mask_radius=%.3f score_min=%.6g\n",
+  std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=0 source_mode=%d source_points=%zu input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d selected=%zu depth_ratio=%.3f image_ratio=%.3f texture_ratio=%.3f mask_ratio=%.3f occlusion_reject=%d map_raycast=%d/%d depth_cells=%d image_size=%dx%d state_z=% .6f min_depth=%.3f max_depth=%.3f mask_radius=%.3f score_min=%.6g\n",
               stamp,
+              stats.source_mode,
               source_points,
               stats.input_points,
               stats.positive_depth,
@@ -1455,6 +1477,10 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
               image_ratio,
               texture_ratio,
               mask_ratio,
+              stats.occlusion_reject,
+              stats.map_raycast_hits,
+              stats.map_raycast_attempts,
+              stats.visual_depth_cells,
               latest_sync_mono_image_.cols,
               latest_sync_mono_image_.rows,
               state_.pos_end.z(),

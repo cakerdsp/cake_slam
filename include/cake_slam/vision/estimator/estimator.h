@@ -106,6 +106,7 @@ public:
      */
     void inputImage(double t, const cv::Mat &_img,
                     const std::vector<cake_slam::LidarVisualCandidate> &lidar_candidates,
+                    const cake_slam::LidarDepthFrame &lidar_depth_frame,
                     const cake_slam::LioPosePrior &lio_pose_prior,
                     const cake_slam::LioFullStatePrior &lio_full_prior,
                     const cv::Mat &_img1 = cv::Mat());

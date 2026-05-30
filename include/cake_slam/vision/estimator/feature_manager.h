@@ -129,6 +129,11 @@ public:
     /** @brief Provide priors for new feature ids in the next image. */
     void setPendingLidarDepthPriors(
         const std::unordered_map<int, cake_slam::LidarDepthPrior> &priors);
+    void updateLidarDepthPriors(const std::unordered_map<int, cake_slam::LidarDepthPrior> &priors,
+                                int frame_count,
+                                StatesGroup states_[],
+                                Eigen::Vector3d tic[],
+                                Eigen::Matrix3d ric[]);
 
     int getFeatureCount();
     bool addFeatureCheckParallax(int frame_count,
@@ -159,9 +164,19 @@ public:
     double last_average_parallax = 0.0;
     int new_feature_num = 0;
     int long_track_num = 0;
+    int last_lidar_depth_prior_updates = 0;
+    int last_lidar_depth_prior_rejects = 0;
 
 private:
     double compensatedParallax2(const FeaturePerId &it_per_id, int frame_count);
+    bool convertPriorToHostDepth(const FeaturePerId &feature,
+                                 const cake_slam::LidarDepthPrior &prior,
+                                 StatesGroup states_[],
+                                 Eigen::Vector3d tic[],
+                                 Eigen::Matrix3d ric[],
+                                 cake_slam::LidarDepthPrior &host_prior) const;
+    bool acceptDepthPrior(const cake_slam::LidarDepthPrior &old_prior,
+                          const cake_slam::LidarDepthPrior &new_prior) const;
 
     Eigen::Matrix3d ric[2];
     std::unordered_map<int, cake_slam::LidarDepthPrior> pending_lidar_depth_priors_;

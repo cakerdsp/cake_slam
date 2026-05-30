@@ -181,6 +181,7 @@ Eigen::Vector3d Estimator::getCameraToImuTranslation(int camera_id) const
 // 输入原始图像，并由前端先做跟踪，再把结果送入后端缓存。
 void Estimator::inputImage(double t, const cv::Mat &_img,
                            const std::vector<cake_slam::LidarVisualCandidate> &lidar_candidates,
+                           const cake_slam::LidarDepthFrame &lidar_depth_frame,
                            const cake_slam::LioPosePrior &lio_pose_prior,
                            const cake_slam::LioFullStatePrior &lio_full_prior,
                            const cv::Mat &_img1)
@@ -190,6 +191,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img,
     TicToc featureTrackerTime;
 
     featureTracker.setLidarDepthCandidates(lidar_candidates);
+    featureTracker.setLidarDepthFrame(lidar_depth_frame);
     featureTracker.setLioPriorGate(lio_pose_prior, ric[0], tic[0]);
     if(_img1.empty())
         featureFrame = featureTracker.trackImage(t, _img);
@@ -524,6 +526,7 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
         marginalization_flag = MARGIN_SECOND_NEW;
         //printf("non-keyframe\n");
     }
+    f_manager.updateLidarDepthPriors(packet.lidar_depth_priors, frame_count, states_, tic, ric);
 
     ROS_DEBUG("%s", marginalization_flag ? "Non-keyframe" : "Keyframe");
     ROS_DEBUG("Solving %d", frame_count);

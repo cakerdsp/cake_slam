@@ -63,6 +63,7 @@ int VIO_DEBUG_FACTOR_COSTS;
 double LIDAR_PRIOR_REPROJ_THRESHOLD;
 double MIN_INV_DEPTH_VAR;
 double MIN_LIO_POSE_PRIOR_VAR;
+double DEPTH_PRIOR_UPDATE_VAR_RATIO;
 
 std::string WORLD_FRAME_ID;
 std::string BODY_FRAME_ID;
@@ -271,6 +272,8 @@ void readParameters(std::string config_file)
     LIDAR_PRIOR_REPROJ_THRESHOLD = readOrDefault<double>(fsSettings, "vision.lio_prior_reproj_threshold", 3.0);
     MIN_INV_DEPTH_VAR = readOrDefault<double>(fsSettings, "vision.min_inv_depth_var", 1e-6);
     MIN_LIO_POSE_PRIOR_VAR = readOrDefault<double>(fsSettings, "vision.min_lio_pose_prior_var", 1e-6);
+    DEPTH_PRIOR_UPDATE_VAR_RATIO =
+        std::max(0.0, readOrDefault<double>(fsSettings, "vision.depth_prior_update_var_ratio", 0.7));
 
     MULTIPLE_THREAD = readOrDefault<int>(fsSettings, "vision.multiple_thread", 0);
 

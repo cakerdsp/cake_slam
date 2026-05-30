@@ -70,6 +70,106 @@ void FeatureManager::setPendingLidarDepthPriors(const std::unordered_map<int, ca
     pending_lidar_depth_priors_ = priors;
 }
 
+bool FeatureManager::convertPriorToHostDepth(const FeaturePerId &feature_track,
+                                             const cake_slam::LidarDepthPrior &prior,
+                                             StatesGroup states_[],
+                                             Eigen::Vector3d tic[],
+                                             Eigen::Matrix3d ric[],
+                                             cake_slam::LidarDepthPrior &host_prior) const
+{
+    host_prior = cake_slam::LidarDepthPrior();
+    if (!prior.valid || feature_track.feature_per_frame.empty() ||
+        feature_track.start_frame < 0 || feature_track.start_frame > WINDOW_SIZE)
+        return false;
+
+    const int host = feature_track.start_frame;
+    const Eigen::Matrix3d R_WC = states_[host].rot_end * ric[0];
+    const Eigen::Vector3d p_WC = states_[host].rot_end * tic[0] + states_[host].pos_end;
+    const Eigen::Vector3d p_c = R_WC.transpose() * (prior.P_W_init - p_WC);
+    const double depth = p_c.z();
+    if (depth <= 0.1)
+        return false;
+
+    const Eigen::Vector3d host_bearing = feature_track.feature_per_frame.front().point;
+    const Eigen::Vector2d projected(p_c.x() / depth, p_c.y() / depth);
+    const Eigen::Vector2d observed(host_bearing.x() / host_bearing.z(),
+                                   host_bearing.y() / host_bearing.z());
+    if ((projected - observed).norm() > 0.12)
+        return false;
+
+    host_prior = prior;
+    host_prior.depth = depth;
+    host_prior.inv_depth = 1.0 / depth;
+    const double scale = std::max(0.25, (prior.depth > 0.0 ? depth / prior.depth : 1.0));
+    host_prior.inv_depth_var = std::max(MIN_INV_DEPTH_VAR, prior.inv_depth_var / (scale * scale));
+    return true;
+}
+
+bool FeatureManager::acceptDepthPrior(const cake_slam::LidarDepthPrior &old_prior,
+                                      const cake_slam::LidarDepthPrior &new_prior) const
+{
+    if (!new_prior.valid || new_prior.depth <= 0.0 || new_prior.inv_depth <= 0.0)
+        return false;
+    if (!old_prior.valid)
+        return true;
+    if (new_prior.source < old_prior.source &&
+        new_prior.inv_depth_var <= old_prior.inv_depth_var * 1.5)
+        return true;
+    const double ratio = DEPTH_PRIOR_UPDATE_VAR_RATIO > 0.0 ? DEPTH_PRIOR_UPDATE_VAR_RATIO : 1.0;
+    return new_prior.inv_depth_var < std::max(MIN_INV_DEPTH_VAR, old_prior.inv_depth_var * ratio);
+}
+
+void FeatureManager::updateLidarDepthPriors(const std::unordered_map<int, cake_slam::LidarDepthPrior> &priors,
+                                            int frame_count,
+                                            StatesGroup states_[],
+                                            Eigen::Vector3d tic[],
+                                            Eigen::Matrix3d ric[])
+{
+    last_lidar_depth_prior_updates = 0;
+    last_lidar_depth_prior_rejects = 0;
+    if (priors.empty())
+        return;
+
+    for (auto &it_per_id : feature)
+    {
+        const auto prior_it = priors.find(it_per_id.feature_id);
+        if (prior_it == priors.end() || !prior_it->second.valid)
+            continue;
+        if (it_per_id.start_frame > frame_count || it_per_id.feature_per_frame.empty())
+        {
+            ++last_lidar_depth_prior_rejects;
+            continue;
+        }
+
+        cake_slam::LidarDepthPrior host_prior;
+        if (!convertPriorToHostDepth(it_per_id, prior_it->second, states_, tic, ric, host_prior))
+        {
+            ++last_lidar_depth_prior_rejects;
+            continue;
+        }
+        if (!acceptDepthPrior(it_per_id.lidar_depth_prior, host_prior))
+        {
+            ++last_lidar_depth_prior_rejects;
+            continue;
+        }
+        it_per_id.has_lidar_depth_prior = true;
+        it_per_id.lidar_depth_prior = host_prior;
+        it_per_id.estimated_depth = host_prior.depth;
+        it_per_id.solve_flag = 1;
+        ++last_lidar_depth_prior_updates;
+    }
+
+    if (last_lidar_depth_prior_updates > 0 || last_lidar_depth_prior_rejects > 0)
+    {
+        std::printf("FEATURE MANAGER DEPTH PRIOR DEBUG frame=%d input=%zu updated=%d rejected=%d tracks=%zu\n",
+                    frame_count,
+                    priors.size(),
+                    last_lidar_depth_prior_updates,
+                    last_lidar_depth_prior_rejects,
+                    feature.size());
+    }
+}
+
 // 统计“可用于优化”的特征数。
 // 这里要求一个特征至少被 4 次观测到，才认为具有较稳定的几何约束。
 int FeatureManager::getFeatureCount()

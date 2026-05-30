@@ -90,6 +90,7 @@ extern int VIO_DEBUG_FACTOR_COSTS;
 extern double LIDAR_PRIOR_REPROJ_THRESHOLD;
 extern double MIN_INV_DEPTH_VAR;
 extern double MIN_LIO_POSE_PRIOR_VAR;
+extern double DEPTH_PRIOR_UPDATE_VAR_RATIO;
 extern std::string WORLD_FRAME_ID;
 extern std::string BODY_FRAME_ID;
 extern std::string CAMERA_FRAME_ID;

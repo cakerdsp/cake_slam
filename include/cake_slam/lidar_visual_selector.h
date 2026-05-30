@@ -13,6 +13,7 @@
 #include "cake_slam/common_lib.h"
 #include "cake_slam/config.h"
 #include "cake_slam/lidar_visual_types.h"
+#include "cake_slam/local_voxel_map.h"
 
 namespace cake_slam {
 
@@ -46,7 +47,17 @@ public:
       const StatesGroup &state,
       const cv::Mat &gray,
       const cv::Mat &valid_mask,
-      const camodocal::CameraConstPtr &camera);
+      const camodocal::CameraConstPtr &camera,
+      LidarDepthFrame *depth_frame = nullptr);
+
+  std::vector<LidarVisualCandidate> SelectFromLocalMap(
+      const LocalVoxelMapPtr &local_map,
+      const PointCloudXYZI::Ptr &occlusion_cloud_lidar,
+      const StatesGroup &state,
+      const cv::Mat &gray,
+      const cv::Mat &valid_mask,
+      const camodocal::CameraConstPtr &camera,
+      LidarDepthFrame *depth_frame);
 
   const LidarVisualSelectorStats &lastStats() const { return last_stats_; }
 
@@ -59,7 +70,17 @@ private:
   bool inValidDomain(const cv::Mat &valid_mask, const cv::Point2f &pixel) const;
   bool textureAccepted(const cv::Mat &gray, const cv::Point2f &pixel, double *score) const;
   bool maskAccepts(const std::vector<LidarVisualCandidate> &selected, const cv::Point2f &pixel) const;
+  bool gridAccepts(std::vector<int> &grid_counts, const cv::Size &image_size, const cv::Point2f &pixel) const;
   double inverseDepthVariance(const Eigen::Matrix3d &cov_lidar, double depth) const;
+  double inverseDepthVarianceFromRaycast(const LocalVoxelMap::RaycastHit &hit, double depth) const;
+  void initializeDepthFrame(const StatesGroup &state, const cv::Mat &gray, LidarDepthFrame *depth_frame) const;
+  bool updateDepthFrameCell(LidarDepthFrame *depth_frame, const LidarVisualCandidate &candidate);
+  bool scanOccludes(const LidarDepthFrame &depth_frame, const cv::Point2f &pixel, double depth) const;
+  bool candidateFromMapRaycast(const LocalVoxelMapPtr &local_map,
+                               const StatesGroup &state,
+                               const cv::Point2f &pixel,
+                               const camodocal::CameraConstPtr &camera,
+                               LidarVisualCandidate &candidate) const;
 
   VisionConfig vision_;
   double lidar_range_noise_ = 0.05;

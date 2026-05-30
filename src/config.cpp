@@ -160,6 +160,9 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.lidar_prior_enable", config.vision.lidar_prior_feature_enable);
   readIfPresent(fs, "vision.radar_prior_feature_enable", config.vision.lidar_prior_feature_enable);
   readIfPresent(fs, "vision.optimize_lidar_inv_depth", config.vision.optimize_lidar_inv_depth);
+  readIfPresent(fs, "vision.lidar_depth_source", config.vision.lidar_depth_source);
+  readIfPresent(fs, "vision.visual_feature_depth_prior_enable", config.vision.visual_feature_depth_prior_enable);
+  readIfPresent(fs, "vision.voxel_raycast_enable", config.vision.voxel_raycast_enable);
   readIfPresent(fs, "vision.max_lidar_features", config.vision.max_lidar_features);
   readIfPresent(fs, "vision.min_lidar_depth", config.vision.min_lidar_depth);
   readIfPresent(fs, "vision.max_lidar_depth", config.vision.max_lidar_depth);
@@ -167,6 +170,18 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.z_buffer_depth_tolerance", config.vision.z_buffer_depth_tolerance);
   readIfPresent(fs, "vision.shi_tomasi_min_score", config.vision.shi_tomasi_min_score);
   readIfPresent(fs, "vision.lidar_mask_radius", config.vision.lidar_mask_radius);
+  readIfPresent(fs, "vision.lidar_depth_grid_rows", config.vision.lidar_depth_grid_rows);
+  readIfPresent(fs, "vision.lidar_depth_grid_cols", config.vision.lidar_depth_grid_cols);
+  readIfPresent(fs, "vision.max_lidar_depth_ratio", config.vision.max_lidar_depth_ratio);
+  readIfPresent(fs, "vision.depth_search_radius", config.vision.depth_search_radius);
+  readIfPresent(fs, "vision.visual_depth_min_track_cnt", config.vision.visual_depth_min_track_cnt);
+  readIfPresent(fs, "vision.max_depth_update_features", config.vision.max_depth_update_features);
+  readIfPresent(fs, "vision.max_raycast_features", config.vision.max_raycast_features);
+  readIfPresent(fs, "vision.max_raycast_steps", config.vision.max_raycast_steps);
+  readIfPresent(fs, "vision.raycast_step", config.vision.raycast_step);
+  readIfPresent(fs, "vision.raycast_min_cos", config.vision.raycast_min_cos);
+  readIfPresent(fs, "vision.raycast_plane_radius_scale", config.vision.raycast_plane_radius_scale);
+  readIfPresent(fs, "vision.depth_prior_update_var_ratio", config.vision.depth_prior_update_var_ratio);
   readIfPresent(fs, "vision.lio_prior_reproj_threshold", config.vision.lio_prior_reproj_threshold);
   readIfPresent(fs, "vision.lidar_depth_std", config.vision.lidar_depth_std);
   readIfPresent(fs, "vision.min_inv_depth_var", config.vision.min_inv_depth_var);

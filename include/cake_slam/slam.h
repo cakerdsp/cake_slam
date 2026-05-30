@@ -204,6 +204,7 @@ private:
   cv::Mat latest_sync_mono_image_;
   cv::Mat latest_sync_color_image_;
   std::vector<LidarVisualCandidate> pending_lidar_visual_candidates_;
+  LidarDepthFrame pending_lidar_depth_frame_;
   LioPosePrior pending_lio_pose_prior_;
   std::deque<LioFullStatePrior> lio_full_state_history_;
 
