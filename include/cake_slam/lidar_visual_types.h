@@ -102,8 +102,6 @@ struct LidarVisualSelectorStats
   int mask_kept = 0;
   int source_mode = 1;
   int occlusion_reject = 0;
-  int map_raycast_attempts = 0;
-  int map_raycast_hits = 0;
   int visual_depth_cells = 0;
   double total_ms = 0.0;
   double project_ms = 0.0;

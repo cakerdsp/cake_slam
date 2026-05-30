@@ -76,11 +76,6 @@ private:
   void initializeDepthFrame(const StatesGroup &state, const cv::Mat &gray, LidarDepthFrame *depth_frame) const;
   bool updateDepthFrameCell(LidarDepthFrame *depth_frame, const LidarVisualCandidate &candidate);
   bool scanOccludes(const LidarDepthFrame &depth_frame, const cv::Point2f &pixel, double depth) const;
-  bool candidateFromMapRaycast(const LocalVoxelMapPtr &local_map,
-                               const StatesGroup &state,
-                               const cv::Point2f &pixel,
-                               const camodocal::CameraConstPtr &camera,
-                               LidarVisualCandidate &candidate) const;
 
   VisionConfig vision_;
   double lidar_range_noise_ = 0.05;

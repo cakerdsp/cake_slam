@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 #include <opencv2/imgproc.hpp>
 
@@ -20,6 +21,184 @@ double elapsedMs(const std::chrono::steady_clock::time_point &start)
   return std::chrono::duration<double, std::milli>(
              std::chrono::steady_clock::now() - start)
       .count();
+}
+
+struct MapProjectionSample
+{
+  Eigen::Vector3d point_w = Eigen::Vector3d::Zero();
+  Eigen::Vector3d normal_w = Eigen::Vector3d::Zero();
+  Eigen::Matrix3d cov_w = Eigen::Matrix3d::Zero();
+  double plane_var_scalar = 0.0;
+  double quality = 0.0;
+  bool from_plane = false;
+};
+
+Eigen::Vector3d normalizedOrZero(const Eigen::Vector3d &v)
+{
+  const double n = v.norm();
+  return n > 1e-9 ? (v / n).eval() : Eigen::Vector3d::Zero();
+}
+
+Eigen::Vector3d fallbackPlaneAxis(const Eigen::Vector3d &normal)
+{
+  Eigen::Vector3d axis = std::abs(normal.x()) < 0.9
+                             ? Eigen::Vector3d::UnitX()
+                             : Eigen::Vector3d::UnitY();
+  axis -= normal * normal.dot(axis);
+  return normalizedOrZero(axis);
+}
+
+void appendSampleIfNear(std::vector<MapProjectionSample> &bucket,
+                        const MapProjectionSample &sample,
+                        const Eigen::Vector3d &camera_w,
+                        double max_range,
+                        int max_bucket_size)
+{
+  if (static_cast<int>(bucket.size()) >= max_bucket_size) {
+    return;
+  }
+  const double range = (sample.point_w - camera_w).norm();
+  if (range <= max_range) {
+    bucket.push_back(sample);
+  }
+}
+
+void appendPlaneSamples(const VoxelOctoTree *octo,
+                        const Eigen::Vector3d &camera_w,
+                        double max_range,
+                        int max_bucket_size,
+                        std::vector<MapProjectionSample> &plane_samples)
+{
+  if (!octo || !octo->plane_ptr_ ||
+      static_cast<int>(plane_samples.size()) >= max_bucket_size) {
+    return;
+  }
+
+  const VoxelPlane &plane = *octo->plane_ptr_;
+  if (!plane.is_plane_ || !plane.is_init_) {
+    return;
+  }
+
+  Eigen::Vector3d normal = normalizedOrZero(plane.normal_);
+  if (normal.isZero(1e-9)) {
+    return;
+  }
+  Eigen::Vector3d x_axis = normalizedOrZero(plane.x_normal_);
+  if (x_axis.isZero(1e-9) || std::abs(x_axis.dot(normal)) > 0.2) {
+    x_axis = fallbackPlaneAxis(normal);
+  }
+  Eigen::Vector3d y_axis = normalizedOrZero(plane.y_normal_);
+  if (y_axis.isZero(1e-9) || std::abs(y_axis.dot(normal)) > 0.2) {
+    y_axis = normalizedOrZero(normal.cross(x_axis));
+  }
+  if (x_axis.isZero(1e-9) || y_axis.isZero(1e-9)) {
+    return;
+  }
+
+  const double node_radius = std::max(0.05, static_cast<double>(octo->quater_length_));
+  const double sample_radius = 0.5 * std::min(std::max(0.05, static_cast<double>(plane.radius_)), node_radius);
+  const double plane_var_scalar = std::max(0.0, std::max(
+      plane.plane_var_.block<3, 3>(0, 0).trace(),
+      plane.plane_var_.block<3, 3>(3, 3).trace()));
+
+  const auto append_at = [&](const Eigen::Vector3d &p, double quality_scale) {
+    MapProjectionSample sample;
+    sample.point_w = p;
+    sample.normal_w = normal;
+    sample.plane_var_scalar = plane_var_scalar;
+    sample.quality = 2.0 + quality_scale + 1e-3 * static_cast<double>(plane.points_size_);
+    sample.from_plane = true;
+    appendSampleIfNear(plane_samples, sample, camera_w, max_range, max_bucket_size);
+  };
+
+  append_at(plane.center_, 0.2);
+  append_at(plane.center_ + sample_radius * x_axis, 0.1);
+  append_at(plane.center_ - sample_radius * x_axis, 0.1);
+  append_at(plane.center_ + sample_radius * y_axis, 0.1);
+  append_at(plane.center_ - sample_radius * y_axis, 0.1);
+}
+
+void appendPointSamples(const VoxelOctoTree *octo,
+                        const Eigen::Vector3d &camera_w,
+                        double max_range,
+                        int max_bucket_size,
+                        bool stable_plane_points,
+                        std::vector<MapProjectionSample> &bucket)
+{
+  if (!octo || octo->temp_points_.empty() ||
+      static_cast<int>(bucket.size()) >= max_bucket_size) {
+    return;
+  }
+
+  const int max_per_node = stable_plane_points ? 4 : 2;
+  const int available = static_cast<int>(octo->temp_points_.size());
+  const int wanted = std::min(max_per_node, available);
+  const int stride = std::max(1, available / std::max(1, wanted));
+  int added = 0;
+  for (int i = 0; i < available && added < wanted; i += stride) {
+    const pointWithVar &pv = octo->temp_points_[static_cast<size_t>(i)];
+    MapProjectionSample sample;
+    sample.point_w = pv.point_w;
+    sample.normal_w = normalizedOrZero(pv.normal);
+    sample.cov_w = pv.var;
+    sample.plane_var_scalar = std::max(0.0, pv.var.trace());
+    sample.quality = stable_plane_points ? 1.5 : 0.5;
+    sample.from_plane = false;
+    const size_t old_size = bucket.size();
+    appendSampleIfNear(bucket, sample, camera_w, max_range, max_bucket_size);
+    if (bucket.size() != old_size) {
+      ++added;
+    }
+  }
+}
+
+void collectOctoProjectionSamples(const VoxelOctoTree *octo,
+                                  const Eigen::Vector3d &camera_w,
+                                  double max_range,
+                                  int max_bucket_size,
+                                  std::vector<MapProjectionSample> &plane_samples,
+                                  std::vector<MapProjectionSample> &stable_points,
+                                  std::vector<MapProjectionSample> &fallback_points)
+{
+  if (!octo) {
+    return;
+  }
+  if (static_cast<int>(plane_samples.size()) >= max_bucket_size &&
+      static_cast<int>(stable_points.size()) >= max_bucket_size &&
+      static_cast<int>(fallback_points.size()) >= max_bucket_size) {
+    return;
+  }
+
+  const Eigen::Vector3d voxel_center(octo->voxel_center_[0],
+                                     octo->voxel_center_[1],
+                                     octo->voxel_center_[2]);
+  const double bound_radius = std::sqrt(3.0) * std::max(0.0, static_cast<double>(octo->quater_length_));
+  if ((voxel_center - camera_w).norm() - bound_radius > max_range) {
+    return;
+  }
+
+  const bool stable_plane =
+      octo->plane_ptr_ && octo->plane_ptr_->is_plane_ && octo->plane_ptr_->is_init_;
+  if (stable_plane) {
+    appendPlaneSamples(octo, camera_w, max_range, max_bucket_size, plane_samples);
+    appendPointSamples(octo, camera_w, max_range, max_bucket_size, true, stable_points);
+    return;
+  }
+
+  bool has_child = false;
+  if (octo->init_octo_ && octo->layer_ < octo->max_layer_) {
+    for (const auto *leaf : octo->leaves_) {
+      if (leaf) {
+        has_child = true;
+        collectOctoProjectionSamples(leaf, camera_w, max_range, max_bucket_size,
+                                     plane_samples, stable_points, fallback_points);
+      }
+    }
+  }
+
+  if (!has_child) {
+    appendPointSamples(octo, camera_w, max_range, max_bucket_size, false, fallback_points);
+  }
 }
 
 } // namespace
@@ -261,63 +440,177 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::SelectFromLocalMap(
   }
   last_stats_.occlusion_ms = elapsedMs(t_occlusion);
 
+  const auto t_project = std::chrono::steady_clock::now();
+  const Eigen::Matrix3d R_I_C = R_I_L_ * R_C_L_.transpose();
+  const Eigen::Vector3d t_I_C = t_I_L_ - R_I_C * t_C_L_;
+  const Eigen::Vector3d camera_w = state.rot_end * t_I_C + state.pos_end;
+
+  const int sample_bucket_cap = std::max(256, std::max(1, vision_.max_lidar_features) * 8);
+  std::vector<MapProjectionSample> plane_samples;
+  std::vector<MapProjectionSample> stable_points;
+  std::vector<MapProjectionSample> fallback_points;
+  plane_samples.reserve(static_cast<size_t>(sample_bucket_cap));
+  stable_points.reserve(static_cast<size_t>(sample_bucket_cap));
+  fallback_points.reserve(static_cast<size_t>(sample_bucket_cap));
+  std::vector<std::pair<double, const VoxelOctoTree *>> nearby_roots;
+  nearby_roots.reserve(local_map->VoxelMap().size());
+  for (const auto &kv : local_map->VoxelMap()) {
+    if (!kv.second) {
+      continue;
+    }
+    const VoxelOctoTree *root = kv.second;
+    const Eigen::Vector3d voxel_center(root->voxel_center_[0],
+                                       root->voxel_center_[1],
+                                       root->voxel_center_[2]);
+    const double bound_radius = std::sqrt(3.0) * std::max(0.0, static_cast<double>(root->quater_length_));
+    const double near_range = (voxel_center - camera_w).norm() - bound_radius;
+    if (near_range <= vision_.max_lidar_depth) {
+      nearby_roots.emplace_back(std::max(0.0, near_range), root);
+    }
+  }
+  std::sort(nearby_roots.begin(), nearby_roots.end(),
+            [](const auto &a, const auto &b) { return a.first < b.first; });
+  for (const auto &root : nearby_roots) {
+    collectOctoProjectionSamples(root.second, camera_w, vision_.max_lidar_depth,
+                                 sample_bucket_cap, plane_samples,
+                                 stable_points, fallback_points);
+    if (static_cast<int>(plane_samples.size()) >= sample_bucket_cap &&
+        static_cast<int>(stable_points.size()) >= sample_bucket_cap &&
+        static_cast<int>(fallback_points.size()) >= sample_bucket_cap) {
+      break;
+    }
+  }
+  last_stats_.input_points = static_cast<int>(plane_samples.size() + stable_points.size() + fallback_points.size());
+
+  const int cell_size = std::max(1, vision_.z_buffer_cell_size);
+  const int cell_cols = (gray_u8.cols + cell_size - 1) / cell_size;
+  const int cell_rows = (gray_u8.rows + cell_size - 1) / cell_size;
+  const int cell_count = std::max(1, cell_cols * cell_rows);
+  std::vector<ProjectedCandidate> zbuffer(cell_count);
+  std::vector<double> zbuffer_depth(cell_count, std::numeric_limits<double>::infinity());
+  std::vector<bool> zbuffer_valid(cell_count, false);
+  const int border = std::max(2, static_cast<int>(std::round(vision_.lidar_mask_radius * 0.5)));
+  const Eigen::Matrix3d R_C_W = R_I_C.transpose() * state.rot_end.transpose();
+
+  const auto inv_depth_var_from_sample = [&](const MapProjectionSample &sample,
+                                             double depth,
+                                             double incidence) -> double {
+    const double depth4 = std::max(1e-6, depth * depth * depth * depth);
+    if (sample.from_plane) {
+      const double distance_sigma = vision_.lidar_depth_std * (1.0 + 0.02 * std::max(0.0, depth));
+      const double incidence_scale = 1.0 / std::max(0.1, incidence);
+      const double sigma_z2 = distance_sigma * distance_sigma * incidence_scale * incidence_scale +
+                              std::max(0.0, sample.plane_var_scalar);
+      return std::max(vision_.min_inv_depth_var, sigma_z2 / depth4);
+    }
+    double sigma_z2 = vision_.lidar_depth_std * vision_.lidar_depth_std;
+    if (sample.cov_w.trace() > 1e-12) {
+      const Eigen::Matrix3d cov_cam = R_C_W * sample.cov_w * R_C_W.transpose();
+      sigma_z2 = std::max(sigma_z2, cov_cam(2, 2));
+    }
+    return std::max(vision_.min_inv_depth_var, sigma_z2 / depth4);
+  };
+
+  const auto project_bucket = [&](const std::vector<MapProjectionSample> &samples) {
+    for (const auto &sample : samples) {
+      const Eigen::Vector3d p_body = state.rot_end.transpose() * (sample.point_w - state.pos_end);
+      const Eigen::Vector3d p_cam = R_I_C.transpose() * (p_body - t_I_C);
+      const double depth = p_cam.z();
+      if (depth <= vision_.min_lidar_depth || depth >= vision_.max_lidar_depth) {
+        continue;
+      }
+      last_stats_.positive_depth++;
+
+      Eigen::Vector2d uv;
+      camera->spaceToPlane(p_cam, uv);
+      const int u = static_cast<int>(std::round(uv.x()));
+      const int v = static_cast<int>(std::round(uv.y()));
+      if (u < border || v < border || u >= gray_u8.cols - border || v >= gray_u8.rows - border) {
+        continue;
+      }
+      const cv::Point2f pixel(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
+      if (!inValidDomain(valid_mask, pixel)) {
+        continue;
+      }
+      last_stats_.in_image++;
+
+      if (scanOccludes(depth_frame ? *depth_frame : LidarDepthFrame(), pixel, depth)) {
+        last_stats_.occlusion_reject++;
+        continue;
+      }
+
+      Eigen::Vector3d ray_w = sample.point_w - camera_w;
+      if (ray_w.norm() <= 1e-9) {
+        continue;
+      }
+      ray_w.normalize();
+      double incidence = 1.0;
+      if (!sample.normal_w.isZero(1e-9)) {
+        incidence = std::abs(sample.normal_w.normalized().dot(ray_w));
+      }
+      if (sample.from_plane && incidence < vision_.raycast_min_cos) {
+        continue;
+      }
+
+      const int cell_x = std::min(cell_cols - 1, std::max(0, u / cell_size));
+      const int cell_y = std::min(cell_rows - 1, std::max(0, v / cell_size));
+      const int cell = cell_y * cell_cols + cell_x;
+      if (zbuffer_valid[cell] && depth >= zbuffer_depth[cell] - vision_.z_buffer_depth_tolerance) {
+        continue;
+      }
+
+      LidarVisualCandidate candidate;
+      candidate.pixel = pixel;
+      candidate.depth = depth;
+      candidate.inv_depth = 1.0 / depth;
+      candidate.inv_depth_var = inv_depth_var_from_sample(sample, depth, incidence);
+      candidate.P_W_init = sample.point_w;
+      candidate.source = 0;
+      candidate.depth_prior_allowed = true;
+      candidate.lio_gate = true;
+      candidate.shi_tomasi_score = sample.quality;
+      candidate.mask_radius = vision_.lidar_mask_radius;
+
+      zbuffer[cell].candidate = candidate;
+      zbuffer_depth[cell] = depth;
+      zbuffer_valid[cell] = true;
+    }
+  };
+
+  project_bucket(plane_samples);
+  project_bucket(stable_points);
+  project_bucket(fallback_points);
+  last_stats_.project_ms = elapsedMs(t_project);
+
+  for (int i = 0; i < cell_count; ++i) {
+    if (!zbuffer_valid[i]) {
+      continue;
+    }
+    last_stats_.zbuffer_kept++;
+    updateDepthFrameCell(depth_frame, zbuffer[i].candidate);
+  }
+
   if (!vision_.lidar_prior_feature_enable) {
     last_stats_.total_ms = elapsedMs(t_total);
     return selected;
   }
 
-  const auto t_corner = std::chrono::steady_clock::now();
-  cv::Mat corner_mask;
-  if (!valid_mask.empty() && valid_mask.type() == CV_8UC1 &&
-      valid_mask.size() == gray_u8.size()) {
-    corner_mask = valid_mask;
-  }
-
-  const int max_corners = std::max(vision_.max_lidar_features * 4, vision_.max_lidar_features);
-  std::vector<cv::Point2f> corners;
-  if (max_corners > 0) {
-    cv::goodFeaturesToTrack(gray_u8, corners, max_corners, 0.01,
-                            std::max(4, vision_.min_dist / 2), corner_mask);
-  }
-  last_stats_.input_points = static_cast<int>(corners.size());
-  last_stats_.corner_ms = elapsedMs(t_corner);
-
-  const auto t_raycast = std::chrono::steady_clock::now();
+  const auto t_texture = std::chrono::steady_clock::now();
   std::vector<LidarVisualCandidate> texture_kept;
-  texture_kept.reserve(corners.size());
-  const int max_raycast_attempts = std::max(0, vision_.max_raycast_features);
-  for (const auto &pixel : corners) {
-    if (static_cast<int>(texture_kept.size()) >= std::max(vision_.max_lidar_features * 3, vision_.max_lidar_features)) {
-      break;
-    }
-    if (last_stats_.map_raycast_attempts >= max_raycast_attempts) {
-      break;
-    }
-    last_stats_.map_raycast_attempts++;
-    LidarVisualCandidate candidate;
-    if (!candidateFromMapRaycast(local_map, state, pixel, camera, candidate)) {
-      continue;
-    }
-    last_stats_.map_raycast_hits++;
-    if (scanOccludes(depth_frame ? *depth_frame : LidarDepthFrame(), pixel, candidate.depth)) {
-      last_stats_.occlusion_reject++;
+  texture_kept.reserve(static_cast<size_t>(last_stats_.zbuffer_kept));
+  for (int i = 0; i < cell_count; ++i) {
+    if (!zbuffer_valid[i]) {
       continue;
     }
     double score = 0.0;
-    if (!textureAccepted(gray_u8, pixel, &score)) {
+    if (!textureAccepted(gray_u8, zbuffer[i].candidate.pixel, &score)) {
       continue;
     }
-    candidate.shi_tomasi_score = score;
-    candidate.mask_radius = vision_.lidar_mask_radius;
-    texture_kept.push_back(candidate);
-    updateDepthFrameCell(depth_frame, candidate);
+    zbuffer[i].candidate.shi_tomasi_score = score + 1e-3 * zbuffer[i].candidate.shi_tomasi_score;
+    texture_kept.push_back(zbuffer[i].candidate);
   }
-  last_stats_.raycast_ms = elapsedMs(t_raycast);
-
-  last_stats_.positive_depth = last_stats_.map_raycast_hits;
-  last_stats_.in_image = static_cast<int>(texture_kept.size());
-  last_stats_.zbuffer_kept = depth_frame ? last_stats_.visual_depth_cells : 0;
   last_stats_.texture_kept = static_cast<int>(texture_kept.size());
+  last_stats_.texture_ms = elapsedMs(t_texture);
 
   const auto t_select = std::chrono::steady_clock::now();
   std::sort(texture_kept.begin(), texture_kept.end(),
@@ -558,66 +851,27 @@ bool LidarVisualSelector::scanOccludes(const LidarDepthFrame &depth_frame, const
   }
   const int cell_x = std::min(depth_frame.cell_cols - 1, std::max(0, u / depth_frame.cell_size));
   const int cell_y = std::min(depth_frame.cell_rows - 1, std::max(0, v / depth_frame.cell_size));
-  const int cell = cell_y * depth_frame.cell_cols + cell_x;
-  if (cell < 0 || cell >= static_cast<int>(cells.size())) {
-    return true;
+  for (int dy = -1; dy <= 1; ++dy) {
+    const int cy = cell_y + dy;
+    if (cy < 0 || cy >= depth_frame.cell_rows) {
+      continue;
+    }
+    for (int dx = -1; dx <= 1; ++dx) {
+      const int cx = cell_x + dx;
+      if (cx < 0 || cx >= depth_frame.cell_cols) {
+        continue;
+      }
+      const int cell = cy * depth_frame.cell_cols + cx;
+      if (cell < 0 || cell >= static_cast<int>(cells.size())) {
+        continue;
+      }
+      const auto &z = cells[static_cast<size_t>(cell)];
+      if (z.valid && depth > z.depth + depth_frame.z_buffer_depth_tolerance) {
+        return true;
+      }
+    }
   }
-  const auto &z = cells[static_cast<size_t>(cell)];
-  return z.valid && depth > z.depth + depth_frame.z_buffer_depth_tolerance;
-}
-
-bool LidarVisualSelector::candidateFromMapRaycast(const LocalVoxelMapPtr &local_map,
-                                                  const StatesGroup &state,
-                                                  const cv::Point2f &pixel,
-                                                  const camodocal::CameraConstPtr &camera,
-                                                  LidarVisualCandidate &candidate) const
-{
-  if (!local_map || !camera) {
-    return false;
-  }
-  Eigen::Vector3d bearing;
-  camera->liftProjective(Eigen::Vector2d(pixel.x, pixel.y), bearing);
-  if (bearing.z() <= 1e-9) {
-    return false;
-  }
-  bearing /= bearing.z();
-
-  const Eigen::Matrix3d R_I_C = R_I_L_ * R_C_L_.transpose();
-  const Eigen::Vector3d t_I_C = t_I_L_ - R_I_C * t_C_L_;
-  const Eigen::Vector3d origin_w = state.rot_end * t_I_C + state.pos_end;
-  const Eigen::Vector3d dir_w = (state.rot_end * (R_I_C * bearing)).normalized();
-
-  LocalVoxelMap::RaycastOptions options;
-  options.min_depth = vision_.min_lidar_depth;
-  options.max_depth = vision_.max_lidar_depth;
-  options.step = vision_.raycast_step > 0.0 ? vision_.raycast_step : local_map->VoxelSize();
-  options.min_cos = vision_.raycast_min_cos;
-  options.plane_radius_scale = vision_.raycast_plane_radius_scale;
-  options.max_steps = vision_.max_raycast_steps;
-  options.allow_point_fallback = true;
-  LocalVoxelMap::RaycastHit hit;
-  if (!local_map->Raycast(origin_w, dir_w, options, hit) || !hit.valid) {
-    return false;
-  }
-
-  const Eigen::Vector3d p_body = state.rot_end.transpose() * (hit.point_w - state.pos_end);
-  const Eigen::Vector3d p_cam = R_I_C.transpose() * (p_body - t_I_C);
-  const double depth = p_cam.z();
-  if (depth <= vision_.min_lidar_depth || depth >= vision_.max_lidar_depth) {
-    return false;
-  }
-
-  candidate.pixel = pixel;
-  candidate.depth = depth;
-  candidate.inv_depth = 1.0 / depth;
-  candidate.inv_depth_var = inverseDepthVarianceFromRaycast(hit, depth);
-  candidate.P_W_init = hit.point_w;
-  candidate.source = 0;
-  candidate.depth_prior_allowed = true;
-  candidate.lio_gate = true;
-  candidate.mask_radius = vision_.lidar_mask_radius;
-  candidate.shi_tomasi_score = hit.from_plane ? 1.0 : 0.5;
-  return true;
+  return false;
 }
 
 } // namespace cake_slam

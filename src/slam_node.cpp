@@ -1462,7 +1462,7 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
                                 ? static_cast<double>(stats.mask_kept) /
                                       static_cast<double>(stats.texture_kept)
                                 : 0.0;
-  std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=0 source_mode=%d source_points=%zu input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d selected=%zu depth_ratio=%.3f image_ratio=%.3f texture_ratio=%.3f mask_ratio=%.3f occlusion_reject=%d map_raycast=%d/%d depth_cells=%d image_size=%dx%d state_z=% .6f min_depth=%.3f max_depth=%.3f mask_radius=%.3f score_min=%.6g timing_ms={total=%.3f project=%.3f occlusion=%.3f corner=%.3f raycast=%.3f texture=%.3f select=%.3f}\n",
+  std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=0 source_mode=%d source_points=%zu input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d selected=%zu depth_ratio=%.3f image_ratio=%.3f texture_ratio=%.3f mask_ratio=%.3f occlusion_reject=%d direct_map_samples=%d depth_cells=%d image_size=%dx%d state_z=% .6f min_depth=%.3f max_depth=%.3f mask_radius=%.3f score_min=%.6g timing_ms={total=%.3f project=%.3f occlusion=%.3f corner=%.3f raycast=%.3f texture=%.3f select=%.3f}\n",
               stamp,
               stats.source_mode,
               source_points,
@@ -1478,8 +1478,7 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
               texture_ratio,
               mask_ratio,
               stats.occlusion_reject,
-              stats.map_raycast_hits,
-              stats.map_raycast_attempts,
+              stats.source_mode == 0 ? stats.input_points : 0,
               stats.visual_depth_cells,
               latest_sync_mono_image_.cols,
               latest_sync_mono_image_.rows,

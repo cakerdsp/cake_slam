@@ -818,12 +818,23 @@ bool FeatureTracker::queryProjectedDepth(const cv::Point2f &pixel, cake_slam::Li
         !frame.occlusion_cells.empty() ? frame.occlusion_cells : frame.cells;
     if (!occlusion_cells.empty())
     {
-        const int occ_idx = center_y * frame.cell_cols + center_x;
-        if (occ_idx >= 0 && occ_idx < static_cast<int>(occlusion_cells.size()))
+        for (int dy = -1; dy <= 1; ++dy)
         {
-            const auto &occ = occlusion_cells[static_cast<size_t>(occ_idx)];
-            if (occ.valid && best->depth > occ.depth + frame.z_buffer_depth_tolerance)
-                return false;
+            const int cy = center_y + dy;
+            if (cy < 0 || cy >= frame.cell_rows)
+                continue;
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                const int cx = center_x + dx;
+                if (cx < 0 || cx >= frame.cell_cols)
+                    continue;
+                const int occ_idx = cy * frame.cell_cols + cx;
+                if (occ_idx < 0 || occ_idx >= static_cast<int>(occlusion_cells.size()))
+                    continue;
+                const auto &occ = occlusion_cells[static_cast<size_t>(occ_idx)];
+                if (occ.valid && best->depth > occ.depth + frame.z_buffer_depth_tolerance)
+                    return false;
+            }
         }
     }
     prior.valid = true;
@@ -877,12 +888,23 @@ bool FeatureTracker::queryVoxelRaycastDepth(const cv::Point2f &pixel,
         const int v = cvRound(pixel.y);
         const int cx = std::min(frame.cell_cols - 1, std::max(0, u / frame.cell_size));
         const int cy = std::min(frame.cell_rows - 1, std::max(0, v / frame.cell_size));
-        const int idx = cy * frame.cell_cols + cx;
-        if (idx >= 0 && idx < static_cast<int>(occlusion_cells.size()))
+        for (int dy = -1; dy <= 1; ++dy)
         {
-            const auto &cell = occlusion_cells[static_cast<size_t>(idx)];
-            if (cell.valid && depth > cell.depth + frame.z_buffer_depth_tolerance)
-                return false;
+            const int ny = cy + dy;
+            if (ny < 0 || ny >= frame.cell_rows)
+                continue;
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                const int nx = cx + dx;
+                if (nx < 0 || nx >= frame.cell_cols)
+                    continue;
+                const int idx = ny * frame.cell_cols + nx;
+                if (idx < 0 || idx >= static_cast<int>(occlusion_cells.size()))
+                    continue;
+                const auto &cell = occlusion_cells[static_cast<size_t>(idx)];
+                if (cell.valid && depth > cell.depth + frame.z_buffer_depth_tolerance)
+                    return false;
+            }
         }
     }
 
