@@ -4,6 +4,7 @@
 #include "cake_slam/lidar_visual_selector.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -12,6 +13,16 @@
 #include "cake_slam/voxel_map.h"
 
 namespace cake_slam {
+namespace {
+
+double elapsedMs(const std::chrono::steady_clock::time_point &start)
+{
+  return std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now() - start)
+      .count();
+}
+
+} // namespace
 
 void LidarVisualSelector::Configure(const Config &config)
 {
@@ -49,6 +60,7 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::Select(
   // 3. keep the nearest point per image cell as a cheap z-buffer;
   // 4. reject weak-texture and invalid-mask pixels;
   // 5. spatially suppress the survivors before handing them to LK tracking.
+  const auto t_total = std::chrono::steady_clock::now();
   last_stats_ = LidarVisualSelectorStats();
   last_stats_.source_mode = 1;
   std::vector<LidarVisualCandidate> selected;
@@ -77,6 +89,7 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::Select(
   const int border = std::max(2, static_cast<int>(std::round(vision_.lidar_mask_radius * 0.5)));
   initializeDepthFrame(state, gray_u8, depth_frame);
 
+  const auto t_project = std::chrono::steady_clock::now();
   for (const auto &pt : cloud_lidar->points) {
     const Eigen::Vector3d p_lidar(pt.x, pt.y, pt.z);
     const Eigen::Vector3d p_cam = R_C_L_ * p_lidar + t_C_L_;
@@ -131,11 +144,14 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::Select(
     zbuffer_depth[cell] = depth;
     zbuffer_valid[cell] = true;
   }
+  last_stats_.project_ms = elapsedMs(t_project);
 
   if (!vision_.lidar_prior_feature_enable) {
+    last_stats_.total_ms = elapsedMs(t_total);
     return selected;
   }
 
+  const auto t_texture = std::chrono::steady_clock::now();
   std::vector<LidarVisualCandidate> texture_kept;
   for (int i = 0; i < cell_count; ++i) {
     if (!zbuffer_valid[i]) {
@@ -150,7 +166,9 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::Select(
     texture_kept.push_back(zbuffer[i].candidate);
   }
   last_stats_.texture_kept = static_cast<int>(texture_kept.size());
+  last_stats_.texture_ms = elapsedMs(t_texture);
 
+  const auto t_select = std::chrono::steady_clock::now();
   std::sort(texture_kept.begin(), texture_kept.end(),
             [](const LidarVisualCandidate &a, const LidarVisualCandidate &b) {
               if (std::abs(a.shi_tomasi_score - b.shi_tomasi_score) > 1e-12) {
@@ -175,6 +193,8 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::Select(
     selected.push_back(candidate);
   }
   last_stats_.mask_kept = static_cast<int>(selected.size());
+  last_stats_.select_ms = elapsedMs(t_select);
+  last_stats_.total_ms = elapsedMs(t_total);
   return selected;
 }
 
@@ -187,6 +207,7 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::SelectFromLocalMap(
     const camodocal::CameraConstPtr &camera,
     LidarDepthFrame *depth_frame)
 {
+  const auto t_total = std::chrono::steady_clock::now();
   last_stats_ = LidarVisualSelectorStats();
   last_stats_.source_mode = 0;
   std::vector<LidarVisualCandidate> selected;
@@ -208,6 +229,7 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::SelectFromLocalMap(
     depth_frame->local_map = local_map;
   }
 
+  const auto t_occlusion = std::chrono::steady_clock::now();
   if (occlusion_cloud_lidar && !occlusion_cloud_lidar->empty()) {
     for (const auto &pt : occlusion_cloud_lidar->points) {
       const Eigen::Vector3d p_lidar(pt.x, pt.y, pt.z);
@@ -237,11 +259,14 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::SelectFromLocalMap(
       updateDepthFrameCell(depth_frame, occlusion);
     }
   }
+  last_stats_.occlusion_ms = elapsedMs(t_occlusion);
 
   if (!vision_.lidar_prior_feature_enable) {
+    last_stats_.total_ms = elapsedMs(t_total);
     return selected;
   }
 
+  const auto t_corner = std::chrono::steady_clock::now();
   cv::Mat corner_mask;
   if (!valid_mask.empty() && valid_mask.type() == CV_8UC1 &&
       valid_mask.size() == gray_u8.size()) {
@@ -255,11 +280,17 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::SelectFromLocalMap(
                             std::max(4, vision_.min_dist / 2), corner_mask);
   }
   last_stats_.input_points = static_cast<int>(corners.size());
+  last_stats_.corner_ms = elapsedMs(t_corner);
 
+  const auto t_raycast = std::chrono::steady_clock::now();
   std::vector<LidarVisualCandidate> texture_kept;
   texture_kept.reserve(corners.size());
+  const int max_raycast_attempts = std::max(0, vision_.max_raycast_features);
   for (const auto &pixel : corners) {
     if (static_cast<int>(texture_kept.size()) >= std::max(vision_.max_lidar_features * 3, vision_.max_lidar_features)) {
+      break;
+    }
+    if (last_stats_.map_raycast_attempts >= max_raycast_attempts) {
       break;
     }
     last_stats_.map_raycast_attempts++;
@@ -281,12 +312,14 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::SelectFromLocalMap(
     texture_kept.push_back(candidate);
     updateDepthFrameCell(depth_frame, candidate);
   }
+  last_stats_.raycast_ms = elapsedMs(t_raycast);
 
   last_stats_.positive_depth = last_stats_.map_raycast_hits;
   last_stats_.in_image = static_cast<int>(texture_kept.size());
   last_stats_.zbuffer_kept = depth_frame ? last_stats_.visual_depth_cells : 0;
   last_stats_.texture_kept = static_cast<int>(texture_kept.size());
 
+  const auto t_select = std::chrono::steady_clock::now();
   std::sort(texture_kept.begin(), texture_kept.end(),
             [](const LidarVisualCandidate &a, const LidarVisualCandidate &b) {
               if (std::abs(a.shi_tomasi_score - b.shi_tomasi_score) > 1e-12) {
@@ -311,6 +344,8 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::SelectFromLocalMap(
     selected.push_back(candidate);
   }
   last_stats_.mask_kept = static_cast<int>(selected.size());
+  last_stats_.select_ms = elapsedMs(t_select);
+  last_stats_.total_ms = elapsedMs(t_total);
   return selected;
 }
 

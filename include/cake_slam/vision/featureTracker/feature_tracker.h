@@ -67,6 +67,7 @@ struct FeatureTrackerTiming
     double add_points_ms = 0.0;
     double undistort_ms = 0.0;
     double velocity_ms = 0.0;
+    double depth_prior_ms = 0.0;
     double stereo_ms = 0.0;
     double draw_track_ms = 0.0;
     double debug_draw_ms = 0.0;

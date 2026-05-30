@@ -487,7 +487,9 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
     TicToc t_velocity;
     pts_velocity = ptsVelocity(ids, cur_un_pts, cur_un_pts_map, prev_un_pts_map);
     last_timing.velocity_ms = t_velocity.toc();
+    TicToc t_depth_prior;
     last_visual_depth_prior_update_count = attachDepthPriorsToTrackedFeatures();
+    last_timing.depth_prior_ms = t_depth_prior.toc();
 
     if(!_img1.empty() && stereo_cam)
     {

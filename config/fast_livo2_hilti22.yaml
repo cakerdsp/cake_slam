@@ -107,7 +107,7 @@ vision:
   lidar_depth_std: 0.10
   min_inv_depth_var: 1.0e-6
   min_lio_pose_prior_var: 1.0e-6
-  lio_full_state_prior_enable: 0
+  lio_full_state_prior_enable: 1
   vio_debug_factor_costs: 0
   vio_state_feedback_enable: 0
   min_vio_feedback_visual_residuals: 20

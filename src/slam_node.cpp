@@ -1462,7 +1462,7 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
                                 ? static_cast<double>(stats.mask_kept) /
                                       static_cast<double>(stats.texture_kept)
                                 : 0.0;
-  std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=0 source_mode=%d source_points=%zu input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d selected=%zu depth_ratio=%.3f image_ratio=%.3f texture_ratio=%.3f mask_ratio=%.3f occlusion_reject=%d map_raycast=%d/%d depth_cells=%d image_size=%dx%d state_z=% .6f min_depth=%.3f max_depth=%.3f mask_radius=%.3f score_min=%.6g\n",
+  std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=0 source_mode=%d source_points=%zu input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d selected=%zu depth_ratio=%.3f image_ratio=%.3f texture_ratio=%.3f mask_ratio=%.3f occlusion_reject=%d map_raycast=%d/%d depth_cells=%d image_size=%dx%d state_z=% .6f min_depth=%.3f max_depth=%.3f mask_radius=%.3f score_min=%.6g timing_ms={total=%.3f project=%.3f occlusion=%.3f corner=%.3f raycast=%.3f texture=%.3f select=%.3f}\n",
               stamp,
               stats.source_mode,
               source_points,
@@ -1487,7 +1487,14 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
               config_.vision.min_lidar_depth,
               config_.vision.max_lidar_depth,
               config_.vision.lidar_mask_radius,
-              config_.vision.shi_tomasi_min_score);
+              config_.vision.shi_tomasi_min_score,
+              stats.total_ms,
+              stats.project_ms,
+              stats.occlusion_ms,
+              stats.corner_ms,
+              stats.raycast_ms,
+              stats.texture_ms,
+              stats.select_ms);
   CAKE_INFO_THROTTLE_MS(
       2000,
       "LiDAR visual candidates: input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d image_size=%dx%d",

@@ -122,7 +122,7 @@ struct VisionConfig
   double depth_search_radius = 8.0;        ///< Pixel radius for projected sparse depth lookup.
   int visual_depth_min_track_cnt = 2;      ///< Minimum optical-flow track age before depth attachment.
   int max_depth_update_features = 250;     ///< Per-frame cap for existing visual track depth updates.
-  int max_raycast_features = 120;          ///< Per-frame cap for voxel raycast fallback queries.
+  int max_raycast_features = 120;          ///< Per-frame cap for each LocalVoxelMap raycast stage.
   int max_raycast_steps = 160;             ///< Per-ray voxel stepping cap.
   double raycast_step = 0.5;               ///< Ray marching step [m], clamped by voxel size when possible.
   double raycast_min_cos = 0.15;           ///< Minimum ray/plane-normal cosine for stable intersections.

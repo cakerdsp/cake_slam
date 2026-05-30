@@ -199,7 +199,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img,
         featureFrame = featureTracker.trackImage(t, _img, _img1);
     const double feature_tracker_ms = featureTrackerTime.toc();
     const FeatureTrackerTiming &ft_timing = featureTracker.getLastTiming();
-    std::printf("FEATURE TRACKER DEBUG stamp=%.6f total=%.3f measured=%.3f image=%dx%d type=%d ch=%d prev=%d flow=%d final=%d pending_lidar=%d add_lidar=%d req_visual=%d add_visual=%d flow_back=%d pred=%d stages_ms={lk_fwd=%.3f lk_back=%.3f lio_gate=%.3f reduce=%.3f mask=%.3f add_lidar=%.3f gft=%.3f cout=%.3f add_pts=%.3f undist=%.3f velocity=%.3f stereo=%.3f draw=%.3f debug=%.3f pack=%.3f}\n",
+    std::printf("FEATURE TRACKER DEBUG stamp=%.6f total=%.3f measured=%.3f image=%dx%d type=%d ch=%d prev=%d flow=%d final=%d pending_lidar=%d add_lidar=%d req_visual=%d add_visual=%d flow_back=%d pred=%d stages_ms={lk_fwd=%.3f lk_back=%.3f lio_gate=%.3f reduce=%.3f mask=%.3f add_lidar=%.3f gft=%.3f cout=%.3f add_pts=%.3f undist=%.3f velocity=%.3f depth_prior=%.3f stereo=%.3f draw=%.3f debug=%.3f pack=%.3f}\n",
                 t,
                 ft_timing.total_ms,
                 feature_tracker_ms,
@@ -227,6 +227,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img,
                 ft_timing.add_points_ms,
                 ft_timing.undistort_ms,
                 ft_timing.velocity_ms,
+                ft_timing.depth_prior_ms,
                 ft_timing.stereo_ms,
                 ft_timing.draw_track_ms,
                 ft_timing.debug_draw_ms,
