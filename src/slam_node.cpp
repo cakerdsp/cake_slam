@@ -72,13 +72,6 @@ void SlamNode::loadConfiguration()
   // VINS-Fusion 视觉模块仍使用全局参数表；这里让它也从同一个 yaml 读取。
   readParameters(config_file_);
 
-  if (config_.vision.vio_state_feedback_enable) {
-    RCLCPP_WARN(get_logger(),
-                "vision.vio_state_feedback_enable is deprecated and ignored: LIVO is feed-forward, "
-                "so VIO will not overwrite the LiDAR/IESKF state.");
-    config_.vision.vio_state_feedback_enable = false;
-  }
-
   use_lidar_ = config_.common.lidar_enable && !config_.lidar.topic.empty();
   use_image_ = config_.common.image_enable && !config_.vision.image_topic.empty();
   use_imu_ = config_.imu.enable && !config_.imu.topic.empty();
@@ -915,7 +908,7 @@ void SlamNode::handleVIO()
         const double rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
         const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
         const double z_delta = vio_state.pos_end.z() - lio_state_before_vio.pos_end.z();
-        std::printf("VIO FEEDFORWARD DEBUG stamp=%.6f publish_vio=1 write_lio=0 pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d lio_z=% .6f vio_z=% .6f lio_full_prior=%d lio_full_dt=%.6f lidar_candidates=%zu\n",
+        std::printf("VIO FEEDFORWARD DEBUG stamp=%.6f publish_vio=1 write_lio=0 pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f tracked=%d depth_prior=%d opt_features=%d opt_depth=%d visual_residuals=%d lio_z=% .6f vio_z=% .6f lio_full_prior=%d lio_full_dt=%.6f lidar_candidates=%zu\n",
                     measure.vio_time,
                     pos_delta,
                     z_delta,
@@ -932,7 +925,7 @@ void SlamNode::handleVIO()
                     lidar_candidate_count);
         CAKE_INFO_THROTTLE_MS(
             2000,
-            "VIO feed-forward: stamp=%.6f write_lio=0 pos_delta=%.4f rot_delta_deg=%.3f tracked=%d lidar_depth=%d visual_residuals=%d "
+            "VIO feed-forward: stamp=%.6f write_lio=0 pos_delta=%.4f rot_delta_deg=%.3f tracked=%d depth_prior=%d visual_residuals=%d "
             "lio_pos=(%.3f %.3f %.3f) vio_pos=(%.3f %.3f %.3f)",
             measure.vio_time, pos_delta, rot_delta_deg, vio_->getLastTrackedFeatureCount(),
             vio_->getLastDepthFeatureCount(), opt_visual_residuals, lio_state_before_vio.pos_end.x(),
@@ -941,7 +934,7 @@ void SlamNode::handleVIO()
       } else {
         CAKE_INFO_THROTTLE_MS(
             2000,
-            "VIO-only state: stamp=%.6f tracked=%d lidar_depth=%d visual_residuals=%d pos=(%.3f %.3f %.3f)",
+            "VIO-only state: stamp=%.6f tracked=%d depth_prior=%d visual_residuals=%d pos=(%.3f %.3f %.3f)",
             measure.vio_time, vio_->getLastTrackedFeatureCount(), vio_->getLastDepthFeatureCount(),
             opt_visual_residuals, vio_state.pos_end.x(), vio_state.pos_end.y(), vio_state.pos_end.z());
       }
@@ -983,7 +976,7 @@ void SlamNode::handleVIO()
                   {"TrackAndOptimize", image_sec},
                   {"PublishOutputs", publish_sec}},
                  total_sec, vio_average_total);
-  CAKE_INFO("VIO summary: stamp=%.6f imu=%zu tracked=%d lidar_depth=%d opt_features=%d opt_lidar=%d visual_residuals=%d lidar_candidates=%zu lio_prior=%d lio_full_prior=%d lio_full_dt=%.6f feed_forward=%d write_lio=0 mode=%d",
+  CAKE_INFO("VIO summary: stamp=%.6f imu=%zu tracked=%d depth_prior=%d opt_features=%d opt_depth=%d visual_residuals=%d lidar_candidates=%zu lio_prior=%d lio_full_prior=%d lio_full_dt=%.6f feed_forward=%d write_lio=0 mode=%d",
             measure.vio_time, measure.imu.size(), vio_->getLastTrackedFeatureCount(),
             vio_->getLastDepthFeatureCount(), vio_->getLastOptimizationFeatureCount(),
             vio_->getLastOptimizationLidarFeatureCount(), vio_->getLastOptimizationVisualResidualCount(),
@@ -993,7 +986,7 @@ void SlamNode::handleVIO()
             static_cast<int>(slam_mode_));
   CAKE_INFO_THROTTLE_MS(
       2000,
-      "VIO feature tracking: prev=%d tracked_after_flow=%d prev_lidar=%d tracked_lidar=%d lio_prior_reject=%d added_lidar=%d added_visual=%d pending_lidar_candidates=%d",
+      "VIO feature tracking: prev=%d tracked_after_flow=%d prev_depth=%d tracked_depth=%d lio_prior_reject=%d added_lidar=%d added_visual=%d pending_lidar_candidates=%d",
       vio_->getLastPrevTrackCount(), vio_->getLastTrackedAfterFlowCount(),
       vio_->getLastPrevLidarTrackCount(), vio_->getLastTrackedLidarCount(),
       vio_->getLastRejectedByLioPriorCount(), vio_->getLastAddedLidarCount(),
@@ -1375,8 +1368,9 @@ LioFullStatePrior SlamNode::FindClosestLioState(double stamp) const
 
 void SlamNode::buildLidarVisualCandidates(double stamp)
 {
-  // Project the latest LIO cloud into the synchronized image and keep only
-  // candidates that pass valid-mask, z-buffer, texture, and spacing checks.
+  // Build sparse depth assistance for the synchronized image. In scan mode the
+  // current LIO cloud is projected directly. In LocalVoxelMap mode the same
+  // cloud is used only for occlusion while depth candidates come from map voxels.
   pending_lidar_visual_candidates_.clear();
   pending_lidar_depth_frame_ = LidarDepthFrame();
   const bool depth_assist_requested =
@@ -1438,10 +1432,10 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
   if (config_.vision.lidar_depth_source == 0) {
     pending_lidar_visual_candidates_ = lidar_visual_selector_.SelectFromLocalMap(
         local_voxel_map_, source_cloud, state_, latest_sync_mono_image_,
-        vio_->getUndistortedValidMask(), camera, &pending_lidar_depth_frame_);
+        vio_->getImageValidMask(), camera, &pending_lidar_depth_frame_);
   } else {
     pending_lidar_visual_candidates_ = lidar_visual_selector_.Select(
-        source_cloud, state_, latest_sync_mono_image_, vio_->getUndistortedValidMask(),
+        source_cloud, state_, latest_sync_mono_image_, vio_->getImageValidMask(),
         camera, &pending_lidar_depth_frame_);
   }
 
@@ -1462,7 +1456,7 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
                                 ? static_cast<double>(stats.mask_kept) /
                                       static_cast<double>(stats.texture_kept)
                                 : 0.0;
-  std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=0 source_mode=%d source_points=%zu input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d selected=%zu depth_ratio=%.3f image_ratio=%.3f texture_ratio=%.3f mask_ratio=%.3f occlusion_reject=%d direct_map_samples=%d depth_cells=%d image_size=%dx%d state_z=% .6f min_depth=%.3f max_depth=%.3f mask_radius=%.3f score_min=%.6g timing_ms={total=%.3f project=%.3f occlusion=%.3f corner=%.3f raycast=%.3f texture=%.3f select=%.3f}\n",
+  std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=0 source_mode=%d occlusion_scan_points=%zu candidate_input=%d positive_depth=%d in_image=%d zbuffer=%d texture=%d mask_selected=%d selected=%zu depth_ratio=%.3f image_ratio=%.3f texture_ratio=%.3f mask_ratio=%.3f occlusion_reject=%d local_map_samples=%d depth_cells=%d image_size=%dx%d state_z=% .6f min_depth=%.3f max_depth=%.3f mask_radius=%.3f score_min=%.6g timing_ms={total=%.3f map_collect=%.3f project=%.3f occlusion=%.3f texture=%.3f select=%.3f}\n",
               stamp,
               stats.source_mode,
               source_points,
@@ -1488,15 +1482,14 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
               config_.vision.lidar_mask_radius,
               config_.vision.shi_tomasi_min_score,
               stats.total_ms,
+              stats.map_collect_ms,
               stats.project_ms,
               stats.occlusion_ms,
-              stats.corner_ms,
-              stats.raycast_ms,
               stats.texture_ms,
               stats.select_ms);
   CAKE_INFO_THROTTLE_MS(
       2000,
-      "LiDAR visual candidates: input=%d depth=%d image=%d zbuffer=%d texture=%d mask=%d image_size=%dx%d",
+      "LiDAR visual candidates: candidate_input=%d positive_depth=%d in_image=%d zbuffer=%d texture=%d mask_selected=%d image_size=%dx%d",
       stats.input_points, stats.positive_depth, stats.in_image, stats.zbuffer_kept,
       stats.texture_kept, stats.mask_kept, latest_sync_mono_image_.cols, latest_sync_mono_image_.rows);
 }
@@ -1886,7 +1879,7 @@ void SlamNode::publishFeatureImage(double stamp)
   const double ratio = total > 0 ? static_cast<double>(with_depth) / total : 0.0;
   CAKE_INFO_THROTTLE_MS(
       2000,
-      "Feature image: stamp=%.6f tracked=%d lidar_depth=%d depth_ratio=%.3f size=%dx%d",
+      "Feature image: stamp=%.6f tracked=%d depth_prior=%d depth_ratio=%.3f size=%dx%d",
       stamp, total, with_depth, ratio, debug_image.cols, debug_image.rows);
 }
 

@@ -109,11 +109,6 @@ vision:
   min_lio_pose_prior_var: 1.0e-6
   lio_full_state_prior_enable: 1
   vio_debug_factor_costs: 0
-  vio_state_feedback_enable: 0
-  min_vio_feedback_visual_residuals: 20
-  max_vio_feedback_pos_delta: 0.50
-  max_vio_feedback_z_delta: 0.20
-  max_vio_feedback_rot_delta_deg: 20.0
 
 extrinsic:
   # P_imu = R_I_L * P_lidar + t_I_L

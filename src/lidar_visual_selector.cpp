@@ -440,7 +440,7 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::SelectFromLocalMap(
   }
   last_stats_.occlusion_ms = elapsedMs(t_occlusion);
 
-  const auto t_project = std::chrono::steady_clock::now();
+  const auto t_collect = std::chrono::steady_clock::now();
   const Eigen::Matrix3d R_I_C = R_I_L_ * R_C_L_.transpose();
   const Eigen::Vector3d t_I_C = t_I_L_ - R_I_C * t_C_L_;
   const Eigen::Vector3d camera_w = state.rot_end * t_I_C + state.pos_end;
@@ -481,7 +481,9 @@ std::vector<LidarVisualCandidate> LidarVisualSelector::SelectFromLocalMap(
     }
   }
   last_stats_.input_points = static_cast<int>(plane_samples.size() + stable_points.size() + fallback_points.size());
+  last_stats_.map_collect_ms = elapsedMs(t_collect);
 
+  const auto t_project = std::chrono::steady_clock::now();
   const int cell_size = std::max(1, vision_.z_buffer_cell_size);
   const int cell_cols = (gray_u8.cols + cell_size - 1) / cell_size;
   const int cell_rows = (gray_u8.rows + cell_size - 1) / cell_size;
@@ -737,16 +739,6 @@ double LidarVisualSelector::inverseDepthVariance(const Eigen::Matrix3d &cov_lida
   const double depth4 = std::max(1e-6, depth * depth * depth * depth);
   const Eigen::Matrix3d cov_cam = R_C_L_ * cov_lidar * R_C_L_.transpose();
   const double sigma_z2 = std::max(1e-12, cov_cam(2, 2));
-  return std::max(vision_.min_inv_depth_var, sigma_z2 / depth4);
-}
-
-double LidarVisualSelector::inverseDepthVarianceFromRaycast(const LocalVoxelMap::RaycastHit &hit, double depth) const
-{
-  const double depth4 = std::max(1e-6, depth * depth * depth * depth);
-  const double distance_sigma = vision_.lidar_depth_std * (1.0 + 0.02 * std::max(0.0, depth));
-  const double incidence_scale = 1.0 / std::max(0.1, hit.incidence_cos);
-  const double plane_sigma2 = std::max(0.0, hit.plane_var_scalar);
-  const double sigma_z2 = distance_sigma * distance_sigma * incidence_scale * incidence_scale + plane_sigma2;
   return std::max(vision_.min_inv_depth_var, sigma_z2 / depth4);
 }
 

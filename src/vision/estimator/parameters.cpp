@@ -261,11 +261,8 @@ void readParameters(std::string config_file)
     USE_FAST_FISHEYE_UNDISTORT = readOrDefault<int>(fsSettings, "vision.use_fast_fisheye_undistort", 0);
     IMAGE_PROCESS_INTERVAL = std::max(1, readOrDefault<int>(fsSettings, "vision.image_process_interval", 1));
     LIDAR_DEPTH_ENABLE = readOrDefault<int>(fsSettings, "vision.lidar_depth_enable", 1);
-    LIDAR_PRIOR_FEATURE_ENABLE = readOrDefault<int>(fsSettings, "vision.lidar_prior_feature_enable",
-                                                    readOrDefault<int>(fsSettings, "vision.lidar_prior_enable",
-                                                                       LIDAR_DEPTH_ENABLE));
-    LIDAR_PRIOR_FEATURE_ENABLE = readOrDefault<int>(fsSettings, "vision.radar_prior_feature_enable",
-                                                    LIDAR_PRIOR_FEATURE_ENABLE);
+    LIDAR_PRIOR_FEATURE_ENABLE =
+        readOrDefault<int>(fsSettings, "vision.lidar_prior_feature_enable", LIDAR_DEPTH_ENABLE);
     LIDAR_INV_DEPTH_OPTIMIZE = readOrDefault<int>(fsSettings, "vision.optimize_lidar_inv_depth", 1);
     LIO_FULL_STATE_PRIOR_ENABLE = readOrDefault<int>(fsSettings, "vision.lio_full_state_prior_enable", 0);
     VIO_DEBUG_FACTOR_COSTS = readOrDefault<int>(fsSettings, "vision.vio_debug_factor_costs", 0);

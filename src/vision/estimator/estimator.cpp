@@ -246,7 +246,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img,
     packet.lio_pose_prior = lio_pose_prior;
     packet.lio_full_prior = lio_full_prior;
 
-    CAKE_INFO("[VIO frontend time] stamp=%.6f track=%.3f ms features=%zu lidar_depth=%zu lidar_candidates=%zu lio_full_prior=%d threaded=%d",
+    CAKE_INFO("[VIO frontend time] stamp=%.6f track=%.3f ms features=%zu depth_priors=%zu lidar_candidates=%zu lio_full_prior=%d threaded=%d",
              t, feature_tracker_ms, featureFrame.size(), packet.lidar_depth_priors.size(),
              lidar_candidates.size(), lio_full_prior.valid ? 1 : 0, MULTIPLE_THREAD);
 
@@ -1934,7 +1934,7 @@ void Estimator::optimization()
         (last_light_opt_debug_stamp < 0.0 || Headers[frame_count] - last_light_opt_debug_stamp >= 1.0);
     if (debug_lio_full_prior || print_light_opt_debug)
     {
-        std::printf("VIO OPT DEBUG factors: solver_flag=%d frame_count=%d t0=%.6f tN=%.6f marg=%d imu=%d lio_pose=%d lio_full=%d features=%d lidar_features=%d depth_priors=%d visual_residuals=%d visual_measurements=%d residual_blocks=%d parameter_blocks=%d lidar_inv_depth_opt=%d\n",
+        std::printf("VIO OPT DEBUG factors: solver_flag=%d frame_count=%d t0=%.6f tN=%.6f marg=%d imu=%d lio_pose=%d lio_full=%d features=%d depth_prior_features=%d depth_prior_factors=%d visual_residuals=%d visual_measurements=%d residual_blocks=%d parameter_blocks=%d depth_prior_inv_depth_opt=%d\n",
                     solver_flag,
                     frame_count,
                     Headers[0],
@@ -1951,7 +1951,7 @@ void Estimator::optimization()
                     problem.NumResidualBlocks(),
                     problem.NumParameterBlocks(),
                     LIDAR_INV_DEPTH_OPTIMIZE);
-        std::printf("VIO OPT DEBUG feature_health: total_tracks=%d lidar_tracks=%d max_track_len=%d usable=%d usable_lidar=%d min_lidar_obs=%d full_prior_factor=%d expensive_debug=%d\n",
+        std::printf("VIO OPT DEBUG feature_health: total_tracks=%d depth_prior_tracks=%d max_track_len=%d usable=%d usable_depth_prior=%d min_depth_prior_obs=%d full_prior_factor=%d expensive_debug=%d\n",
                     total_feature_track_count,
                     total_lidar_depth_track_count,
                     max_feature_track_length,
@@ -1960,7 +1960,7 @@ void Estimator::optimization()
                     2,
                     static_cast<int>(use_lio_full_prior_factor),
                     static_cast<int>(debug_lio_full_prior));
-        std::printf("VIO OPT DEBUG reject_reason: len1=%d len2=%d len3=%d len4p=%d short_visual=%d short_lidar=%d lidar_prior_valid=%d lidar_prior_invalid=%d usable=%d visual_residuals=%d weak=%d\n",
+        std::printf("VIO OPT DEBUG reject_reason: len1=%d len2=%d len3=%d len4p=%d short_visual=%d short_depth_prior=%d depth_prior_valid=%d depth_prior_invalid=%d usable=%d visual_residuals=%d weak=%d\n",
                     feature_len1,
                     feature_len2,
                     feature_len3,
@@ -1972,7 +1972,7 @@ void Estimator::optimization()
                     optimized_feature_count,
                     visual_residual_count,
                     static_cast<int>(weak_visual_constraints));
-        std::printf("VIO OPT DEBUG source_age: visual_len1=%d visual_len2=%d visual_len3=%d visual_len4p=%d lidar_len1=%d lidar_len2=%d lidar_len3=%d lidar_len4p=%d\n",
+        std::printf("VIO OPT DEBUG source_age: visual_only_len1=%d visual_only_len2=%d visual_only_len3=%d visual_only_len4p=%d depth_prior_len1=%d depth_prior_len2=%d depth_prior_len3=%d depth_prior_len4p=%d\n",
                     visual_len1,
                     visual_len2,
                     visual_len3,
@@ -2411,7 +2411,7 @@ const StatesGroup &Estimator::getLatestState() const
     return states_[frame_count];
 }
 
-const cv::Mat &Estimator::getUndistortedValidMask() const
+const cv::Mat &Estimator::getImageValidMask() const
 {
     return featureTracker.validMask();
 }
@@ -2484,51 +2484,6 @@ int Estimator::getLastOptimizationLidarFeatureCount() const
 int Estimator::getLastOptimizationVisualResidualCount() const
 {
     return last_optimization_visual_residual_count_;
-}
-
-bool Estimator::buildVinsFallbackInitialLandmarksDeadCode(std::map<int, Eigen::Vector3d> &sfm_tracked_points)
-{
-    // Dead-code fallback hook: keep the original VINS-Fusion GlobalSFM landmark
-    // bootstrap available for a future LiDAR-degeneration policy, without
-    // changing the active LIO-prior initialization path.
-    sfm_tracked_points.clear();
-    if (frame_count < WINDOW_SIZE)
-        return false;
-
-    std::vector<Eigen::Quaterniond> Q(frame_count + 1);
-    std::vector<Eigen::Vector3d> T(frame_count + 1);
-    std::vector<SFMFeature> sfm_f;
-    sfm_f.reserve(f_manager.feature.size());
-
-    for (auto &it_per_id : f_manager.feature)
-    {
-        int imu_j = it_per_id.start_frame - 1;
-        SFMFeature tmp_feature;
-        tmp_feature.state = false;
-        tmp_feature.id = it_per_id.feature_id;
-        for (auto &it_per_frame : it_per_id.feature_per_frame)
-        {
-            imu_j++;
-            Eigen::Vector3d pts_j = it_per_frame.point;
-            tmp_feature.observation.push_back(
-                make_pair(imu_j, Eigen::Vector2d{pts_j.x(), pts_j.y()}));
-        }
-        sfm_f.push_back(tmp_feature);
-    }
-
-    Eigen::Matrix3d relative_R;
-    Eigen::Vector3d relative_T;
-    int l = 0;
-    if (!relativePose(relative_R, relative_T, l))
-        return false;
-
-    GlobalSFM sfm;
-    if (!sfm.construct(frame_count + 1, Q.data(), T.data(), l,
-                       relative_R, relative_T, sfm_f, sfm_tracked_points))
-    {
-        return false;
-    }
-    return !sfm_tracked_points.empty();
 }
 
 // 基于当前滑窗中的运动趋势，为前端预测下一帧特征位置。

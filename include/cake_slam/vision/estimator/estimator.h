@@ -139,8 +139,8 @@ public:
     /** @brief Return the latest optimized body state in world frame. */
     const StatesGroup &getLatestState() const;
 
-    /** @brief Return the VINS-style valid-domain mask (CV_8UC1, image pixels). */
-    const cv::Mat &getUndistortedValidMask() const;
+    /** @brief Return the valid image-domain mask used by the feature tracker. */
+    const cv::Mat &getImageValidMask() const;
 
     /** @brief Return latest feature/depth debug image rendered by FeatureTracker. */
     cv::Mat getFeatureDebugImage() const;
@@ -162,14 +162,6 @@ public:
     int getLastOptimizationFeatureCount() const;
     int getLastOptimizationLidarFeatureCount() const;
     int getLastOptimizationVisualResidualCount() const;
-
-    /**
-     * @brief Preserve VINS-Fusion GlobalSFM landmark bootstrap for a future fallback path.
-     *
-     * This is intentionally not called by the current LIO-prior initialization flow.
-     * It reconstructs original VINS monocular landmarks from the current window only.
-     */
-    bool buildVinsFallbackInitialLandmarksDeadCode(std::map<int, Eigen::Vector3d> &sfm_tracked_points);
 
     void predictPtsInNextFrame();
     void outliersRejection(set<int> &removeIndex);

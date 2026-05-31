@@ -157,8 +157,6 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.image_width", config.vision.image_width);
   readIfPresent(fs, "vision.lidar_depth_enable", config.vision.lidar_depth_enable);
   readIfPresent(fs, "vision.lidar_prior_feature_enable", config.vision.lidar_prior_feature_enable);
-  readIfPresent(fs, "vision.lidar_prior_enable", config.vision.lidar_prior_feature_enable);
-  readIfPresent(fs, "vision.radar_prior_feature_enable", config.vision.lidar_prior_feature_enable);
   readIfPresent(fs, "vision.optimize_lidar_inv_depth", config.vision.optimize_lidar_inv_depth);
   readIfPresent(fs, "vision.lidar_depth_source", config.vision.lidar_depth_source);
   readIfPresent(fs, "vision.visual_feature_depth_prior_enable", config.vision.visual_feature_depth_prior_enable);
@@ -188,11 +186,6 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.min_lio_pose_prior_var", config.vision.min_lio_pose_prior_var);
   readIfPresent(fs, "vision.lio_full_state_prior_enable", config.vision.lio_full_state_prior_enable);
   readIfPresent(fs, "vision.vio_debug_factor_costs", config.vision.vio_debug_factor_costs);
-  readIfPresent(fs, "vision.vio_state_feedback_enable", config.vision.vio_state_feedback_enable);
-  readIfPresent(fs, "vision.min_vio_feedback_visual_residuals", config.vision.min_vio_feedback_visual_residuals);
-  readIfPresent(fs, "vision.max_vio_feedback_pos_delta", config.vision.max_vio_feedback_pos_delta);
-  readIfPresent(fs, "vision.max_vio_feedback_z_delta", config.vision.max_vio_feedback_z_delta);
-  readIfPresent(fs, "vision.max_vio_feedback_rot_delta_deg", config.vision.max_vio_feedback_rot_delta_deg);
   if (config.vision.image_process_interval < 1) {
     config.vision.image_process_interval = 1;
   }

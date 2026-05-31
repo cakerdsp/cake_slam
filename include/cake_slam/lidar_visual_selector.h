@@ -18,12 +18,11 @@
 namespace cake_slam {
 
 /**
- * @brief Projects LiDAR points into the current image and keeps VINS-trackable seeds.
+ * @brief Builds sparse depth assistance from the current scan or LocalVoxelMap.
  *
- * Inputs are current-frame LiDAR points [m, lidar frame], the latest body pose
- * T_WB, a mono image, an optional VINS-style valid-domain mask, and cam0 model.
- * Output candidates carry pixel coordinates, inverse-depth priors, and world
- * anchors consumed directly by FeatureTracker/FeatureManager.
+ * Output candidates are optional new visual tracks. The same selector also
+ * fills a per-image sparse depth frame so existing Shi-Tomasi tracks can query
+ * nearby projected depth or, for LocalVoxelMap mode, raycast stable voxel planes.
  */
 class LidarVisualSelector
 {
@@ -35,11 +34,11 @@ public:
                      const Eigen::Matrix3d &R_C_L, const Eigen::Vector3d &t_C_L);
 
   /**
-   * @brief Select LiDAR-projected visual seeds for one image.
+   * @brief Select current-scan projected depth seeds for one image.
    * @param cloud_lidar Current LiDAR cloud [m], lidar frame.
    * @param state Latest body pose in world frame.
    * @param gray Mono image used for local Shi-Tomasi score.
-   * @param valid_mask Optional CV_8UC1 undistorted valid-domain mask.
+   * @param valid_mask Optional CV_8UC1 valid image-domain mask.
    * @param camera cam0 projection model.
    */
   std::vector<LidarVisualCandidate> Select(
@@ -72,7 +71,6 @@ private:
   bool maskAccepts(const std::vector<LidarVisualCandidate> &selected, const cv::Point2f &pixel) const;
   bool gridAccepts(std::vector<int> &grid_counts, const cv::Size &image_size, const cv::Point2f &pixel) const;
   double inverseDepthVariance(const Eigen::Matrix3d &cov_lidar, double depth) const;
-  double inverseDepthVarianceFromRaycast(const LocalVoxelMap::RaycastHit &hit, double depth) const;
   void initializeDepthFrame(const StatesGroup &state, const cv::Mat &gray, LidarDepthFrame *depth_frame) const;
   bool updateDepthFrameCell(LidarDepthFrame *depth_frame, const LidarVisualCandidate &candidate);
   bool scanOccludes(const LidarDepthFrame &depth_frame, const cv::Point2f &pixel, double depth) const;

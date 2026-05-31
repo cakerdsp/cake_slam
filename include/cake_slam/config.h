@@ -103,9 +103,9 @@ struct VisionConfig
   int image_height = 480;            ///< Image rows [pixel].
   int image_width = 640;             ///< Image columns [pixel].
 
-  bool lidar_depth_enable = true;          ///< Use LiDAR projections as visual seeds.
-  bool lidar_prior_feature_enable = true;  ///< Insert LiDAR-prior visual points into VIO.
-  bool optimize_lidar_inv_depth = true;    ///< Optimize LiDAR-seeded inverse depth.
+  bool lidar_depth_enable = true;          ///< Enable LiDAR/local-map depth assistance for VIO.
+  bool lidar_prior_feature_enable = true;  ///< Insert LiDAR/local-map depth points as new visual tracks.
+  bool optimize_lidar_inv_depth = true;    ///< Optimize inverse depth for tracks with LiDAR/local-map priors.
   int lidar_depth_source = 1;              ///< 0 local voxel map, 1 current scan, 2 disabled.
   bool visual_feature_depth_prior_enable = false; ///< Attach map/scan depth priors to stable Shi-Tomasi tracks.
   bool voxel_raycast_enable = true;        ///< Raycast LocalVoxelMap planes when projected depth lookup misses.
@@ -118,11 +118,11 @@ struct VisionConfig
   double lidar_mask_radius = 20.0;         ///< LiDAR seed spacing radius [pixel].
   int lidar_depth_grid_rows = 12;          ///< Uniform candidate selection grid rows.
   int lidar_depth_grid_cols = 16;          ///< Uniform candidate selection grid cols.
-  double max_lidar_depth_ratio = 0.6;      ///< Upper ratio of LiDAR-depth features among all tracked features.
+  double max_lidar_depth_ratio = 0.6;      ///< Upper ratio of depth-prior tracks among all tracked features.
   double depth_search_radius = 8.0;        ///< Pixel radius for projected sparse depth lookup.
   int visual_depth_min_track_cnt = 2;      ///< Minimum optical-flow track age before depth attachment.
   int max_depth_update_features = 250;     ///< Per-frame cap for existing visual track depth updates.
-  int max_raycast_features = 120;          ///< Per-frame cap for each LocalVoxelMap raycast stage.
+  int max_raycast_features = 120;          ///< Per-frame cap for visual-track LocalVoxelMap raycast fallback.
   int max_raycast_steps = 160;             ///< Per-ray voxel stepping cap.
   double raycast_step = 0.5;               ///< Ray marching step [m], clamped by voxel size when possible.
   double raycast_min_cos = 0.15;           ///< Minimum ray/plane-normal cosine for stable intersections.
@@ -134,11 +134,6 @@ struct VisionConfig
   double min_lio_pose_prior_var = 1e-6;    ///< LIO pose covariance floor [rad^2 or m^2].
   bool lio_full_state_prior_enable = false;///< Add LIO velocity/bias prior factors after initialization.
   bool vio_debug_factor_costs = false;     ///< Print expensive per-factor VIO cost diagnostics.
-  bool vio_state_feedback_enable = false;  ///< Deprecated: VIO no longer overwrites LiDAR state in LIVO mode.
-  int min_vio_feedback_visual_residuals = 20; ///< Deprecated feedback gate, retained for config compatibility.
-  double max_vio_feedback_pos_delta = 5.0;      ///< Deprecated feedback gate [m].
-  double max_vio_feedback_z_delta = 0.20;       ///< Deprecated vertical feedback gate [m].
-  double max_vio_feedback_rot_delta_deg = 20.0; ///< Deprecated feedback gate [deg].
 };
 
 /**

@@ -104,10 +104,9 @@ struct LidarVisualSelectorStats
   int occlusion_reject = 0;
   int visual_depth_cells = 0;
   double total_ms = 0.0;
+  double map_collect_ms = 0.0;
   double project_ms = 0.0;
   double occlusion_ms = 0.0;
-  double corner_ms = 0.0;
-  double raycast_ms = 0.0;
   double texture_ms = 0.0;
   double select_ms = 0.0;
 };
