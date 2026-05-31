@@ -79,6 +79,10 @@ struct MapConfig
   bool sliding_enable = false;                 ///< Enable local-map sliding.
   int half_map_size = 100;                     ///< Local map half extent [m].
   double sliding_thresh = 8.0;                 ///< Map slide trigger distance [m].
+  bool update_after_vio = false;               ///< LIVO模式下将非首帧scan插图延后到VIO/local BA之后。
+  std::string update_after_vio_fallback = "lio"; ///< VIO不可用或被门限拒绝时的回退策略：lio或skip。
+  double max_vio_map_update_pos_delta = 0.30;  ///< VIO插图位姿相对LIO位姿的最大平移差[m]。
+  double max_vio_map_update_rot_delta_deg = 5.0; ///< VIO插图位姿相对LIO位姿的最大旋转差[deg]。
 };
 
 /**

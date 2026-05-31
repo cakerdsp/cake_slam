@@ -137,6 +137,10 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "map.sliding_enable", config.map.sliding_enable);
   readIfPresent(fs, "map.half_map_size", config.map.half_map_size);
   readIfPresent(fs, "map.sliding_thresh", config.map.sliding_thresh);
+  readIfPresent(fs, "map.update_after_vio", config.map.update_after_vio);
+  readIfPresent(fs, "map.update_after_vio_fallback", config.map.update_after_vio_fallback);
+  readIfPresent(fs, "map.max_vio_map_update_pos_delta", config.map.max_vio_map_update_pos_delta);
+  readIfPresent(fs, "map.max_vio_map_update_rot_delta_deg", config.map.max_vio_map_update_rot_delta_deg);
 
   // -------------------- 视觉参数 --------------------
   readIfPresent(fs, "vision.image_topic", config.vision.image_topic);

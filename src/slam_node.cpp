@@ -124,6 +124,13 @@ void SlamNode::configureModules()
     local_voxel_map_->Configure(config_, lidar_to_imu_R_, lidar_to_imu_t_);
     lio_.SetLocalMap(local_voxel_map_);
     lio_.Configure(config_);
+    const bool defer_map_update = use_image_ && slam_mode_ == LIVO && config_.map.update_after_vio;
+    lio_.SetDeferMapUpdate(defer_map_update);
+    CAKE_INFO("Local voxel map update: after_vio=%d fallback=%s pos_gate=%.3f rot_gate=%.3f",
+              defer_map_update ? 1 : 0,
+              config_.map.update_after_vio_fallback.c_str(),
+              config_.map.max_vio_map_update_pos_delta,
+              config_.map.max_vio_map_update_rot_delta_deg);
     if (use_image_) {
       lidar_visual_selector_.Configure(config_);
       lidar_visual_selector_.SetExtrinsics(lidar_to_imu_R_, lidar_to_imu_t_,
@@ -743,6 +750,77 @@ bool SlamNode::buildVioMeasure(FusionMeasureGroup &meas)
   return true;
 }
 
+bool SlamNode::deferredMapUpdateEnabled() const
+{
+  return use_lidar_ && use_image_ && slam_mode_ == LIVO && config_.map.update_after_vio;
+}
+
+void SlamNode::finishDeferredMapUpdate(double stamp, const StatesGroup &lio_state,
+                                       const StatesGroup *vio_state, const char *context)
+{
+  if (!deferredMapUpdateEnabled() || !lio_.HasPendingMapUpdate()) {
+    return;
+  }
+
+  constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
+  const double pending_stamp = lio_.PendingMapUpdateTime();
+  const bool fallback_skip = config_.map.update_after_vio_fallback == "skip";
+  StatesGroup map_update_state = lio_state;
+  const char *source = "lio";
+  const char *reason = "vio_unavailable";
+  double pos_delta = std::numeric_limits<double>::quiet_NaN();
+  double z_delta = std::numeric_limits<double>::quiet_NaN();
+  double rot_delta_deg = std::numeric_limits<double>::quiet_NaN();
+  bool accept_vio = false;
+
+  if (vio_state) {
+    const Eigen::Matrix3d dR = lio_state.rot_end.transpose() * vio_state->rot_end;
+    const double cos_angle = std::clamp((dR.trace() - 1.0) * 0.5, -1.0, 1.0);
+    rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
+    pos_delta = (vio_state->pos_end - lio_state.pos_end).norm();
+    z_delta = vio_state->pos_end.z() - lio_state.pos_end.z();
+
+    const bool pos_ok = pos_delta <= config_.map.max_vio_map_update_pos_delta;
+    const bool rot_ok = rot_delta_deg <= config_.map.max_vio_map_update_rot_delta_deg;
+    if (pos_ok && rot_ok) {
+      accept_vio = true;
+      source = "vio";
+      reason = "accepted";
+      // Use the VIO optimized pose for insertion, but keep the LIO covariance
+      // proxy until the visual backend exposes a reliable pose covariance.
+      map_update_state.rot_end = vio_state->rot_end;
+      map_update_state.pos_end = vio_state->pos_end;
+    } else {
+      reason = !pos_ok ? "reject_pos" : "reject_rot";
+    }
+  }
+
+  bool committed = false;
+  if (accept_vio || !fallback_skip) {
+    committed = lio_.CommitPendingMapUpdate(map_update_state);
+  } else {
+    lio_.DiscardPendingMapUpdate();
+    source = "skip";
+  }
+
+  const PointCloudXYZI::Ptr downsampled = lio_.GetDownsampledCloud();
+  const size_t downsampled_num = downsampled ? downsampled->size() : 0;
+  std::printf("MAP UPDATE AFTER VIO stamp=%.6f pending_stamp=%.6f committed=%d source=%s reason=%s context=%s pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_rot=%.6f fallback=%s downsampled=%zu\n",
+              stamp,
+              pending_stamp,
+              committed ? 1 : 0,
+              source,
+              reason,
+              context ? context : "unknown",
+              pos_delta,
+              z_delta,
+              rot_delta_deg,
+              config_.map.max_vio_map_update_pos_delta,
+              config_.map.max_vio_map_update_rot_delta_deg,
+              config_.map.update_after_vio_fallback.c_str(),
+              downsampled_num);
+}
+
 // 执行一次 LIO 更新并输出里程计/点云。
 void SlamNode::handleLIO()
 {
@@ -754,6 +832,7 @@ void SlamNode::handleLIO()
 
   const auto t_lio_start = std::chrono::steady_clock::now();
   const double update_time = measures_.measures.back().lio_time;
+  finishDeferredMapUpdate(update_time, state_, nullptr, "next_lio_before_vio");
   handleFirstFrame();
   const StatesGroup lio_input_state = state_;
   lio_.SetState(state_);
@@ -873,6 +952,9 @@ void SlamNode::handleVIO()
   const bool has_lio_full_prior = lio_full_prior.valid;
   const double lio_full_prior_dt = has_lio_full_prior ? std::abs(lio_full_prior.timestamp - measure.vio_time) : -1.0;
   const bool vio_feed_forward = use_lidar_;
+  const StatesGroup lio_state_before_vio = state_;
+  StatesGroup latest_vio_state;
+  bool has_latest_vio_state = false;
 
   // VINS-Fusion 风格入口：先送 IMU，再送单目图像。
   // inputImage 内部会调用 featureTracker.trackImage，外部不负责提特征。
@@ -896,11 +978,12 @@ void SlamNode::handleVIO()
     pending_lio_pose_prior_ = LioPosePrior();
     last_vio_update_time_ = measure.vio_time;
     if (vio_->solver_flag == Estimator::NON_LINEAR) {
-      StatesGroup vio_state = vio_->getLatestState();
+      latest_vio_state = vio_->getLatestState();
+      has_latest_vio_state = true;
+      const StatesGroup &vio_state = latest_vio_state;
       const int opt_features = vio_->getLastOptimizationFeatureCount();
       const int opt_lidar_features = vio_->getLastOptimizationLidarFeatureCount();
       const int opt_visual_residuals = vio_->getLastOptimizationVisualResidualCount();
-      const StatesGroup lio_state_before_vio = state_;
       if (use_lidar_) {
         const Eigen::Matrix3d dR = lio_state_before_vio.rot_end.transpose() * vio_state.rot_end;
         const double cos_angle = std::clamp((dR.trace() - 1.0) * 0.5, -1.0, 1.0);
@@ -958,6 +1041,11 @@ void SlamNode::handleVIO()
       t_vio_publish_end = std::chrono::steady_clock::now();
     }
   }
+
+  finishDeferredMapUpdate(measure.vio_time,
+                          lio_state_before_vio,
+                          has_latest_vio_state ? &latest_vio_state : nullptr,
+                          "after_vio");
 
   const auto t_vio_end = std::chrono::steady_clock::now();
   if (t_vio_publish_end < t_vio_image_end) {

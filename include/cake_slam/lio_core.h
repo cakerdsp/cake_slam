@@ -36,6 +36,8 @@ public:
   void Configure(const Config &config);
   /** @brief Inject the independently owned local voxel map used by LIO queries. */
   void SetLocalMap(const LocalVoxelMapPtr &local_map);
+  /** @brief Defer non-initial scan insertion until the caller commits it. */
+  void SetDeferMapUpdate(bool enable);
 
   /**
    * @brief Run one LIO update on a synchronized LiDAR/IMU packet.
@@ -57,6 +59,14 @@ public:
   PointCloudXYZI::Ptr GetDownsampledWorldCloud() const;
   /** @brief Return point-to-plane residual inputs used by the latest LIO solve. */
   const std::vector<PointToPlane> &GetEffectPoints() const;
+  /** @brief Whether a registered scan is waiting to be inserted into the local map. */
+  bool HasPendingMapUpdate() const;
+  /** @brief Timestamp of the pending deferred map update. */
+  double PendingMapUpdateTime() const;
+  /** @brief Commit the pending scan to the local map using the supplied pose. */
+  bool CommitPendingMapUpdate(const StatesGroup &map_update_state);
+  /** @brief Drop the pending scan without inserting it into the local map. */
+  void DiscardPendingMapUpdate();
 
 private:
   /** @brief Propagate IMU and undistort the current LiDAR scan. */
@@ -82,6 +92,9 @@ private:
 
   // 地图是否已用第一帧数据完成初始化。
   bool map_inited_ = false;
+  bool defer_map_update_ = false;
+  bool pending_map_update_ = false;
+  double pending_map_update_time_ = -1.0;
 
   // PCL 体素下采样滤波器。
   pcl::VoxelGrid<PointType> downsample_filter_;

@@ -100,6 +100,9 @@ private:
   void handleVIO();
   void handleFirstFrame();
   void gravityAlignment();
+  bool deferredMapUpdateEnabled() const;
+  void finishDeferredMapUpdate(double stamp, const StatesGroup &lio_state,
+                               const StatesGroup *vio_state, const char *context);
 
   // Buffer and time helpers.
   void clearAllBuffersLocked();

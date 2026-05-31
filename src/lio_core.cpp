@@ -62,6 +62,11 @@ void LioCore::SetLocalMap(const LocalVoxelMapPtr &local_map)
   local_map_ = local_map;
 }
 
+void LioCore::SetDeferMapUpdate(bool enable)
+{
+  defer_map_update_ = enable;
+}
+
 // LIO 主入口：处理一次同步测量包并更新状态。
 void LioCore::ProcessMeasurement(FusionMeasureGroup &meas)
 {
@@ -73,6 +78,9 @@ void LioCore::ProcessMeasurement(FusionMeasureGroup &meas)
   meas_.lio_vio_flg = LIO;
   if (meas_.measures.empty()) {
     return;
+  }
+  if (pending_map_update_) {
+    CommitPendingMapUpdate(state_);
   }
   ProcessImu(meas_);
   ProcessLio();
@@ -108,6 +116,9 @@ void LioCore::Downsample()
 // 地图匹配与状态更新的核心流程。
 void LioCore::ProcessLio()
 {
+  pending_map_update_ = false;
+  pending_map_update_time_ = -1.0;
+
   // 没有点云就直接返回，避免后续匹配器处理空输入。
   if (!local_map_ || !feats_undistort_ || feats_undistort_->empty()) {
     return;
@@ -119,11 +130,20 @@ void LioCore::ProcessLio()
   if (!map_inited_) {
     map_inited_ = true;
     local_map_->BuildInitialMap();
+    if (defer_map_update_) {
+      return;
+    }
   }
 
   // 常规流程：状态估计 -> 回写状态 -> 地图更新 -> 视需要滑动地图。
   local_map_->EstimateState(state_propagat_);
   state_ = local_map_->State();
+  if (defer_map_update_) {
+    pending_map_update_ = true;
+    pending_map_update_time_ = !meas_.measures.empty() ? meas_.measures.back().lio_time : -1.0;
+    return;
+  }
+
   local_map_->UpdateFromLatestFrame();
   local_map_->SlideIfNeeded();
 }
@@ -166,6 +186,37 @@ const std::vector<PointToPlane> &LioCore::GetEffectPoints() const
 {
   static const std::vector<PointToPlane> empty_points;
   return local_map_ ? local_map_->LatestResiduals() : empty_points;
+}
+
+bool LioCore::HasPendingMapUpdate() const
+{
+  return pending_map_update_;
+}
+
+double LioCore::PendingMapUpdateTime() const
+{
+  return pending_map_update_time_;
+}
+
+bool LioCore::CommitPendingMapUpdate(const StatesGroup &map_update_state)
+{
+  if (!pending_map_update_ || !local_map_) {
+    return false;
+  }
+
+  const bool updated = local_map_->UpdateFromLatestFrameWithState(map_update_state, feats_down_world_);
+  if (updated) {
+    local_map_->SlideIfNeeded();
+  }
+  pending_map_update_ = false;
+  pending_map_update_time_ = -1.0;
+  return updated;
+}
+
+void LioCore::DiscardPendingMapUpdate()
+{
+  pending_map_update_ = false;
+  pending_map_update_time_ = -1.0;
 }
 
 } // namespace cake_slam

@@ -63,6 +63,8 @@ public:
   const StatesGroup &State() const;
 
   void UpdateFromLatestFrame();
+  bool UpdateFromLatestFrameWithState(const StatesGroup &state,
+                                      const PointCloudXYZI::Ptr &world_cloud);
   void UpdateWithPoints(const std::vector<pointWithVar> &points);
   void SlideIfNeeded();
   bool SlidingEnabled() const;

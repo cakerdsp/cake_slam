@@ -54,6 +54,16 @@ map:
   sliding_enable: 0
   half_map_size: 100
   sliding_thresh: 8.0
+  # 1: LIVO模式下当前scan先只参与LIO注册，等VIO/local BA完成后再写入local voxel map。
+  # 0: 保持原FAST-LIVO2风格，在LIO注册后立即写入地图。
+  update_after_vio: 1
+  # VIO未初始化、优化失败或位姿门限拒绝时的回退策略：
+  # "lio": 用同帧LIO位姿写图，避免地图冻结；"skip": 跳过该帧写图。
+  update_after_vio_fallback: "lio"
+  # VIO写图位姿相对同帧LIO位姿的最大平移差，超过则回退到上面的策略。
+  max_vio_map_update_pos_delta: 0.30
+  # VIO写图位姿相对同帧LIO位姿的最大旋转差，超过则回退到上面的策略。
+  max_vio_map_update_rot_delta_deg: 5.0
 
 vision:
   image_topic: "/alphasense/cam0/image_raw"

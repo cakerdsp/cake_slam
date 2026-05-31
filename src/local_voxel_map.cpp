@@ -102,6 +102,59 @@ void LocalVoxelMap::UpdateFromLatestFrame()
   }
 }
 
+bool LocalVoxelMap::UpdateFromLatestFrameWithState(const StatesGroup &state,
+                                                   const PointCloudXYZI::Ptr &world_cloud)
+{
+  if (!voxel_manager_ || !voxel_manager_->feats_down_body_ ||
+      voxel_manager_->feats_down_body_->empty()) {
+    return false;
+  }
+
+  PointCloudXYZI::Ptr update_world_cloud = world_cloud;
+  if (!update_world_cloud) {
+    update_world_cloud.reset(new PointCloudXYZI());
+  }
+  TransformLidar(state.rot_end, state.pos_end, voxel_manager_->feats_down_body_, update_world_cloud);
+  voxel_manager_->feats_down_world_ = update_world_cloud;
+  voxel_manager_->feats_down_size_ = static_cast<int>(voxel_manager_->feats_down_body_->points.size());
+
+  std::vector<pointWithVar> points;
+  points.resize(voxel_manager_->feats_down_body_->points.size());
+  const M3D rot_var = state.cov.block<3, 3>(0, 0);
+  const M3D t_var = state.cov.block<3, 3>(3, 3);
+  for (size_t i = 0; i < voxel_manager_->feats_down_body_->points.size(); ++i) {
+    const PointType &point = voxel_manager_->feats_down_body_->points[i];
+    V3D point_lidar(point.x, point.y, point.z);
+    if (point_lidar.z() == 0.0) {
+      point_lidar.z() = 0.001;
+    }
+
+    M3D body_cov;
+    calcBodyCov(point_lidar,
+                voxel_manager_->config_setting_.dept_err_,
+                voxel_manager_->config_setting_.beam_err_,
+                body_cov);
+    const V3D point_body = voxel_manager_->extR_ * point_lidar + voxel_manager_->extT_;
+    M3D point_crossmat;
+    point_crossmat << SKEW_SYM_MATRX(point_body);
+
+    pointWithVar &pv = points[i];
+    pv.point_b << point.x, point.y, point.z;
+    pv.point_w << update_world_cloud->points[i].x,
+                  update_world_cloud->points[i].y,
+                  update_world_cloud->points[i].z;
+    pv.body_var = body_cov;
+    pv.var = state.rot_end * body_cov * state.rot_end.transpose() +
+             (-point_crossmat) * rot_var * (-point_crossmat.transpose()) + t_var;
+  }
+
+  voxel_manager_->state_ = state;
+  voxel_manager_->position_last_ = state.pos_end;
+  voxel_manager_->pv_list_.swap(points);
+  UpdateWithPoints(voxel_manager_->pv_list_);
+  return true;
+}
+
 void LocalVoxelMap::UpdateWithPoints(const std::vector<pointWithVar> &points)
 {
   if (voxel_manager_) {
