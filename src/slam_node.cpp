@@ -190,7 +190,14 @@ void SlamNode::createPublishers()
   pub_cloud_raw_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_raw", 100);
   pub_cloud_registered_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 100);
   pub_cloud_map_ = create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 100);
-  pub_cloud_colored_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_colored", 100);
+  if (config_.visualization.publish_lio_colored_cloud) {
+    pub_cloud_colored_lio_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        config_.visualization.lio_colored_cloud_topic, 100);
+  }
+  if (config_.visualization.publish_vio_colored_cloud) {
+    pub_cloud_colored_vio_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        config_.visualization.vio_colored_cloud_topic, 100);
+  }
   pub_cloud_visual_submap_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_visual_sub_map", 100);
   pub_vio_landmarks_ = create_publisher<sensor_msgs::msg::PointCloud2>(config_.visualization.vio_landmarks_topic, 10);
   pub_vio_window_path_ = create_publisher<nav_msgs::msg::Path>(config_.visualization.vio_window_path_topic, 10);
@@ -1038,6 +1045,10 @@ void SlamNode::handleVIO()
       publishVioPose(measure.vio_time, vio_state);
       publishVisualSubmap(measure.vio_time);
       publishVioWindowVisualization(measure.vio_time);
+      if (config_.visualization.publish_vio_colored_cloud) {
+        publishColoredCloud(measure.vio_time, lio_.GetDownsampledCloud(),
+                            vio_state, pub_cloud_colored_vio_, "vio");
+      }
       t_vio_publish_end = std::chrono::steady_clock::now();
     }
   }
@@ -1582,12 +1593,6 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
       stats.texture_kept, stats.mask_kept, latest_sync_mono_image_.cols, latest_sync_mono_image_.rows);
 }
 
-Eigen::Vector3d SlamNode::lidarToWorld(const Eigen::Vector3d &point_lidar) const
-{
-  const Eigen::Vector3d point_imu = lidar_to_imu_R_ * point_lidar + lidar_to_imu_t_;
-  return state_.rot_end * point_imu + state_.pos_end;
-}
-
 void SlamNode::handleFirstFrame()
 {
   if (first_frame_handled_) {
@@ -1868,15 +1873,20 @@ void SlamNode::publishClouds(double stamp)
     msg.header.frame_id = config_.frame.world;
     pub_cloud_effect_->publish(msg);
   }
-  publishColoredCloud(stamp, lio_.GetDownsampledCloud());
+  if (config_.visualization.publish_lio_colored_cloud) {
+    publishColoredCloud(stamp, lio_.GetDownsampledCloud(), state_, pub_cloud_colored_lio_, "lio");
+  }
 }
 
-void SlamNode::publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar)
+void SlamNode::publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar,
+                                   const StatesGroup &pose,
+                                   const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &publisher,
+                                   const char *label)
 {
   // Project each LiDAR point with T_C_L into the synchronized color image.
   // Only valid colored projections are published, matching FAST-LIVO2's RGB cloud
   // behavior and avoiding gray filler points that hide calibration errors.
-  if (!pub_cloud_colored_ || !cloud_lidar || cloud_lidar->empty()) {
+  if (!publisher || !cloud_lidar || cloud_lidar->empty()) {
     return;
   }
 
@@ -1884,7 +1894,8 @@ void SlamNode::publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &clou
   const bool can_color = camera && !latest_sync_color_image_.empty();
   if (!can_color) {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                         "Skip colored cloud: camera=%d color_image_empty=%d",
+                         "Skip colored cloud[%s]: camera=%d color_image_empty=%d",
+                         label ? label : "unknown",
                          camera ? 1 : 0, latest_sync_color_image_.empty() ? 1 : 0);
     return;
   }
@@ -1912,7 +1923,8 @@ void SlamNode::publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &clou
 
     const cv::Vec3b bgr = latest_sync_color_image_.at<cv::Vec3b>(v, u);
     PointTypeRGB out;
-    const Eigen::Vector3d p_world = lidarToWorld(p_lidar);
+    const Eigen::Vector3d p_body = lidar_to_imu_R_ * p_lidar + lidar_to_imu_t_;
+    const Eigen::Vector3d p_world = pose.rot_end * p_body + pose.pos_end;
     out.x = static_cast<float>(p_world.x());
     out.y = static_cast<float>(p_world.y());
     out.z = static_cast<float>(p_world.z());
@@ -1924,22 +1936,23 @@ void SlamNode::publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &clou
   if (colored.empty()) {
     RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000,
-        "Colored cloud empty: input=%zu positive_depth=%zu in_image=%zu image_size=%dx%d. Check image scale/intrinsics/extrinsics/time offset.",
+        "Colored cloud[%s] empty: input=%zu positive_depth=%zu in_image=%zu image_size=%dx%d. Check image scale/intrinsics/extrinsics/time offset.",
+        label ? label : "unknown",
         cloud_lidar->size(), positive_depth, in_image, latest_sync_color_image_.cols, latest_sync_color_image_.rows);
     return;
   }
 
   CAKE_INFO_THROTTLE_MS(
       2000,
-      "Colored cloud: input=%zu positive_depth=%zu in_image=%zu published=%zu image_size=%dx%d",
-      cloud_lidar->size(), positive_depth, in_image, colored.size(),
+      "Colored cloud[%s]: input=%zu positive_depth=%zu in_image=%zu published=%zu image_size=%dx%d",
+      label ? label : "unknown", cloud_lidar->size(), positive_depth, in_image, colored.size(),
       latest_sync_color_image_.cols, latest_sync_color_image_.rows);
 
   sensor_msgs::msg::PointCloud2 msg;
   pcl::toROSMsg(colored, msg);
   msg.header.stamp = secToStamp(stamp);
   msg.header.frame_id = config_.frame.world;
-  pub_cloud_colored_->publish(msg);
+  publisher->publish(msg);
 }
 
 void SlamNode::publishFeatureImage(double stamp)

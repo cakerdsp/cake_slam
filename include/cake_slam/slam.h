@@ -121,7 +121,6 @@ private:
   void recordLioFullStatePrior(double stamp);
   LioFullStatePrior FindClosestLioState(double stamp) const;
   void buildLidarVisualCandidates(double stamp);
-  Eigen::Vector3d lidarToWorld(const Eigen::Vector3d &point_lidar) const;
 
   // Publishers.
   void publishRawCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar);
@@ -134,7 +133,10 @@ private:
   void publishVioPose(double stamp, const StatesGroup &state);
   void publishStaticTf();
   void publishClouds(double stamp);
-  void publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar);
+  void publishColoredCloud(double stamp, const PointCloudXYZI::Ptr &cloud_lidar,
+                           const StatesGroup &pose,
+                           const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &publisher,
+                           const char *label);
   void publishFeatureImage(double stamp);
   void publishVisualSubmap(double stamp);
   void publishVioWindowVisualization(double stamp);
@@ -230,7 +232,8 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_raw_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_registered_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_map_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_colored_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_colored_lio_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_colored_vio_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_visual_submap_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_vio_landmarks_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_vio_window_path_;

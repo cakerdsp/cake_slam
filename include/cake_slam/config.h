@@ -190,6 +190,10 @@ struct VisualizationConfig
   std::string vio_landmarks_topic = "/cake_slam/vio/landmarks";
   std::string vio_window_path_topic = "/cake_slam/vio/window_path";
   std::string vio_window_poses_topic = "/cake_slam/vio/window_poses";
+  bool publish_lio_colored_cloud = true;       ///< Publish current scan colored with the LIO pose.
+  std::string lio_colored_cloud_topic = "/cloud_colored";
+  bool publish_vio_colored_cloud = false;      ///< Publish current scan colored with the optimized VIO pose.
+  std::string vio_colored_cloud_topic = "/cake_slam/vio/colored_cloud";
 };
 
 struct TimeOffsetConfig
