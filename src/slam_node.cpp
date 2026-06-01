@@ -696,18 +696,34 @@ bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_tim
 
   // 点云切割沿用 FAST-LIVO2 的 pcl_proc_cur/pcl_proc_next 思路：
   // 当前图像时间之前的点进入本次 LIO，之后的点暂存到下一次切包。
-  CAKE_INFO("BUILD LIO DEBUG carry next begin cur_pts=%zu next_pts=%zu",
+  CAKE_INFO("BUILD LIO DEBUG carry next begin cur_pts=%zu next_pts=%zu cur_use=%ld next_use=%ld",
             meas.pcl_proc_cur ? meas.pcl_proc_cur->size() : 0,
-            meas.pcl_proc_next ? meas.pcl_proc_next->size() : 0);
-  *(meas.pcl_proc_cur) = *(meas.pcl_proc_next);
-  PointCloudXYZI().swap(*meas.pcl_proc_next);
-  CAKE_INFO("BUILD LIO DEBUG carry next done cur_pts=%zu next_pts=%zu",
+            meas.pcl_proc_next ? meas.pcl_proc_next->size() : 0,
+            meas.pcl_proc_cur ? meas.pcl_proc_cur.use_count() : 0L,
+            meas.pcl_proc_next ? meas.pcl_proc_next.use_count() : 0L);
+
+  // LioCore keeps a copied FusionMeasureGroup from the previous update. Avoid
+  // mutating or freeing those shared PCL cloud objects in-place while preparing
+  // the next cut; allocate fresh buffers and copy only the small carry-over tail.
+  PointCloudXYZI::Ptr carry_cloud(new PointCloudXYZI(*meas.pcl_proc_next));
+  meas.pcl_proc_cur = carry_cloud;
+  meas.pcl_proc_next.reset(new PointCloudXYZI());
+
+  const std::size_t reserve_size = meas.pcl_proc_cur->size() +
+                                   24000UL * lidar_buffer_.size();
+  CAKE_INFO("BUILD LIO DEBUG carry next done cur_pts=%zu next_pts=%zu cur_ptr=%p next_ptr=%p reserve=%zu cur_cap=%zu next_cap=%zu",
             meas.pcl_proc_cur ? meas.pcl_proc_cur->size() : 0,
-            meas.pcl_proc_next ? meas.pcl_proc_next->size() : 0);
-  const int reserve_size = static_cast<int>(meas.pcl_proc_cur->size()) +
-                           24000 * static_cast<int>(lidar_buffer_.size());
+            meas.pcl_proc_next ? meas.pcl_proc_next->size() : 0,
+            static_cast<void *>(meas.pcl_proc_cur.get()),
+            static_cast<void *>(meas.pcl_proc_next.get()),
+            reserve_size,
+            meas.pcl_proc_cur ? meas.pcl_proc_cur->points.capacity() : 0,
+            meas.pcl_proc_next ? meas.pcl_proc_next->points.capacity() : 0);
   meas.pcl_proc_cur->reserve(reserve_size);
   meas.pcl_proc_next->reserve(reserve_size);
+  CAKE_INFO("BUILD LIO DEBUG reserve done cur_cap=%zu next_cap=%zu",
+            meas.pcl_proc_cur->points.capacity(),
+            meas.pcl_proc_next->points.capacity());
 
   while (!lidar_buffer_.empty()) {
     if (lidar_time_buffer_.empty()) {
