@@ -14,6 +14,7 @@ which is included as part of this source code package.
 // 用于局部地图维护与残差构建。
 
 #include "cake_slam/voxel_map.h"
+#include <cstdio>
 namespace {
 int voxel_plane_id = 0;
 } // namespace
@@ -337,6 +338,7 @@ VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
 
 void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
+  const double t_state_start = omp_get_wtime();
   // 这是 LIO 后端的核心：
   // 1. 基于当前预测状态把点云投到地图中；
   // 2. 构造点到面的残差；
@@ -363,6 +365,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     point_crossmat << SKEW_SYM_MATRX(point_this);
     cross_mat_list_.push_back(point_crossmat);
   }
+  const double t_precompute_end = omp_get_wtime();
 
   vector<pointWithVar>().swap(pv_list_);
   pv_list_.resize(feats_down_size_);
@@ -374,11 +377,15 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   I_STATE.setIdentity();
 
   bool flg_EKF_inited, flg_EKF_converged, EKF_stop_flg = 0;
+  int executed_iterations = 0;
+  int final_effective_features = 0;
   for (int iterCount = 0; iterCount < config_setting_.max_iterations_; iterCount++)
   {
+    const double t_iter_start = omp_get_wtime();
     double total_residual = 0.0;
     PointCloudXYZI::Ptr world_lidar(new PointCloudXYZI);
     TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, world_lidar);
+    const double t_transform_end = omp_get_wtime();
     M3D rot_var = state_.cov.block<3, 3>(0, 0);
     M3D t_var = state_.cov.block<3, 3>(3, 3);
     for (size_t i = 0; i < feats_down_body_->size(); i++)
@@ -393,11 +400,13 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       pv.var = cov;
       pv.body_var = body_cov_list_[i];
     }
+    const double t_cov_end = omp_get_wtime();
     ptpl_list_.clear();
 
     // double t1 = omp_get_wtime();
 
     BuildResidualListOMP(pv_list_, ptpl_list_);
+    const double t_residual_end = omp_get_wtime();
 
     // build_residual_time += omp_get_wtime() - t1;
 
@@ -406,8 +415,10 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       total_residual += fabs(ptpl_list_[i].dis_to_plane_);
     }
     effct_feat_num_ = ptpl_list_.size();
+    final_effective_features = effct_feat_num_;
+    const double average_residual = effct_feat_num_ > 0 ? total_residual / static_cast<double>(effct_feat_num_) : 0.0;
     cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
-         << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
+         << " effective feature num: " << effct_feat_num_ << " average residual: " << average_residual << endl;
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
      * ***/
@@ -461,6 +472,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
           ptpl_list_[i].normal_[1] * R_inv(i), ptpl_list_[i].normal_[2] * R_inv(i);
       meas_vec(i) = -ptpl_list_[i].dis_to_plane_;
     }
+    const double t_jacobian_end = omp_get_wtime();
     EKF_stop_flg = false;
     flg_EKF_converged = false;
     /*** Iterative Kalman Filter Update ***/
@@ -477,6 +489,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     solution = K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec.block<DIM_STATE, 1>(0, 0) - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
     int minRow, minCol;
     state_ += solution;
+    const double t_solve_end = omp_get_wtime();
     auto rot_add = solution.block<3, 1>(0, 0);
     auto t_add = solution.block<3, 1>(3, 0);
     if ((rot_add.norm() * 57.3 < 0.01) && (t_add.norm() * 100 < 0.015)) { flg_EKF_converged = true; }
@@ -501,8 +514,41 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       // VD(DIM_STATE) P_diag = _state.cov.diagonal();
       EKF_stop_flg = true;
     }
+    const double t_iter_end = omp_get_wtime();
+    executed_iterations = iterCount + 1;
+    std::printf("LIO IESKF ITER DEBUG iter=%d raw=%zu down=%d effective=%d residual_avg=%.9f converged=%d stop=%d rematch=%d timing_ms={transform=%.3f cov=%.3f residual=%.3f jacobian=%.3f solve=%.3f total=%.3f}\n",
+                iterCount,
+                feats_undistort_ ? feats_undistort_->size() : 0,
+                feats_down_size_,
+                effct_feat_num_,
+                effct_feat_num_ > 0 ? total_residual / static_cast<double>(effct_feat_num_) : 0.0,
+                flg_EKF_converged ? 1 : 0,
+                EKF_stop_flg ? 1 : 0,
+                rematch_num,
+                (t_transform_end - t_iter_start) * 1000.0,
+                (t_cov_end - t_transform_end) * 1000.0,
+                (t_residual_end - t_cov_end) * 1000.0,
+                (t_jacobian_end - t_residual_end) * 1000.0,
+                (t_solve_end - t_jacobian_end) * 1000.0,
+                (t_iter_end - t_iter_start) * 1000.0);
     if (EKF_stop_flg) break;
   }
+  const double t_state_end = omp_get_wtime();
+  std::printf("LIO IESKF SUMMARY DEBUG raw=%zu down=%d final_effective=%d iterations=%d max_iterations=%d mp_en=%d mp_proc_num=%d timing_ms={precompute=%.3f loop=%.3f total=%.3f}\n",
+              feats_undistort_ ? feats_undistort_->size() : 0,
+              feats_down_size_,
+              final_effective_features,
+              executed_iterations,
+              config_setting_.max_iterations_,
+#ifdef MP_EN
+              1,
+#else
+              0,
+#endif
+              MP_PROC_NUM,
+              (t_precompute_end - t_state_start) * 1000.0,
+              (t_state_end - t_precompute_end) * 1000.0,
+              (t_state_end - t_state_start) * 1000.0);
 
   // double t2 = omp_get_wtime();
   // scan_count++;
@@ -655,19 +701,18 @@ void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_poin
 
 void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, std::vector<PointToPlane> &ptpl_list)
 {
+  const double t_residual_start = omp_get_wtime();
   // 并行遍历所有点，为每个点在体素地图中寻找局部平面并生成残差候选。
-  int max_layer = config_setting_.max_layer_;
   double voxel_size = config_setting_.max_voxel_size_;
-  double sigma_num = config_setting_.sigma_num_;
-  std::mutex mylock;
   ptpl_list.clear();
   std::vector<PointToPlane> all_ptpl_list(pv_list.size());
-  std::vector<bool> useful_ptpl(pv_list.size());
+  std::vector<unsigned char> useful_ptpl(pv_list.size());
+  std::vector<unsigned char> hit_kind(pv_list.size(), 0);
   std::vector<size_t> index(pv_list.size());
   for (size_t i = 0; i < index.size(); ++i)
   {
     index[i] = i;
-    useful_ptpl[i] = false;
+    useful_ptpl[i] = 0;
   }
   #ifdef MP_EN
     omp_set_num_threads(MP_PROC_NUM);
@@ -689,8 +734,11 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
       VoxelOctoTree *current_octo = iter->second;
       PointToPlane single_ptpl;
       bool is_sucess = false;
+      bool direct_success = false;
+      bool neighbor_found = false;
       double prob = 0;
       build_single_residual(pv, current_octo, 0, is_sucess, prob, single_ptpl);
+      direct_success = is_sucess;
       if (!is_sucess)
       {
         VOXEL_LOCATION near_position = position;
@@ -701,20 +749,21 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
         if (loc_xyz[2] > (current_octo->voxel_center_[2] + current_octo->quater_length_)) { near_position.z = near_position.z + 1; }
         else if (loc_xyz[2] < (current_octo->voxel_center_[2] - current_octo->quater_length_)) { near_position.z = near_position.z - 1; }
         auto iter_near = voxel_map_.find(near_position);
-        if (iter_near != voxel_map_.end()) { build_single_residual(pv, iter_near->second, 0, is_sucess, prob, single_ptpl); }
+        if (iter_near != voxel_map_.end()) {
+          neighbor_found = true;
+          build_single_residual(pv, iter_near->second, 0, is_sucess, prob, single_ptpl);
+        }
       }
       if (is_sucess)
       {
-        mylock.lock();
-        useful_ptpl[i] = true;
+        useful_ptpl[i] = 1;
+        hit_kind[i] = direct_success ? 1 : 2;
         all_ptpl_list[i] = single_ptpl;
-        mylock.unlock();
       }
       else
       {
-        mylock.lock();
-        useful_ptpl[i] = false;
-        mylock.unlock();
+        useful_ptpl[i] = 0;
+        hit_kind[i] = neighbor_found ? 3 : 4;
       }
     }
   }
@@ -722,6 +771,49 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
   {
     if (useful_ptpl[i]) { ptpl_list.push_back(all_ptpl_list[i]); }
   }
+  size_t root_miss = 0;
+  size_t direct_success = 0;
+  size_t neighbor_success = 0;
+  size_t neighbor_failed = 0;
+  size_t neighbor_missing = 0;
+  for (const unsigned char kind : hit_kind)
+  {
+    switch (kind)
+    {
+      case 1:
+        direct_success++;
+        break;
+      case 2:
+        neighbor_success++;
+        break;
+      case 3:
+        neighbor_failed++;
+        break;
+      case 4:
+        neighbor_missing++;
+        break;
+      default:
+        root_miss++;
+        break;
+    }
+  }
+  const double t_residual_end = omp_get_wtime();
+  std::printf("LIO RESIDUAL DEBUG input=%zu output=%zu map_voxels=%zu direct_success=%zu neighbor_success=%zu root_miss=%zu neighbor_failed=%zu neighbor_missing=%zu mp_en=%d mp_proc_num=%d timing_ms=%.3f\n",
+              pv_list.size(),
+              ptpl_list.size(),
+              voxel_map_.size(),
+              direct_success,
+              neighbor_success,
+              root_miss,
+              neighbor_failed,
+              neighbor_missing,
+#ifdef MP_EN
+              1,
+#else
+              0,
+#endif
+              MP_PROC_NUM,
+              (t_residual_end - t_residual_start) * 1000.0);
 }
 
 void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTree *current_octo, const int current_layer, bool &is_sucess,

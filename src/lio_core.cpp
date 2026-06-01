@@ -3,7 +3,9 @@
 
 #include "cake_slam/lio_core.h"
 
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 
 namespace cake_slam {
 
@@ -116,6 +118,7 @@ void LioCore::Downsample()
 // 地图匹配与状态更新的核心流程。
 void LioCore::ProcessLio()
 {
+  const auto t_lio_core_start = std::chrono::steady_clock::now();
   pending_map_update_ = false;
   pending_map_update_time_ = -1.0;
 
@@ -125,27 +128,68 @@ void LioCore::ProcessLio()
   }
 
   Downsample();
+  const auto t_downsample_end = std::chrono::steady_clock::now();
+  double initial_map_ms = 0.0;
+  double estimate_ms = 0.0;
+  double update_ms = 0.0;
+  double slide_ms = 0.0;
 
   // 第一帧只负责建图，不进行常规匹配更新。
   if (!map_inited_) {
     map_inited_ = true;
+    const auto t_initial_map_start = std::chrono::steady_clock::now();
     local_map_->BuildInitialMap();
+    const auto t_initial_map_end = std::chrono::steady_clock::now();
+    initial_map_ms = std::chrono::duration<double, std::milli>(t_initial_map_end - t_initial_map_start).count();
     if (defer_map_update_) {
+      const auto t_lio_core_end = std::chrono::steady_clock::now();
+      std::printf("LIO CORE DEBUG raw_pts=%zu down_pts=%zu first_frame=1 defer=1 pending=0 timing_ms={downsample=%.3f initial_map=%.3f estimate=0.000 update=0.000 slide=0.000 total=%.3f}\n",
+                  feats_undistort_ ? feats_undistort_->size() : 0,
+                  feats_down_body_ ? feats_down_body_->size() : 0,
+                  std::chrono::duration<double, std::milli>(t_downsample_end - t_lio_core_start).count(),
+                  initial_map_ms,
+                  std::chrono::duration<double, std::milli>(t_lio_core_end - t_lio_core_start).count());
       return;
     }
   }
 
   // 常规流程：状态估计 -> 回写状态 -> 地图更新 -> 视需要滑动地图。
+  const auto t_estimate_start = std::chrono::steady_clock::now();
   local_map_->EstimateState(state_propagat_);
+  const auto t_estimate_end = std::chrono::steady_clock::now();
+  estimate_ms = std::chrono::duration<double, std::milli>(t_estimate_end - t_estimate_start).count();
   state_ = local_map_->State();
   if (defer_map_update_) {
     pending_map_update_ = true;
     pending_map_update_time_ = !meas_.measures.empty() ? meas_.measures.back().lio_time : -1.0;
+    const auto t_lio_core_end = std::chrono::steady_clock::now();
+    std::printf("LIO CORE DEBUG raw_pts=%zu down_pts=%zu first_frame=0 defer=1 pending=1 timing_ms={downsample=%.3f initial_map=%.3f estimate=%.3f update=0.000 slide=0.000 total=%.3f}\n",
+                feats_undistort_ ? feats_undistort_->size() : 0,
+                feats_down_body_ ? feats_down_body_->size() : 0,
+                std::chrono::duration<double, std::milli>(t_downsample_end - t_lio_core_start).count(),
+                initial_map_ms,
+                estimate_ms,
+                std::chrono::duration<double, std::milli>(t_lio_core_end - t_lio_core_start).count());
     return;
   }
 
+  const auto t_update_start = std::chrono::steady_clock::now();
   local_map_->UpdateFromLatestFrame();
+  const auto t_update_end = std::chrono::steady_clock::now();
+  update_ms = std::chrono::duration<double, std::milli>(t_update_end - t_update_start).count();
+  const auto t_slide_start = std::chrono::steady_clock::now();
   local_map_->SlideIfNeeded();
+  const auto t_lio_core_end = std::chrono::steady_clock::now();
+  slide_ms = std::chrono::duration<double, std::milli>(t_lio_core_end - t_slide_start).count();
+  std::printf("LIO CORE DEBUG raw_pts=%zu down_pts=%zu first_frame=0 defer=0 pending=0 timing_ms={downsample=%.3f initial_map=%.3f estimate=%.3f update=%.3f slide=%.3f total=%.3f}\n",
+              feats_undistort_ ? feats_undistort_->size() : 0,
+              feats_down_body_ ? feats_down_body_->size() : 0,
+              std::chrono::duration<double, std::milli>(t_downsample_end - t_lio_core_start).count(),
+              initial_map_ms,
+              estimate_ms,
+              update_ms,
+              slide_ms,
+              std::chrono::duration<double, std::milli>(t_lio_core_end - t_lio_core_start).count());
 }
 
 const StatesGroup &LioCore::GetState() const
