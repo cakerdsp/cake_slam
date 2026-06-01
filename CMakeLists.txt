@@ -1,9 +1,6 @@
 cmake_minimum_required(VERSION 3.8)
 project(cake_slam)
 
-if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
-endif()
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 
 set(CMAKE_CXX_STANDARD 17)
@@ -14,17 +11,17 @@ add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|i[3-6]86)$")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -funroll-loops")
-    message(STATUS "Using x86 Release optimizations: -O3 -march=native -mtune=native -funroll-loops")
+    set(CAKE_SLAM_LIO_OPT_FLAGS -O3 -march=native -mtune=native -funroll-loops)
+    message(STATUS "Using x86 LIO-only optimizations: ${CAKE_SLAM_LIO_OPT_FLAGS}")
   elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|AARCH64)$")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -ffast-math")
-    message(STATUS "Using aarch64 Release optimizations: -O3 -mcpu=native -mtune=native -ffast-math")
+    set(CAKE_SLAM_LIO_OPT_FLAGS -O3 -mcpu=native -mtune=native)
+    message(STATUS "Using aarch64 LIO-only optimizations: ${CAKE_SLAM_LIO_OPT_FLAGS}")
   elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|ARM)")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
-    message(STATUS "Using ARM Release optimizations: -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
+    set(CAKE_SLAM_LIO_OPT_FLAGS -O3 -mcpu=native -mtune=native -mfpu=neon)
+    message(STATUS "Using ARM LIO-only optimizations: ${CAKE_SLAM_LIO_OPT_FLAGS}")
   else()
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
-    message(STATUS "Using generic Release optimization: -O3")
+    set(CAKE_SLAM_LIO_OPT_FLAGS -O3)
+    message(STATUS "Using generic LIO-only optimization: ${CAKE_SLAM_LIO_OPT_FLAGS}")
   endif()
 endif()
 
@@ -119,10 +116,24 @@ set(cake_slam_SOURCES
 
 # 5. 构建核心库
 add_library(cake_slam_core ${cake_slam_SOURCES})
+# Keep aggressive optimization on the LiDAR hot path only. Optimizing the whole
+# VIO stack with these flags has exposed memory issues in the fisheye camera path.
+if(CAKE_SLAM_LIO_OPT_FLAGS)
+  set_source_files_properties(
+    src/lio_core.cpp
+    src/voxel_map.cpp
+    src/local_voxel_map.cpp
+    PROPERTIES COMPILE_OPTIONS "${CAKE_SLAM_LIO_OPT_FLAGS}"
+  )
+endif()
 if(CAKE_SLAM_MP_PROC_NUM GREATER 1)
-  target_compile_definitions(cake_slam_core PUBLIC MP_EN MP_PROC_NUM=${CAKE_SLAM_MP_PROC_NUM})
+  set_source_files_properties(src/voxel_map.cpp PROPERTIES
+    COMPILE_DEFINITIONS "MP_EN;MP_PROC_NUM=${CAKE_SLAM_MP_PROC_NUM}"
+  )
 else()
-  target_compile_definitions(cake_slam_core PUBLIC MP_PROC_NUM=1)
+  set_source_files_properties(src/voxel_map.cpp PROPERTIES
+    COMPILE_DEFINITIONS "MP_PROC_NUM=1"
+  )
 endif()
 
 # ROS2 依赖链接（底层使用 plain signature）
