@@ -383,11 +383,14 @@ void SlamNode::syncProcessLoop()
           break;
         case VIO:
           handleVIO();
+          CAKE_INFO("SYNC LOOP DEBUG after handleVIO flag=%d", static_cast<int>(measures_.lio_vio_flg));
           break;
         default:
           break;
       }
+      CAKE_INFO("SYNC LOOP DEBUG before drain raw flag=%d", static_cast<int>(measures_.lio_vio_flg));
       drainRawInputBuffers();
+      CAKE_INFO("SYNC LOOP DEBUG after drain raw flag=%d", static_cast<int>(measures_.lio_vio_flg));
     }
 
     if (!did_work) {
@@ -428,20 +431,30 @@ void SlamNode::drainRawInputBuffers()
     }
 
     if (livox_msg) {
+      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG livox begin stamp=%.6f", stampToSec(livox_msg->header.stamp));
       auto mutable_msg = std::make_shared<livox_ros_driver2::msg::CustomMsg>(*livox_msg);
       PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
       preprocess_->process(mutable_msg, cloud);
       enqueueProcessedCloud(stampToSec(livox_msg->header.stamp), cloud);
+      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG livox done stamp=%.6f pts=%zu",
+                            stampToSec(livox_msg->header.stamp), cloud ? cloud->size() : 0);
     } else if (cloud_msg) {
+      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG cloud begin stamp=%.6f", stampToSec(cloud_msg->header.stamp));
       PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
       preprocess_->process(cloud_msg, cloud);
       enqueueProcessedCloud(stampToSec(cloud_msg->header.stamp), cloud);
+      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG cloud done stamp=%.6f pts=%zu",
+                            stampToSec(cloud_msg->header.stamp), cloud ? cloud->size() : 0);
     } else if (image_msg) {
+      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG image begin stamp=%.6f encoding=%s size=%ux%u",
+                            stampToSec(image_msg->header.stamp), image_msg->encoding.c_str(),
+                            image_msg->width, image_msg->height);
       ImagePacket packet;
       packet.stamp = stampToSec(image_msg->header.stamp) + config_.common.image_time_offset;
       packet.mono = monoImageFromMsg(image_msg);
       packet.color = colorImageFromMsg(image_msg);
       enqueueImagePacket(std::move(packet));
+      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG image done stamp=%.6f", stampToSec(image_msg->header.stamp));
     }
   }
 }
@@ -633,6 +646,17 @@ bool SlamNode::syncVioOnly(FusionMeasureGroup &meas)
 // 将 LiDAR 点云切到指定时刻，构建一包 LIO 测量。
 bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_time)
 {
+  if (lidar_time_buffer_.empty() || !meas.pcl_proc_cur || !meas.pcl_proc_next) {
+    CAKE_INFO("BUILD LIO DEBUG invalid input lidar_queue=%zu lidar_time_queue=%zu pcl_cur_null=%d pcl_next_null=%d",
+              lidar_buffer_.size(), lidar_time_buffer_.size(),
+              meas.pcl_proc_cur ? 0 : 1, meas.pcl_proc_next ? 0 : 1);
+    return false;
+  }
+  CAKE_INFO("BUILD LIO DEBUG begin flag=%d last_lio=%.6f requested=%.6f lidar_queue=%zu lidar_time_queue=%zu image_queue=%zu imu_lio=%zu pcl_cur=%p pcl_next=%p next_pts=%zu",
+            static_cast<int>(meas.lio_vio_flg), meas.last_lio_update_time, update_time,
+            lidar_buffer_.size(), lidar_time_buffer_.size(), image_buffer_.size(), imu_lio_buffer_.size(),
+            static_cast<void *>(meas.pcl_proc_cur.get()), static_cast<void *>(meas.pcl_proc_next.get()),
+            meas.pcl_proc_next ? meas.pcl_proc_next->size() : 0);
   // Slice LiDAR data at the selected image timestamp. Points after update_time
   // stay in pcl_proc_next and become the prefix of the next LIO packet.
   if (meas.last_lio_update_time < 0.0) {
@@ -647,13 +671,17 @@ bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_tim
     return false;
   }
   update_time = image_buffer_.front().stamp;
+  CAKE_INFO("BUILD LIO DEBUG selected image update_time=%.6f last_lio=%.6f newest_lidar=%.6f last_imu=%.6f",
+            update_time, meas.last_lio_update_time, newestLidarEndTimeLocked(), last_imu_time_);
   latest_sync_mono_image_ = image_buffer_.front().mono.clone();
   latest_sync_color_image_ = image_buffer_.front().color.clone();
 
   if (update_time > newestLidarEndTimeLocked()) {
+    CAKE_INFO("BUILD LIO DEBUG wait lidar update_time=%.6f newest_lidar=%.6f", update_time, newestLidarEndTimeLocked());
     return false;
   }
   if (use_imu_ && update_time > last_imu_time_) {
+    CAKE_INFO("BUILD LIO DEBUG wait imu update_time=%.6f last_imu=%.6f", update_time, last_imu_time_);
     return false;
   }
 
@@ -668,14 +696,28 @@ bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_tim
 
   // 点云切割沿用 FAST-LIVO2 的 pcl_proc_cur/pcl_proc_next 思路：
   // 当前图像时间之前的点进入本次 LIO，之后的点暂存到下一次切包。
+  CAKE_INFO("BUILD LIO DEBUG carry next begin cur_pts=%zu next_pts=%zu",
+            meas.pcl_proc_cur ? meas.pcl_proc_cur->size() : 0,
+            meas.pcl_proc_next ? meas.pcl_proc_next->size() : 0);
   *(meas.pcl_proc_cur) = *(meas.pcl_proc_next);
   PointCloudXYZI().swap(*meas.pcl_proc_next);
+  CAKE_INFO("BUILD LIO DEBUG carry next done cur_pts=%zu next_pts=%zu",
+            meas.pcl_proc_cur ? meas.pcl_proc_cur->size() : 0,
+            meas.pcl_proc_next ? meas.pcl_proc_next->size() : 0);
   const int reserve_size = static_cast<int>(meas.pcl_proc_cur->size()) +
                            24000 * static_cast<int>(lidar_buffer_.size());
   meas.pcl_proc_cur->reserve(reserve_size);
   meas.pcl_proc_next->reserve(reserve_size);
 
   while (!lidar_buffer_.empty()) {
+    if (lidar_time_buffer_.empty()) {
+      CAKE_INFO("BUILD LIO DEBUG broken queues: lidar_queue=%zu lidar_time_queue=0", lidar_buffer_.size());
+      return false;
+    }
+    CAKE_INFO_THROTTLE_MS(500, "BUILD LIO DEBUG split loop lidar_front=%.6f update=%.6f cloud_pts=%zu",
+                          lidar_time_buffer_.empty() ? -1.0 : lidar_time_buffer_.front(),
+                          update_time,
+                          lidar_buffer_.front() ? lidar_buffer_.front()->size() : 0);
     if (lidar_time_buffer_.front() > update_time) {
       break;
     }
@@ -1162,7 +1204,7 @@ void SlamNode::resetSyncStateLocked()
 
 double SlamNode::newestLidarEndTimeLocked() const
 {
-  if (lidar_buffer_.empty()) {
+  if (lidar_buffer_.empty() || lidar_time_buffer_.empty()) {
     return -1.0;
   }
   return cloudEndTime(lidar_buffer_.back(), lidar_time_buffer_.back());
