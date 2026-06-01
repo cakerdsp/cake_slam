@@ -1,27 +1,28 @@
 cmake_minimum_required(VERSION 3.8)
 project(cake_slam)
 
-message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
 
+option(CAKE_SLAM_ENABLE_NATIVE_LIO_OPT
+  "Enable aggressive native CPU optimization for selected LiDAR source files" OFF)
+option(CAKE_SLAM_ENABLE_VOXEL_OMP
+  "Enable OpenMP parallel residual search in voxel_map.cpp" OFF)
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|i[3-6]86)$")
-    set(CAKE_SLAM_LIO_OPT_FLAGS -O3 -march=native -mtune=native -funroll-loops)
-    message(STATUS "Using x86 LIO-only optimizations: ${CAKE_SLAM_LIO_OPT_FLAGS}")
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|AARCH64)$")
-    set(CAKE_SLAM_LIO_OPT_FLAGS -O3 -mcpu=native -mtune=native)
-    message(STATUS "Using aarch64 LIO-only optimizations: ${CAKE_SLAM_LIO_OPT_FLAGS}")
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|ARM)")
-    set(CAKE_SLAM_LIO_OPT_FLAGS -O3 -mcpu=native -mtune=native -mfpu=neon)
-    message(STATUS "Using ARM LIO-only optimizations: ${CAKE_SLAM_LIO_OPT_FLAGS}")
-  else()
-    set(CAKE_SLAM_LIO_OPT_FLAGS -O3)
-    message(STATUS "Using generic LIO-only optimization: ${CAKE_SLAM_LIO_OPT_FLAGS}")
+  if(CAKE_SLAM_ENABLE_NATIVE_LIO_OPT)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|i[3-6]86)$")
+      set(CAKE_SLAM_LIO_OPT_FLAGS -O3 -march=native -mtune=native -funroll-loops)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|AARCH64)$")
+      set(CAKE_SLAM_LIO_OPT_FLAGS -O3 -mcpu=native -mtune=native)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|ARM)")
+      set(CAKE_SLAM_LIO_OPT_FLAGS -O3 -mcpu=native -mtune=native -mfpu=neon)
+    else()
+      set(CAKE_SLAM_LIO_OPT_FLAGS -O3)
+    endif()
   endif()
 endif()
 
@@ -37,7 +38,12 @@ elseif(CAKE_SLAM_PROC_COUNT GREATER 1)
 else()
   set(CAKE_SLAM_MP_PROC_NUM 1)
 endif()
-message(STATUS "Processor count: ${CAKE_SLAM_PROC_COUNT}; LIO OpenMP threads: ${CAKE_SLAM_MP_PROC_NUM}")
+if(NOT CAKE_SLAM_ENABLE_VOXEL_OMP)
+  set(CAKE_SLAM_MP_PROC_NUM 1)
+endif()
+message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "Native LiDAR optimization: ${CAKE_SLAM_ENABLE_NATIVE_LIO_OPT}")
+message(STATUS "Voxel OpenMP residual search: ${CAKE_SLAM_ENABLE_VOXEL_OMP}; threads: ${CAKE_SLAM_MP_PROC_NUM}")
 
 # 1. 查找依赖
 find_package(ament_cmake REQUIRED)
@@ -116,9 +122,8 @@ set(cake_slam_SOURCES
 
 # 5. 构建核心库
 add_library(cake_slam_core ${cake_slam_SOURCES})
-# Keep aggressive optimization on the LiDAR hot path only. Optimizing the whole
-# VIO stack with these flags has exposed memory issues in the fisheye camera path.
 if(CAKE_SLAM_LIO_OPT_FLAGS)
+  message(STATUS "Using native LiDAR source optimizations: ${CAKE_SLAM_LIO_OPT_FLAGS}")
   set_source_files_properties(
     src/lio_core.cpp
     src/voxel_map.cpp
@@ -126,7 +131,7 @@ if(CAKE_SLAM_LIO_OPT_FLAGS)
     PROPERTIES COMPILE_OPTIONS "${CAKE_SLAM_LIO_OPT_FLAGS}"
   )
 endif()
-if(CAKE_SLAM_MP_PROC_NUM GREATER 1)
+if(CAKE_SLAM_ENABLE_VOXEL_OMP AND CAKE_SLAM_MP_PROC_NUM GREATER 1)
   set_source_files_properties(src/voxel_map.cpp PROPERTIES
     COMPILE_DEFINITIONS "MP_EN;MP_PROC_NUM=${CAKE_SLAM_MP_PROC_NUM}"
   )

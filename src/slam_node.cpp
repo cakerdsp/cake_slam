@@ -912,8 +912,6 @@ void SlamNode::handleLIO()
   if (lio_imu_initialized) {
     gravityAlignment();
   }
-  latest_ekf_state_ = state_;
-  latest_ekf_time_ = update_time;
   const auto t_lio_process_end = std::chrono::steady_clock::now();
 
   if (lio_imu_initialized) {
@@ -968,8 +966,13 @@ void SlamNode::handleLIO()
   last_lio_output_time = update_time;
   const auto t_lio_prior_end = std::chrono::steady_clock::now();
 
-  state_update_flag_ = true;
-  ekf_finish_once_ = true;
+  {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    latest_ekf_state_ = state_;
+    latest_ekf_time_ = update_time;
+    state_update_flag_ = true;
+    ekf_finish_once_ = true;
+  }
 
   publishClouds(update_time);
   publishLioOdometry(update_time);
@@ -1089,10 +1092,13 @@ void SlamNode::handleVIO()
 
       if (!use_lidar_) {
         state_ = vio_state;
-        latest_ekf_state_ = vio_state;
-        latest_ekf_time_ = measure.vio_time;
-        state_update_flag_ = true;
-        ekf_finish_once_ = true;
+        {
+          std::lock_guard<std::mutex> lock(buffer_mutex_);
+          latest_ekf_state_ = vio_state;
+          latest_ekf_time_ = measure.vio_time;
+          state_update_flag_ = true;
+          ekf_finish_once_ = true;
+        }
         publishLioOdometry(measure.vio_time);
         publishLioPath(measure.vio_time);
         publishLioTf(measure.vio_time);
@@ -2162,11 +2168,11 @@ void SlamNode::propagateImuOnce(StatesGroup &state, double dt, const Eigen::Vect
 
 void SlamNode::imuPropagationTimer()
 {
+  std::lock_guard<std::mutex> lock(buffer_mutex_);
   if (!config_.common.imu_propagation_enable || !new_imu_ || !ekf_finish_once_ || latest_ekf_time_ < 0.0) {
     return;
   }
 
-  std::lock_guard<std::mutex> lock(buffer_mutex_);
   new_imu_ = false;
   if (state_update_flag_) {
     imu_propagate_state_ = latest_ekf_state_;
