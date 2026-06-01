@@ -383,14 +383,11 @@ void SlamNode::syncProcessLoop()
           break;
         case VIO:
           handleVIO();
-          CAKE_INFO("SYNC LOOP DEBUG after handleVIO flag=%d", static_cast<int>(measures_.lio_vio_flg));
           break;
         default:
           break;
       }
-      CAKE_INFO("SYNC LOOP DEBUG before drain raw flag=%d", static_cast<int>(measures_.lio_vio_flg));
       drainRawInputBuffers();
-      CAKE_INFO("SYNC LOOP DEBUG after drain raw flag=%d", static_cast<int>(measures_.lio_vio_flg));
     }
 
     if (!did_work) {
@@ -431,30 +428,20 @@ void SlamNode::drainRawInputBuffers()
     }
 
     if (livox_msg) {
-      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG livox begin stamp=%.6f", stampToSec(livox_msg->header.stamp));
       auto mutable_msg = std::make_shared<livox_ros_driver2::msg::CustomMsg>(*livox_msg);
       PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
       preprocess_->process(mutable_msg, cloud);
       enqueueProcessedCloud(stampToSec(livox_msg->header.stamp), cloud);
-      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG livox done stamp=%.6f pts=%zu",
-                            stampToSec(livox_msg->header.stamp), cloud ? cloud->size() : 0);
     } else if (cloud_msg) {
-      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG cloud begin stamp=%.6f", stampToSec(cloud_msg->header.stamp));
       PointCloudXYZI::Ptr cloud(new PointCloudXYZI());
       preprocess_->process(cloud_msg, cloud);
       enqueueProcessedCloud(stampToSec(cloud_msg->header.stamp), cloud);
-      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG cloud done stamp=%.6f pts=%zu",
-                            stampToSec(cloud_msg->header.stamp), cloud ? cloud->size() : 0);
     } else if (image_msg) {
-      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG image begin stamp=%.6f encoding=%s size=%ux%u",
-                            stampToSec(image_msg->header.stamp), image_msg->encoding.c_str(),
-                            image_msg->width, image_msg->height);
       ImagePacket packet;
       packet.stamp = stampToSec(image_msg->header.stamp) + config_.common.image_time_offset;
       packet.mono = monoImageFromMsg(image_msg);
       packet.color = colorImageFromMsg(image_msg);
       enqueueImagePacket(std::move(packet));
-      CAKE_INFO_THROTTLE_MS(500, "RAW DRAIN DEBUG image done stamp=%.6f", stampToSec(image_msg->header.stamp));
     }
   }
 }
@@ -647,16 +634,8 @@ bool SlamNode::syncVioOnly(FusionMeasureGroup &meas)
 bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_time)
 {
   if (lidar_time_buffer_.empty() || !meas.pcl_proc_cur || !meas.pcl_proc_next) {
-    CAKE_INFO("BUILD LIO DEBUG invalid input lidar_queue=%zu lidar_time_queue=%zu pcl_cur_null=%d pcl_next_null=%d",
-              lidar_buffer_.size(), lidar_time_buffer_.size(),
-              meas.pcl_proc_cur ? 0 : 1, meas.pcl_proc_next ? 0 : 1);
     return false;
   }
-  CAKE_INFO("BUILD LIO DEBUG begin flag=%d last_lio=%.6f requested=%.6f lidar_queue=%zu lidar_time_queue=%zu image_queue=%zu imu_lio=%zu pcl_cur=%p pcl_next=%p next_pts=%zu",
-            static_cast<int>(meas.lio_vio_flg), meas.last_lio_update_time, update_time,
-            lidar_buffer_.size(), lidar_time_buffer_.size(), image_buffer_.size(), imu_lio_buffer_.size(),
-            static_cast<void *>(meas.pcl_proc_cur.get()), static_cast<void *>(meas.pcl_proc_next.get()),
-            meas.pcl_proc_next ? meas.pcl_proc_next->size() : 0);
   // Slice LiDAR data at the selected image timestamp. Points after update_time
   // stay in pcl_proc_next and become the prefix of the next LIO packet.
   if (meas.last_lio_update_time < 0.0) {
@@ -671,17 +650,13 @@ bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_tim
     return false;
   }
   update_time = image_buffer_.front().stamp;
-  CAKE_INFO("BUILD LIO DEBUG selected image update_time=%.6f last_lio=%.6f newest_lidar=%.6f last_imu=%.6f",
-            update_time, meas.last_lio_update_time, newestLidarEndTimeLocked(), last_imu_time_);
   latest_sync_mono_image_ = image_buffer_.front().mono.clone();
   latest_sync_color_image_ = image_buffer_.front().color.clone();
 
   if (update_time > newestLidarEndTimeLocked()) {
-    CAKE_INFO("BUILD LIO DEBUG wait lidar update_time=%.6f newest_lidar=%.6f", update_time, newestLidarEndTimeLocked());
     return false;
   }
   if (use_imu_ && update_time > last_imu_time_) {
-    CAKE_INFO("BUILD LIO DEBUG wait imu update_time=%.6f last_imu=%.6f", update_time, last_imu_time_);
     return false;
   }
 
@@ -696,12 +671,6 @@ bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_tim
 
   // 点云切割沿用 FAST-LIVO2 的 pcl_proc_cur/pcl_proc_next 思路：
   // 当前图像时间之前的点进入本次 LIO，之后的点暂存到下一次切包。
-  CAKE_INFO("BUILD LIO DEBUG carry next begin cur_pts=%zu next_pts=%zu cur_use=%ld next_use=%ld",
-            meas.pcl_proc_cur ? meas.pcl_proc_cur->size() : 0,
-            meas.pcl_proc_next ? meas.pcl_proc_next->size() : 0,
-            meas.pcl_proc_cur ? meas.pcl_proc_cur.use_count() : 0L,
-            meas.pcl_proc_next ? meas.pcl_proc_next.use_count() : 0L);
-
   // LioCore keeps a copied FusionMeasureGroup from the previous update. Avoid
   // mutating or freeing those shared PCL cloud objects in-place while preparing
   // the next cut; allocate fresh buffers and copy only the small carry-over tail.
@@ -709,31 +678,20 @@ bool SlamNode::buildLioMeasureToTime(FusionMeasureGroup &meas, double update_tim
   meas.pcl_proc_cur = carry_cloud;
   meas.pcl_proc_next.reset(new PointCloudXYZI());
 
-  const std::size_t reserve_size = meas.pcl_proc_cur->size() +
-                                   24000UL * lidar_buffer_.size();
-  CAKE_INFO("BUILD LIO DEBUG carry next done cur_pts=%zu next_pts=%zu cur_ptr=%p next_ptr=%p reserve=%zu cur_cap=%zu next_cap=%zu",
-            meas.pcl_proc_cur ? meas.pcl_proc_cur->size() : 0,
-            meas.pcl_proc_next ? meas.pcl_proc_next->size() : 0,
-            static_cast<void *>(meas.pcl_proc_cur.get()),
-            static_cast<void *>(meas.pcl_proc_next.get()),
-            reserve_size,
-            meas.pcl_proc_cur ? meas.pcl_proc_cur->points.capacity() : 0,
-            meas.pcl_proc_next ? meas.pcl_proc_next->points.capacity() : 0);
+  std::size_t reserve_size = meas.pcl_proc_cur->size();
+  for (std::size_t i = 0; i < lidar_buffer_.size() && i < lidar_time_buffer_.size(); ++i) {
+    if (lidar_time_buffer_[i] > update_time) {
+      break;
+    }
+    reserve_size += lidar_buffer_[i] ? lidar_buffer_[i]->size() : 0;
+  }
   meas.pcl_proc_cur->reserve(reserve_size);
   meas.pcl_proc_next->reserve(reserve_size);
-  CAKE_INFO("BUILD LIO DEBUG reserve done cur_cap=%zu next_cap=%zu",
-            meas.pcl_proc_cur->points.capacity(),
-            meas.pcl_proc_next->points.capacity());
 
   while (!lidar_buffer_.empty()) {
     if (lidar_time_buffer_.empty()) {
-      CAKE_INFO("BUILD LIO DEBUG broken queues: lidar_queue=%zu lidar_time_queue=0", lidar_buffer_.size());
       return false;
     }
-    CAKE_INFO_THROTTLE_MS(500, "BUILD LIO DEBUG split loop lidar_front=%.6f update=%.6f cloud_pts=%zu",
-                          lidar_time_buffer_.empty() ? -1.0 : lidar_time_buffer_.front(),
-                          update_time,
-                          lidar_buffer_.front() ? lidar_buffer_.front()->size() : 0);
     if (lidar_time_buffer_.front() > update_time) {
       break;
     }
@@ -823,67 +781,40 @@ bool SlamNode::deferredMapUpdateEnabled() const
 void SlamNode::finishDeferredMapUpdate(double stamp, const StatesGroup &lio_state,
                                        const StatesGroup *vio_state, const char *context)
 {
+  (void)stamp;
+  (void)context;
   if (!deferredMapUpdateEnabled() || !lio_.HasPendingMapUpdate()) {
     return;
   }
 
   constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
-  const double pending_stamp = lio_.PendingMapUpdateTime();
   const bool fallback_skip = config_.map.update_after_vio_fallback == "skip";
   StatesGroup map_update_state = lio_state;
-  const char *source = "lio";
-  const char *reason = "vio_unavailable";
-  double pos_delta = std::numeric_limits<double>::quiet_NaN();
-  double z_delta = std::numeric_limits<double>::quiet_NaN();
-  double rot_delta_deg = std::numeric_limits<double>::quiet_NaN();
   bool accept_vio = false;
 
   if (vio_state) {
     const Eigen::Matrix3d dR = lio_state.rot_end.transpose() * vio_state->rot_end;
     const double cos_angle = std::clamp((dR.trace() - 1.0) * 0.5, -1.0, 1.0);
-    rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
-    pos_delta = (vio_state->pos_end - lio_state.pos_end).norm();
-    z_delta = vio_state->pos_end.z() - lio_state.pos_end.z();
+    const double rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
+    const double pos_delta = (vio_state->pos_end - lio_state.pos_end).norm();
 
     const bool pos_ok = pos_delta <= config_.map.max_vio_map_update_pos_delta;
     const bool rot_ok = rot_delta_deg <= config_.map.max_vio_map_update_rot_delta_deg;
     if (pos_ok && rot_ok) {
       accept_vio = true;
-      source = "vio";
-      reason = "accepted";
       // Use the VIO optimized pose for insertion, but keep the LIO covariance
       // proxy until the visual backend exposes a reliable pose covariance.
       map_update_state.rot_end = vio_state->rot_end;
       map_update_state.pos_end = vio_state->pos_end;
-    } else {
-      reason = !pos_ok ? "reject_pos" : "reject_rot";
     }
   }
 
-  bool committed = false;
   if (accept_vio || !fallback_skip) {
-    committed = lio_.CommitPendingMapUpdate(map_update_state);
+    lio_.CommitPendingMapUpdate(map_update_state);
   } else {
     lio_.DiscardPendingMapUpdate();
-    source = "skip";
   }
 
-  const PointCloudXYZI::Ptr downsampled = lio_.GetDownsampledCloud();
-  const size_t downsampled_num = downsampled ? downsampled->size() : 0;
-  std::printf("MAP UPDATE AFTER VIO stamp=%.6f pending_stamp=%.6f committed=%d source=%s reason=%s context=%s pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f limit_pos=%.6f limit_rot=%.6f fallback=%s downsampled=%zu\n",
-              stamp,
-              pending_stamp,
-              committed ? 1 : 0,
-              source,
-              reason,
-              context ? context : "unknown",
-              pos_delta,
-              z_delta,
-              rot_delta_deg,
-              config_.map.max_vio_map_update_pos_delta,
-              config_.map.max_vio_map_update_rot_delta_deg,
-              config_.map.update_after_vio_fallback.c_str(),
-              downsampled_num);
 }
 
 // 执行一次 LIO 更新并输出里程计/点云。
@@ -899,7 +830,6 @@ void SlamNode::handleLIO()
   const double update_time = measures_.measures.back().lio_time;
   finishDeferredMapUpdate(update_time, state_, nullptr, "next_lio_before_vio");
   handleFirstFrame();
-  const StatesGroup lio_input_state = state_;
   lio_.SetState(state_);
 
   // LioCore 内部会复制测量包，因此主程序同步上下文中的 last_lio_update_time
@@ -938,32 +868,6 @@ void SlamNode::handleLIO()
       last_lio_prior_skip_log_time = update_time;
     }
   }
-  static bool has_last_lio_output_state = false;
-  static double last_lio_output_z = 0.0;
-  static double last_lio_output_time = -1.0;
-  const double lio_output_z = state_.pos_end.z();
-  const double lio_dz_from_input = lio_output_z - lio_input_state.pos_end.z();
-  const double lio_dz_from_prev =
-      has_last_lio_output_state ? lio_output_z - last_lio_output_z
-                                : std::numeric_limits<double>::quiet_NaN();
-  const double lio_dt_from_prev =
-      has_last_lio_output_state ? update_time - last_lio_output_time
-                                : std::numeric_limits<double>::quiet_NaN();
-  std::printf("LIO STATE DEBUG stamp=%.6f input_z=% .6f output_z=% .6f dz_input=% .6f dz_prev=% .6f dt_prev=%.6f vel_z=% .6f gravity_z=% .6f imu_init=%d visual_candidates=%zu lio_history=%zu\n",
-              update_time,
-              lio_input_state.pos_end.z(),
-              lio_output_z,
-              lio_dz_from_input,
-              lio_dz_from_prev,
-              lio_dt_from_prev,
-              state_.vel_end.z(),
-              state_.gravity.z(),
-              lio_imu_initialized ? 1 : 0,
-              pending_lidar_visual_candidates_.size(),
-              lio_full_state_history_.size());
-  has_last_lio_output_state = true;
-  last_lio_output_z = lio_output_z;
-  last_lio_output_time = update_time;
   const auto t_lio_prior_end = std::chrono::steady_clock::now();
 
   {
@@ -1049,8 +953,6 @@ void SlamNode::handleVIO()
       latest_vio_state = vio_->getLatestState();
       has_latest_vio_state = true;
       const StatesGroup &vio_state = latest_vio_state;
-      const int opt_features = vio_->getLastOptimizationFeatureCount();
-      const int opt_lidar_features = vio_->getLastOptimizationLidarFeatureCount();
       const int opt_visual_residuals = vio_->getLastOptimizationVisualResidualCount();
       if (use_lidar_) {
         const Eigen::Matrix3d dR = lio_state_before_vio.rot_end.transpose() * vio_state.rot_end;
@@ -1058,22 +960,6 @@ void SlamNode::handleVIO()
         constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
         const double rot_delta_deg = std::acos(cos_angle) * kRadToDeg;
         const double pos_delta = (vio_state.pos_end - lio_state_before_vio.pos_end).norm();
-        const double z_delta = vio_state.pos_end.z() - lio_state_before_vio.pos_end.z();
-        std::printf("VIO FEEDFORWARD DEBUG stamp=%.6f publish_vio=1 write_lio=0 pos_delta=%.6f z_delta=% .6f rot_delta_deg=%.6f tracked=%d depth_prior=%d opt_features=%d opt_depth=%d visual_residuals=%d lio_z=% .6f vio_z=% .6f lio_full_prior=%d lio_full_dt=%.6f lidar_candidates=%zu\n",
-                    measure.vio_time,
-                    pos_delta,
-                    z_delta,
-                    rot_delta_deg,
-                    vio_->getLastTrackedFeatureCount(),
-                    vio_->getLastDepthFeatureCount(),
-                    opt_features,
-                    opt_lidar_features,
-                    opt_visual_residuals,
-                    lio_state_before_vio.pos_end.z(),
-                    vio_state.pos_end.z(),
-                    has_lio_full_prior ? 1 : 0,
-                    lio_full_prior_dt,
-                    lidar_candidate_count);
         CAKE_INFO_THROTTLE_MS(
             2000,
             "VIO feed-forward: stamp=%.6f write_lio=0 pos_delta=%.4f rot_delta_deg=%.3f tracked=%d depth_prior=%d visual_residuals=%d "
@@ -1531,6 +1417,7 @@ LioFullStatePrior SlamNode::FindClosestLioState(double stamp) const
 
 void SlamNode::buildLidarVisualCandidates(double stamp)
 {
+  (void)stamp;
   // Build sparse depth assistance for the synchronized image. In scan mode the
   // current LIO cloud is projected directly. In LocalVoxelMap mode the same
   // cloud is used only for occlusion while depth candidates come from map voxels.
@@ -1542,40 +1429,11 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
   if (!use_image_ || !vio_ || !config_.vision.lidar_depth_enable ||
       config_.vision.lidar_depth_source == 2 ||
       !depth_assist_requested || latest_sync_mono_image_.empty()) {
-    const char *reason = "disabled";
-    if (!use_image_)
-      reason = "image_disabled";
-    else if (!vio_)
-      reason = "vio_missing";
-    else if (!config_.vision.lidar_depth_enable)
-      reason = "lidar_depth_disabled";
-    else if (config_.vision.lidar_depth_source == 2)
-      reason = "lidar_depth_source_off";
-    else if (!depth_assist_requested)
-      reason = "depth_assist_disabled";
-    else if (latest_sync_mono_image_.empty())
-      reason = "image_empty";
-    std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=1 reason=%s use_image=%d vio=%d lidar_depth_enable=%d lidar_depth_source=%d lidar_prior_feature_enable=%d visual_depth_prior=%d image_empty=%d state_z=% .6f\n",
-                stamp,
-                reason,
-                use_image_ ? 1 : 0,
-                vio_ ? 1 : 0,
-                config_.vision.lidar_depth_enable ? 1 : 0,
-                config_.vision.lidar_depth_source,
-                config_.vision.lidar_prior_feature_enable ? 1 : 0,
-                config_.vision.visual_feature_depth_prior_enable ? 1 : 0,
-                latest_sync_mono_image_.empty() ? 1 : 0,
-                state_.pos_end.z());
     return;
   }
 
   auto camera = vio_->getCameraModel();
   if (!camera) {
-    std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=1 reason=no_camera image_size=%dx%d state_z=% .6f\n",
-                stamp,
-                latest_sync_mono_image_.cols,
-                latest_sync_mono_image_.rows,
-                state_.pos_end.z());
     return;
   }
 
@@ -1583,13 +1441,7 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
   if (!source_cloud || source_cloud->empty()) {
     source_cloud = lio_.GetUndistortedCloud();
   }
-  const size_t source_points = source_cloud ? source_cloud->size() : 0;
   if (!source_cloud || source_cloud->empty()) {
-    std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=1 reason=empty_cloud image_size=%dx%d state_z=% .6f\n",
-                stamp,
-                latest_sync_mono_image_.cols,
-                latest_sync_mono_image_.rows,
-                state_.pos_end.z());
     return;
   }
   if (config_.vision.lidar_depth_source == 0) {
@@ -1603,53 +1455,6 @@ void SlamNode::buildLidarVisualCandidates(double stamp)
   }
 
   const auto &stats = lidar_visual_selector_.lastStats();
-  const double depth_ratio = stats.input_points > 0
-                                 ? static_cast<double>(stats.positive_depth) /
-                                       static_cast<double>(stats.input_points)
-                                 : 0.0;
-  const double image_ratio = stats.positive_depth > 0
-                                 ? static_cast<double>(stats.in_image) /
-                                       static_cast<double>(stats.positive_depth)
-                                 : 0.0;
-  const double texture_ratio = stats.zbuffer_kept > 0
-                                   ? static_cast<double>(stats.texture_kept) /
-                                         static_cast<double>(stats.zbuffer_kept)
-                                   : 0.0;
-  const double mask_ratio = stats.texture_kept > 0
-                                ? static_cast<double>(stats.mask_kept) /
-                                      static_cast<double>(stats.texture_kept)
-                                : 0.0;
-  std::printf("LIDAR CANDIDATE DEBUG stamp=%.6f skip=0 source_mode=%d occlusion_scan_points=%zu candidate_input=%d positive_depth=%d in_image=%d zbuffer=%d texture=%d mask_selected=%d selected=%zu depth_ratio=%.3f image_ratio=%.3f texture_ratio=%.3f mask_ratio=%.3f occlusion_reject=%d local_map_samples=%d depth_cells=%d image_size=%dx%d state_z=% .6f min_depth=%.3f max_depth=%.3f mask_radius=%.3f score_min=%.6g timing_ms={total=%.3f map_collect=%.3f project=%.3f occlusion=%.3f texture=%.3f select=%.3f}\n",
-              stamp,
-              stats.source_mode,
-              source_points,
-              stats.input_points,
-              stats.positive_depth,
-              stats.in_image,
-              stats.zbuffer_kept,
-              stats.texture_kept,
-              stats.mask_kept,
-              pending_lidar_visual_candidates_.size(),
-              depth_ratio,
-              image_ratio,
-              texture_ratio,
-              mask_ratio,
-              stats.occlusion_reject,
-              stats.source_mode == 0 ? stats.input_points : 0,
-              stats.visual_depth_cells,
-              latest_sync_mono_image_.cols,
-              latest_sync_mono_image_.rows,
-              state_.pos_end.z(),
-              config_.vision.min_lidar_depth,
-              config_.vision.max_lidar_depth,
-              config_.vision.lidar_mask_radius,
-              config_.vision.shi_tomasi_min_score,
-              stats.total_ms,
-              stats.map_collect_ms,
-              stats.project_ms,
-              stats.occlusion_ms,
-              stats.texture_ms,
-              stats.select_ms);
   CAKE_INFO_THROTTLE_MS(
       2000,
       "LiDAR visual candidates: candidate_input=%d positive_depth=%d in_image=%d zbuffer=%d texture=%d mask_selected=%d image_size=%dx%d",
