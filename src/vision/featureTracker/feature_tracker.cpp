@@ -1254,7 +1254,9 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
             throw std::runtime_error("FeatureTracker camera calibration path is empty");
 
         CAKE_INFO("reading paramerter of camera %s", calib_file[i].c_str());
+        CAKE_INFO("CameraFactory generate begin: camera=%zu path=%s", i, calib_file[i].c_str());
         camodocal::CameraPtr camera = CameraFactory::instance()->generateCameraFromYamlFile(calib_file[i]);
+        CAKE_INFO("CameraFactory generate done: camera=%zu camera_null=%d", i, camera ? 0 : 1);
         if (!camera)
             throw std::runtime_error("FeatureTracker failed to load camera calibration: " + calib_file[i]);
         m_camera.push_back(camera);
@@ -1267,6 +1269,8 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
         std::string model_type;
         if (fs.isOpened())
             fs["model_type"] >> model_type;
+        CAKE_INFO("FeatureTracker camera calib parsed: camera=%zu model_type=%s fs_open=%d",
+                  i, model_type.empty() ? "<empty>" : model_type.c_str(), fs.isOpened() ? 1 : 0);
 
         if (model_type == "KANNALA_BRANDT")
         {
@@ -1285,6 +1289,8 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
                 const double k3 = static_cast<double>(projection["k3"]);
                 const double k4 = static_cast<double>(projection["k4"]);
                 const double k5 = static_cast<double>(projection["k5"]);
+                CAKE_INFO("FeatureTracker KANNALA params: camera=%zu mu=%.9f mv=%.9f u0=%.9f v0=%.9f k2=%.12f k3=%.12f k4=%.12f k5=%.12f",
+                          i, mu, mv, u0, v0, k2, k3, k4, k5);
 
                 fast_undistort_model.back() = 1;
                 fast_undistort_K.back() = (cv::Mat_<double>(3, 3) <<
@@ -1306,12 +1312,16 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
                 }
 
                 std::vector<cv::Point2f> opencv_un_pts;
+                CAKE_INFO("FeatureTracker fisheye OpenCV sample check begin: camera=%zu samples=%zu",
+                          i, sample_pts.size());
                 cv::fisheye::undistortPoints(sample_pts, opencv_un_pts,
                                               fast_undistort_K.back(),
                                               fast_undistort_D.back());
+                CAKE_INFO("FeatureTracker fisheye OpenCV sample check done: camera=%zu", i);
 
                 double sum_delta = 0.0;
                 double max_delta = 0.0;
+                CAKE_INFO("FeatureTracker fisheye camodocal sample check begin: camera=%zu", i);
                 for (size_t sample_idx = 0; sample_idx < sample_pts.size(); ++sample_idx)
                 {
                     Eigen::Vector3d camodocal_un_pt;
@@ -1325,6 +1335,7 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
                     sum_delta += delta;
                     max_delta = std::max(max_delta, delta);
                 }
+                CAKE_INFO("FeatureTracker fisheye camodocal sample check done: camera=%zu", i);
 
                 CAKE_INFO("FeatureTracker fisheye model check: camera=%zu samples=%zu mean_norm_delta=%.9f max_norm_delta=%.9f",
                           i, sample_pts.size(), sum_delta / sample_pts.size(), max_delta);
