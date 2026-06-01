@@ -1319,28 +1319,36 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
                                               fast_undistort_D.back());
                 CAKE_INFO("FeatureTracker fisheye OpenCV sample check done: camera=%zu", i);
 
-                double sum_delta = 0.0;
-                double max_delta = 0.0;
-                CAKE_INFO("FeatureTracker fisheye camodocal sample check begin: camera=%zu", i);
-                for (size_t sample_idx = 0; sample_idx < sample_pts.size(); ++sample_idx)
+                if (USE_FAST_FISHEYE_UNDISTORT)
                 {
-                    Eigen::Vector3d camodocal_un_pt;
-                    camera->liftProjective(
-                        Eigen::Vector2d(sample_pts[sample_idx].x, sample_pts[sample_idx].y),
-                        camodocal_un_pt);
-                    const cv::Point2f camodocal_pt(
-                        static_cast<float>(camodocal_un_pt.x() / camodocal_un_pt.z()),
-                        static_cast<float>(camodocal_un_pt.y() / camodocal_un_pt.z()));
-                    const double delta = cv::norm(opencv_un_pts[sample_idx] - camodocal_pt);
-                    sum_delta += delta;
-                    max_delta = std::max(max_delta, delta);
+                    CAKE_INFO("FeatureTracker fisheye undistort: camera=%zu model=KANNALA_BRANDT backend=opencv_fisheye camodocal_check=skipped",
+                              i);
                 }
-                CAKE_INFO("FeatureTracker fisheye camodocal sample check done: camera=%zu", i);
+                else
+                {
+                    double sum_delta = 0.0;
+                    double max_delta = 0.0;
+                    CAKE_INFO("FeatureTracker fisheye camodocal sample check begin: camera=%zu", i);
+                    for (size_t sample_idx = 0; sample_idx < sample_pts.size(); ++sample_idx)
+                    {
+                        Eigen::Vector3d camodocal_un_pt;
+                        camera->liftProjective(
+                            Eigen::Vector2d(sample_pts[sample_idx].x, sample_pts[sample_idx].y),
+                            camodocal_un_pt);
+                        const cv::Point2f camodocal_pt(
+                            static_cast<float>(camodocal_un_pt.x() / camodocal_un_pt.z()),
+                            static_cast<float>(camodocal_un_pt.y() / camodocal_un_pt.z()));
+                        const double delta = cv::norm(opencv_un_pts[sample_idx] - camodocal_pt);
+                        sum_delta += delta;
+                        max_delta = std::max(max_delta, delta);
+                    }
+                    CAKE_INFO("FeatureTracker fisheye camodocal sample check done: camera=%zu", i);
 
-                CAKE_INFO("FeatureTracker fisheye model check: camera=%zu samples=%zu mean_norm_delta=%.9f max_norm_delta=%.9f",
-                          i, sample_pts.size(), sum_delta / sample_pts.size(), max_delta);
-                CAKE_INFO("FeatureTracker fisheye undistort: camera=%zu model=KANNALA_BRANDT backend=%s",
-                          i, USE_FAST_FISHEYE_UNDISTORT ? "opencv_fisheye" : "camodocal_liftProjective");
+                    CAKE_INFO("FeatureTracker fisheye model check: camera=%zu samples=%zu mean_norm_delta=%.9f max_norm_delta=%.9f",
+                              i, sample_pts.size(), sum_delta / sample_pts.size(), max_delta);
+                    CAKE_INFO("FeatureTracker fisheye undistort: camera=%zu model=KANNALA_BRANDT backend=camodocal_liftProjective",
+                              i);
+                }
             }
             else
             {

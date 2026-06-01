@@ -126,11 +126,6 @@ if(CAKE_SLAM_LIO_OPT_FLAGS)
     PROPERTIES COMPILE_OPTIONS "${CAKE_SLAM_LIO_OPT_FLAGS}"
   )
 endif()
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  set_source_files_properties(src/vision/featureTracker/feature_tracker.cpp PROPERTIES
-    COMPILE_OPTIONS "-O0;-fno-strict-aliasing"
-  )
-endif()
 if(CAKE_SLAM_MP_PROC_NUM GREATER 1)
   set_source_files_properties(src/voxel_map.cpp PROPERTIES
     COMPILE_DEFINITIONS "MP_EN;MP_PROC_NUM=${CAKE_SLAM_MP_PROC_NUM}"
