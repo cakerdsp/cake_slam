@@ -56,7 +56,7 @@ map:
   sliding_thresh: 8.0
   # 1: LIVO模式下当前scan先只参与LIO注册，等VIO/local BA完成后再写入local voxel map。
   # 0: 保持原FAST-LIVO2风格，在LIO注册后立即写入地图。
-  update_after_vio: 1
+  update_after_vio: 0
   # VIO未初始化、优化失败或位姿门限拒绝时的回退策略：
   # "lio": 用同帧LIO位姿写图，避免地图冻结；"skip": 跳过该帧写图。
   update_after_vio_fallback: "lio"
@@ -91,7 +91,7 @@ vision:
   # 0: LocalVoxelMap assisted depth, 1: current scan, 2: disabled.
   lidar_depth_source: 1
   visual_feature_depth_prior_enable: 1
-  voxel_raycast_enable: 1
+  voxel_raycast_enable: 0
   max_lidar_features: 250
   min_lidar_depth: 0.6
   max_lidar_depth: 80.0
@@ -114,9 +114,9 @@ vision:
   lio_prior_reproj_threshold: 3.0
   # These are diagnostic priors, not ground truth. Extremely small variances
   # over-constrain HILTI22 and can dominate the IMU/visual factors.
-  lidar_depth_std: 0.10
-  min_inv_depth_var: 1.0e-6
-  min_lio_pose_prior_var: 1.0e-6
+  lidar_depth_std: 1.0e-10
+  min_inv_depth_var: 1.0e-8
+  min_lio_pose_prior_var: 1.0e-8
   lio_full_state_prior_enable: 1
   vio_debug_factor_costs: 0
 
@@ -164,11 +164,11 @@ visualization:
   vio_window_path_topic: "/cake_slam/vio/window_path"
   vio_window_poses_topic: "/cake_slam/vio/window_poses"
   # 是否发布使用 LIO 位姿投到世界系的当前 scan 着色点云；关闭可减少投影开销。
-  publish_lio_colored_cloud: 1
+  publish_lio_colored_cloud: 0
   # LIO 位姿着色点云话题；保持旧默认值方便原 RViz 配置继续显示。
   lio_colored_cloud_topic: "/cloud_colored"
   # 是否发布使用 VIO/local BA 后位姿投到世界系的当前 scan 着色点云。
-  publish_vio_colored_cloud: 0
+  publish_vio_colored_cloud: 1
   # VIO 后位姿着色点云话题；只在 VIO 已有优化状态时发布。
   vio_colored_cloud_topic: "/cake_slam/vio/colored_cloud"
 

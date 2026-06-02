@@ -141,7 +141,7 @@ vision:
   # 是否优化 LiDAR 先验点的逆深度；关闭则固定先验深度。
   optimize_lidar_inv_depth: 1
   # 0: LocalVoxelMap assisted depth, 1: current scan, 2: disabled.
-  lidar_depth_source: 0
+  lidar_depth_source: 1
   visual_feature_depth_prior_enable: 1
   voxel_raycast_enable: 1
   # 每帧最多使用的 LiDAR 先验点数量。
@@ -235,11 +235,11 @@ visualization:
   # Sliding-window VIO body poses in world frame for RViz PoseArray display.
   vio_window_poses_topic: "/cake_slam/vio/window_poses"
   # 是否发布使用 LIO 位姿投到世界系的当前 scan 着色点云；关闭可减少投影开销。
-  publish_lio_colored_cloud: 1
+  publish_lio_colored_cloud: 0
   # LIO 位姿着色点云话题；保持旧默认值方便原 RViz 配置继续显示。
   lio_colored_cloud_topic: "/cloud_colored"
   # 是否发布使用 VIO/local BA 后位姿投到世界系的当前 scan 着色点云。
-  publish_vio_colored_cloud: 0
+  publish_vio_colored_cloud: 1
   # VIO 后位姿着色点云话题；只在 VIO 已有优化状态时发布。
   vio_colored_cloud_topic: "/cake_slam/vio/colored_cloud"
 

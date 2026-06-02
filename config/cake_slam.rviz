@@ -194,7 +194,7 @@ Visualization Manager:
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Reliable
-            Value: /cloud_colored
+            Value: /cake_slam/vio/colored_cloud
           Use Fixed Frame: true
           Use rainbow: false
           Value: true
@@ -273,7 +273,7 @@ Visualization Manager:
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Reliable
-            Value: /aft_mapped_to_init
+            Value: /cake_slam/vio/odom
           Value: true
         - Angle Tolerance: 0.009999999776482582
           Class: rviz_default_plugins/Odometry
@@ -491,25 +491,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 95.42935180664062
+      Distance: 10.9336576461792
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -38.664955139160156
-        Y: 38.34478759765625
-        Z: -1.8392511265119538e-05
+        X: 0.2568470537662506
+        Y: 2.1451337337493896
+        Z: 0.3774382472038269
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5397965908050537
+      Pitch: 0.3953983187675476
       Target Frame: world
-      Value: Orbit (rviz_default_plugins)
-      Yaw: 3.5300073623657227
+      Value: Orbit (rviz)
+      Yaw: 3.230407953262329
     Saved: ~
 Window Geometry:
   Displays:

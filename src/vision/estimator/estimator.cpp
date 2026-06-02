@@ -199,39 +199,42 @@ void Estimator::inputImage(double t, const cv::Mat &_img,
         featureFrame = featureTracker.trackImage(t, _img, _img1);
     const double feature_tracker_ms = featureTrackerTime.toc();
     const FeatureTrackerTiming &ft_timing = featureTracker.getLastTiming();
-    std::printf("FEATURE TRACKER DEBUG stamp=%.6f total=%.3f measured=%.3f image=%dx%d type=%d ch=%d prev=%d flow=%d final=%d pending_lidar=%d add_lidar=%d req_visual=%d add_visual=%d flow_back=%d pred=%d stages_ms={lk_fwd=%.3f lk_back=%.3f lio_gate=%.3f reduce=%.3f mask=%.3f add_lidar=%.3f gft=%.3f cout=%.3f add_pts=%.3f undist=%.3f velocity=%.3f depth_prior=%.3f stereo=%.3f draw=%.3f debug=%.3f pack=%.3f}\n",
-                t,
-                ft_timing.total_ms,
-                feature_tracker_ms,
-                ft_timing.cols,
-                ft_timing.rows,
-                ft_timing.type,
-                ft_timing.channels,
-                ft_timing.prev_tracks,
-                ft_timing.after_flow_tracks,
-                ft_timing.final_tracks,
-                ft_timing.pending_lidar,
-                ft_timing.added_lidar,
-                ft_timing.requested_visual,
-                ft_timing.added_visual,
-                ft_timing.flow_back,
-                ft_timing.has_prediction,
-                ft_timing.lk_forward_ms,
-                ft_timing.lk_backward_ms,
-                ft_timing.lio_gate_ms,
-                ft_timing.reduce_ms,
-                ft_timing.set_mask_ms,
-                ft_timing.add_lidar_ms,
-                ft_timing.good_features_ms,
-                ft_timing.console_ms,
-                ft_timing.add_points_ms,
-                ft_timing.undistort_ms,
-                ft_timing.velocity_ms,
-                ft_timing.depth_prior_ms,
-                ft_timing.stereo_ms,
-                ft_timing.draw_track_ms,
-                ft_timing.debug_draw_ms,
-                ft_timing.pack_ms);
+    if (VIO_DEBUG_FACTOR_COSTS)
+    {
+        std::printf("FEATURE TRACKER DEBUG stamp=%.6f total=%.3f measured=%.3f image=%dx%d type=%d ch=%d prev=%d flow=%d final=%d pending_lidar=%d add_lidar=%d req_visual=%d add_visual=%d flow_back=%d pred=%d stages_ms={lk_fwd=%.3f lk_back=%.3f lio_gate=%.3f reduce=%.3f mask=%.3f add_lidar=%.3f gft=%.3f cout=%.3f add_pts=%.3f undist=%.3f velocity=%.3f depth_prior=%.3f stereo=%.3f draw=%.3f debug=%.3f pack=%.3f}\n",
+                    t,
+                    ft_timing.total_ms,
+                    feature_tracker_ms,
+                    ft_timing.cols,
+                    ft_timing.rows,
+                    ft_timing.type,
+                    ft_timing.channels,
+                    ft_timing.prev_tracks,
+                    ft_timing.after_flow_tracks,
+                    ft_timing.final_tracks,
+                    ft_timing.pending_lidar,
+                    ft_timing.added_lidar,
+                    ft_timing.requested_visual,
+                    ft_timing.added_visual,
+                    ft_timing.flow_back,
+                    ft_timing.has_prediction,
+                    ft_timing.lk_forward_ms,
+                    ft_timing.lk_backward_ms,
+                    ft_timing.lio_gate_ms,
+                    ft_timing.reduce_ms,
+                    ft_timing.set_mask_ms,
+                    ft_timing.add_lidar_ms,
+                    ft_timing.good_features_ms,
+                    ft_timing.console_ms,
+                    ft_timing.add_points_ms,
+                    ft_timing.undistort_ms,
+                    ft_timing.velocity_ms,
+                    ft_timing.depth_prior_ms,
+                    ft_timing.stereo_ms,
+                    ft_timing.draw_track_ms,
+                    ft_timing.debug_draw_ms,
+                    ft_timing.pack_ms);
+    }
 
     if (SHOW_TRACK)
     {
@@ -513,7 +516,8 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
 
     f_manager.setPendingLidarDepthPriors(packet.lidar_depth_priors);
 
-    cout << std::fixed << header << endl;
+    if (VIO_DEBUG_FACTOR_COSTS)
+        cout << std::fixed << header << endl;
 
     ROS_DEBUG("new image coming ------------------------------------------");
     ROS_DEBUG("Adding feature points %lu", image.size());
@@ -552,22 +556,28 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
             const Eigen::Vector3d dv_prior = full_prior.v_WB - vio_vel_before;
             const Eigen::Vector3d dba_prior = full_prior.ba - vio_ba_before;
             const Eigen::Vector3d dbg_prior = full_prior.bg - vio_bg_before;
-            std::printf("VIO LIO PRIOR SNAP DEBUG stamp=%.6f frame=%d full=1 dpos=(% .6f % .6f % .6f) dvel=(% .6f % .6f % .6f) dba=(% .6f % .6f % .6f) dbg=(% .6f % .6f % .6f) prior_v=(% .6f % .6f % .6f) vio_v_before=(% .6f % .6f % .6f)\n",
-                        header, frame_count,
-                        dp_prior.x(), dp_prior.y(), dp_prior.z(),
-                        dv_prior.x(), dv_prior.y(), dv_prior.z(),
-                        dba_prior.x(), dba_prior.y(), dba_prior.z(),
-                        dbg_prior.x(), dbg_prior.y(), dbg_prior.z(),
-                        full_prior.v_WB.x(), full_prior.v_WB.y(), full_prior.v_WB.z(),
-                        vio_vel_before.x(), vio_vel_before.y(), vio_vel_before.z());
+            if (VIO_DEBUG_FACTOR_COSTS)
+            {
+                std::printf("VIO LIO PRIOR SNAP DEBUG stamp=%.6f frame=%d full=1 dpos=(% .6f % .6f % .6f) dvel=(% .6f % .6f % .6f) dba=(% .6f % .6f % .6f) dbg=(% .6f % .6f % .6f) prior_v=(% .6f % .6f % .6f) vio_v_before=(% .6f % .6f % .6f)\n",
+                            header, frame_count,
+                            dp_prior.x(), dp_prior.y(), dp_prior.z(),
+                            dv_prior.x(), dv_prior.y(), dv_prior.z(),
+                            dba_prior.x(), dba_prior.y(), dba_prior.z(),
+                            dbg_prior.x(), dbg_prior.y(), dbg_prior.z(),
+                            full_prior.v_WB.x(), full_prior.v_WB.y(), full_prior.v_WB.z(),
+                            vio_vel_before.x(), vio_vel_before.y(), vio_vel_before.z());
+            }
         }
         else
         {
             const Eigen::Vector3d dp_prior = lio_pose_priors_[frame_count].p_WB - vio_pos_before;
-            std::printf("VIO LIO PRIOR SNAP DEBUG stamp=%.6f frame=%d full=0 dpos=(% .6f % .6f % .6f) vio_v_before=(% .6f % .6f % .6f)\n",
-                        header, frame_count,
-                        dp_prior.x(), dp_prior.y(), dp_prior.z(),
-                        vio_vel_before.x(), vio_vel_before.y(), vio_vel_before.z());
+            if (VIO_DEBUG_FACTOR_COSTS)
+            {
+                std::printf("VIO LIO PRIOR SNAP DEBUG stamp=%.6f frame=%d full=0 dpos=(% .6f % .6f % .6f) vio_v_before=(% .6f % .6f % .6f)\n",
+                            header, frame_count,
+                            dp_prior.x(), dp_prior.y(), dp_prior.z(),
+                            vio_vel_before.x(), vio_vel_before.y(), vio_vel_before.z());
+            }
         }
         states_[frame_count].rot_end = lio_pose_priors_[frame_count].R_WB;
         states_[frame_count].pos_end = lio_pose_priors_[frame_count].p_WB;
@@ -810,7 +820,8 @@ void Estimator::processImage(const VisionFeaturePacket &packet)
         // optimization
         TicToc t_solve;
         optimization();
-        CAKE_INFO("solver costs: %f [ms]", t_solve.toc());
+        if (VIO_DEBUG_FACTOR_COSTS)
+            CAKE_INFO("solver costs: %f [ms]", t_solve.toc());
 
         set<int> removeIndex;
         outliersRejection(removeIndex);

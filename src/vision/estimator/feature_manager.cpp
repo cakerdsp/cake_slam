@@ -12,6 +12,7 @@
 
 #include "feature_manager.h"
 #include "cake_slam/common_lib.h"
+#include "cake_slam/vision/estimator/parameters.h"
 
 // Experimental depth-isolation switch:
 // 0: optimize both triangulated visual-only points and LiDAR-depth points.
@@ -159,7 +160,8 @@ void FeatureManager::updateLidarDepthPriors(const std::unordered_map<int, cake_s
         ++last_lidar_depth_prior_updates;
     }
 
-    if (last_lidar_depth_prior_updates > 0 || last_lidar_depth_prior_rejects > 0)
+    if (VIO_DEBUG_FACTOR_COSTS &&
+        (last_lidar_depth_prior_updates > 0 || last_lidar_depth_prior_rejects > 0))
     {
         std::printf("FEATURE MANAGER DEPTH PRIOR DEBUG frame=%d input=%zu updated=%d rejected=%d tracks=%zu\n",
                     frame_count,
@@ -264,19 +266,22 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const std::map<int
     // 前几帧或跟踪过少时直接放宽关键帧判定，优先保证系统能够初始化。
     if (frame_count < 2 || last_track_num < 20 || long_track_num < 40 || new_feature_num > 0.5 * last_track_num)
     {
-        std::printf("VIO PARALLAX DEBUG frame=%d input=%zu tracks=%zu len1=%d len2=%d len3=%d len4p=%d last_track=%d new=%d long=%d parallax_num=%d avg_px=%.3f margin=old reason=early_or_weak_tracks\n",
-                    frame_count,
-                    image.size(),
-                    feature.size(),
-                    len1,
-                    len2,
-                    len3,
-                    len4p,
-                    last_track_num,
-                    new_feature_num,
-                    long_track_num,
-                    parallax_num,
-                    last_average_parallax);
+        if (VIO_DEBUG_FACTOR_COSTS)
+        {
+            std::printf("VIO PARALLAX DEBUG frame=%d input=%zu tracks=%zu len1=%d len2=%d len3=%d len4p=%d last_track=%d new=%d long=%d parallax_num=%d avg_px=%.3f margin=old reason=early_or_weak_tracks\n",
+                        frame_count,
+                        image.size(),
+                        feature.size(),
+                        len1,
+                        len2,
+                        len3,
+                        len4p,
+                        last_track_num,
+                        new_feature_num,
+                        long_track_num,
+                        parallax_num,
+                        last_average_parallax);
+        }
         return true;
     }
 
@@ -293,19 +298,22 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const std::map<int
 
     if (parallax_num == 0)
     {
-        std::printf("VIO PARALLAX DEBUG frame=%d input=%zu tracks=%zu len1=%d len2=%d len3=%d len4p=%d last_track=%d new=%d long=%d parallax_num=%d avg_px=%.3f margin=old reason=no_parallax_pairs\n",
-                    frame_count,
-                    image.size(),
-                    feature.size(),
-                    len1,
-                    len2,
-                    len3,
-                    len4p,
-                    last_track_num,
-                    new_feature_num,
-                    long_track_num,
-                    parallax_num,
-                    last_average_parallax);
+        if (VIO_DEBUG_FACTOR_COSTS)
+        {
+            std::printf("VIO PARALLAX DEBUG frame=%d input=%zu tracks=%zu len1=%d len2=%d len3=%d len4p=%d last_track=%d new=%d long=%d parallax_num=%d avg_px=%.3f margin=old reason=no_parallax_pairs\n",
+                        frame_count,
+                        image.size(),
+                        feature.size(),
+                        len1,
+                        len2,
+                        len3,
+                        len4p,
+                        last_track_num,
+                        new_feature_num,
+                        long_track_num,
+                        parallax_num,
+                        last_average_parallax);
+        }
         return true;
     }
     else
@@ -315,20 +323,23 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const std::map<int
         last_average_parallax = parallax_sum / parallax_num * FOCAL_LENGTH;
         // 视差足够大才保留为关键帧，否则新图像提供的新几何信息不足。
         const bool margin_old = parallax_sum / parallax_num >= MIN_PARALLAX;
-        std::printf("VIO PARALLAX DEBUG frame=%d input=%zu tracks=%zu len1=%d len2=%d len3=%d len4p=%d last_track=%d new=%d long=%d parallax_num=%d avg_px=%.3f margin=%s reason=parallax_check\n",
-                    frame_count,
-                    image.size(),
-                    feature.size(),
-                    len1,
-                    len2,
-                    len3,
-                    len4p,
-                    last_track_num,
-                    new_feature_num,
-                    long_track_num,
-                    parallax_num,
-                    last_average_parallax,
-                    margin_old ? "old" : "second_new");
+        if (VIO_DEBUG_FACTOR_COSTS)
+        {
+            std::printf("VIO PARALLAX DEBUG frame=%d input=%zu tracks=%zu len1=%d len2=%d len3=%d len4p=%d last_track=%d new=%d long=%d parallax_num=%d avg_px=%.3f margin=%s reason=parallax_check\n",
+                        frame_count,
+                        image.size(),
+                        feature.size(),
+                        len1,
+                        len2,
+                        len3,
+                        len4p,
+                        last_track_num,
+                        new_feature_num,
+                        long_track_num,
+                        parallax_num,
+                        last_average_parallax,
+                        margin_old ? "old" : "second_new");
+        }
         return margin_old;
     }
 }

@@ -17,6 +17,7 @@ which is included as part of this source code package.
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include <omp.h>
 
@@ -239,49 +240,115 @@ void Preprocess::odin1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedP
   pl_corn.clear();
   pl_full.clear();
 
-  pcl::PointCloud<odin1_ros::Point> pl_orig;
-  pcl::fromROSMsg(*msg, pl_orig);
-  const int plsize = static_cast<int>(pl_orig.points.size());
+  const auto find_field = [&msg](const char *name) -> const sensor_msgs::msg::PointField * {
+    const auto it = std::find_if(msg->fields.begin(), msg->fields.end(),
+                                 [name](const sensor_msgs::msg::PointField &field) {
+                                   return field.name == name;
+                                 });
+    return it == msg->fields.end() ? nullptr : &(*it);
+  };
+
+  const auto *field_x = find_field("x");
+  const auto *field_y = find_field("y");
+  const auto *field_z = find_field("z");
+  const auto *field_intensity = find_field("intensity");
+  const auto *field_confidence = find_field("confidence");
+  const auto *field_offset_time = find_field("offset_time");
+  const bool required_fields_ok =
+      field_x && field_y && field_z &&
+      field_x->datatype == sensor_msgs::msg::PointField::FLOAT32 &&
+      field_y->datatype == sensor_msgs::msg::PointField::FLOAT32 &&
+      field_z->datatype == sensor_msgs::msg::PointField::FLOAT32;
+  const bool optional_fields_ok =
+      (!field_intensity || field_intensity->datatype == sensor_msgs::msg::PointField::UINT8) &&
+      (!field_confidence || field_confidence->datatype == sensor_msgs::msg::PointField::UINT16) &&
+      (!field_offset_time || field_offset_time->datatype == sensor_msgs::msg::PointField::FLOAT32);
+  if (!required_fields_ok || !optional_fields_ok || msg->is_bigendian) {
+    CAKE_INFO_THROTTLE_MS(
+        2000,
+        "Odin1 preprocess rejected cloud: fields_ok=%d optional_ok=%d bigendian=%d point_step=%u",
+        required_fields_ok ? 1 : 0, optional_fields_ok ? 1 : 0, msg->is_bigendian ? 1 : 0,
+        msg->point_step);
+    return;
+  }
+
+  const int plsize = static_cast<int>(msg->width * msg->height);
   pl_surf.reserve(plsize);
 
+  const auto read_float = [](const uint8_t *data, uint32_t offset) {
+    float value = 0.0f;
+    std::memcpy(&value, data + offset, sizeof(float));
+    return value;
+  };
+  const auto read_uint16 = [](const uint8_t *data, uint32_t offset) {
+    std::uint16_t value = 0;
+    std::memcpy(&value, data + offset, sizeof(std::uint16_t));
+    return value;
+  };
+
   int valid_num = 0;
+  int dropped_confidence = 0;
+  int dropped_invalid = 0;
+  int dropped_stride = 0;
+  int dropped_blind = 0;
+  int positive_confidence = 0;
+  int nonzero_range = 0;
+  std::uint16_t max_confidence = 0;
   const int filter_stride = std::max(1, point_filter_num);
   for (int i = 0; i < plsize; ++i)
   {
-    const auto &src = pl_orig.points[i];
+    const uint8_t *point_data = msg->data.data() + static_cast<size_t>(i) * msg->point_step;
+    const float x = read_float(point_data, field_x->offset);
+    const float y = read_float(point_data, field_y->offset);
+    const float z = read_float(point_data, field_z->offset);
+    const std::uint8_t intensity = field_intensity ? *(point_data + field_intensity->offset) : 0;
+    const std::uint16_t confidence = field_confidence ? read_uint16(point_data, field_confidence->offset) : 0;
+    const float offset_time = field_offset_time ? read_float(point_data, field_offset_time->offset) : 0.0f;
+    max_confidence = std::max(max_confidence, confidence);
+    if (confidence > 0) {
+      ++positive_confidence;
+    }
+    if (x * x + y * y + z * z > 0.0f) {
+      ++nonzero_range;
+    }
+
     if (odin_confidence_threshold > 0 &&
-        static_cast<int>(src.confidence) < odin_confidence_threshold)
+        static_cast<int>(confidence) < odin_confidence_threshold)
     {
+      ++dropped_confidence;
       continue;
     }
 
-    if (!std::isfinite(src.x) || !std::isfinite(src.y) || !std::isfinite(src.z) ||
-        !std::isfinite(src.offset_time) || src.offset_time < 0.0f)
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+        !std::isfinite(offset_time) || offset_time < 0.0f)
     {
+      ++dropped_invalid;
       continue;
     }
 
     ++valid_num;
     if (valid_num % filter_stride != 0)
     {
+      ++dropped_stride;
       continue;
     }
 
-    const double range = src.x * src.x + src.y * src.y + src.z * src.z;
+    const double range = x * x + y * y + z * z;
     if (range < blind_sqr)
     {
+      ++dropped_blind;
       continue;
     }
 
     PointType added_pt;
-    added_pt.x = src.x;
-    added_pt.y = src.y;
-    added_pt.z = src.z;
-    added_pt.intensity = static_cast<float>(src.intensity);
+    added_pt.x = x;
+    added_pt.y = y;
+    added_pt.z = z;
+    added_pt.intensity = static_cast<float>(intensity);
     added_pt.normal_x = 0.0f;
     added_pt.normal_y = 0.0f;
     added_pt.normal_z = 0.0f;
-    added_pt.curvature = src.offset_time * 1000.0f;
+    added_pt.curvature = offset_time * 1000.0f;
     pl_surf.points.push_back(added_pt);
   }
 
@@ -292,8 +359,10 @@ void Preprocess::odin1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedP
 
   CAKE_INFO_THROTTLE_MS(
       2000,
-      "Odin1 preprocess: input=%d output=%zu confidence_threshold=%d point_filter=%d",
-      plsize, pl_surf.points.size(), odin_confidence_threshold, point_filter_num);
+      "Odin1 preprocess: input=%d output=%zu nonzero_range=%d positive_conf=%d max_conf=%u drops(conf=%d invalid=%d stride=%d blind=%d) confidence_threshold=%d point_filter=%d",
+      plsize, pl_surf.points.size(), nonzero_range, positive_confidence,
+      static_cast<unsigned>(max_confidence), dropped_confidence, dropped_invalid,
+      dropped_stride, dropped_blind, odin_confidence_threshold, point_filter_num);
 }
 
 void Preprocess::l515_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)

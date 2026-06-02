@@ -19,6 +19,7 @@
 #include <limits>
 
 #include "cake_slam/local_voxel_map.h"
+#include "cake_slam/vision/estimator/parameters.h"
 
 // 判断点是否落在图像有效区域内。
 bool FeatureTracker::inBorder(const cv::Point2f &pt)
@@ -428,9 +429,12 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
                 cv::goodFeaturesToTrack(cur_img, n_pts, MAX_CNT - cur_pts.size(), 0.01, MIN_DIST, mask);
                 last_timing.good_features_ms = t_t.toc();
                 // printf("good feature to track costs: %fms\n", t_t.toc());
-                TicToc t_console;
-                std::cout << "n_pts size: "<< n_pts.size()<<std::endl;
-                last_timing.console_ms = t_console.toc();
+                if (VIO_DEBUG_FACTOR_COSTS)
+                {
+                    TicToc t_console;
+                    std::cout << "n_pts size: " << n_pts.size() << std::endl;
+                    last_timing.console_ms = t_console.toc();
+                }
             }
             else
                 n_pts.clear();
@@ -723,41 +727,44 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
                 ++visual_len4p;
         }
     }
-    std::printf("FEATURE TRACKER SURVIVAL stamp=%.6f prev=%d lk_fwd=%d lk_back=%d lio_gate=%d border=%d old_survive=%d add_lidar=%d add_visual=%d new_total=%d final=%d len1=%d len2=%d len3=%d len4p=%d prev_depth=%d tracked_depth=%d lio_reject=%d\n",
-                cur_time,
-                last_prev_track_count,
-                survival_lk_forward,
-                survival_lk_backward,
-                survival_lio_gate,
-                survival_border,
-                last_tracked_after_flow_count,
-                last_added_lidar_count,
-                last_added_visual_count,
-                last_added_lidar_count + last_added_visual_count,
-                last_timing.final_tracks,
-                cur_len1,
-                cur_len2,
-                cur_len3,
-                cur_len4p,
-                last_prev_lidar_track_count,
-                last_tracked_lidar_count,
-                last_rejected_by_lio_prior_count);
-    std::printf("FEATURE TRACKER AGE stamp=%.6f depth_prior_total=%d depth_prior_len1=%d depth_prior_len2=%d depth_prior_len3=%d depth_prior_len4p=%d depth_prior_avg_age=%.3f depth_prior_max_age=%d visual_only_total=%d visual_only_len1=%d visual_only_len2=%d visual_only_len3=%d visual_only_len4p=%d visual_only_avg_age=%.3f visual_only_max_age=%d\n",
-                cur_time,
-                lidar_track_total,
-                lidar_len1,
-                lidar_len2,
-                lidar_len3,
-                lidar_len4p,
-                lidar_track_total > 0 ? sum_lidar_age / static_cast<double>(lidar_track_total) : 0.0,
-                max_lidar_age,
-                visual_track_total,
-                visual_len1,
-                visual_len2,
-                visual_len3,
-                visual_len4p,
-                visual_track_total > 0 ? sum_visual_age / static_cast<double>(visual_track_total) : 0.0,
-                max_visual_age);
+    if (VIO_DEBUG_FACTOR_COSTS)
+    {
+        std::printf("FEATURE TRACKER SURVIVAL stamp=%.6f prev=%d lk_fwd=%d lk_back=%d lio_gate=%d border=%d old_survive=%d add_lidar=%d add_visual=%d new_total=%d final=%d len1=%d len2=%d len3=%d len4p=%d prev_depth=%d tracked_depth=%d lio_reject=%d\n",
+                    cur_time,
+                    last_prev_track_count,
+                    survival_lk_forward,
+                    survival_lk_backward,
+                    survival_lio_gate,
+                    survival_border,
+                    last_tracked_after_flow_count,
+                    last_added_lidar_count,
+                    last_added_visual_count,
+                    last_added_lidar_count + last_added_visual_count,
+                    last_timing.final_tracks,
+                    cur_len1,
+                    cur_len2,
+                    cur_len3,
+                    cur_len4p,
+                    last_prev_lidar_track_count,
+                    last_tracked_lidar_count,
+                    last_rejected_by_lio_prior_count);
+        std::printf("FEATURE TRACKER AGE stamp=%.6f depth_prior_total=%d depth_prior_len1=%d depth_prior_len2=%d depth_prior_len3=%d depth_prior_len4p=%d depth_prior_avg_age=%.3f depth_prior_max_age=%d visual_only_total=%d visual_only_len1=%d visual_only_len2=%d visual_only_len3=%d visual_only_len4p=%d visual_only_avg_age=%.3f visual_only_max_age=%d\n",
+                    cur_time,
+                    lidar_track_total,
+                    lidar_len1,
+                    lidar_len2,
+                    lidar_len3,
+                    lidar_len4p,
+                    lidar_track_total > 0 ? sum_lidar_age / static_cast<double>(lidar_track_total) : 0.0,
+                    max_lidar_age,
+                    visual_track_total,
+                    visual_len1,
+                    visual_len2,
+                    visual_len3,
+                    visual_len4p,
+                    visual_track_total > 0 ? sum_visual_age / static_cast<double>(visual_track_total) : 0.0,
+                    max_visual_age);
+    }
     return featureFrame;
 }
 
@@ -996,7 +1003,7 @@ int FeatureTracker::attachDepthPriorsToTrackedFeatures()
         updated++;
     }
 
-    if (tested > 0 || updated > 0)
+    if (VIO_DEBUG_FACTOR_COSTS && (tested > 0 || updated > 0))
     {
         std::printf("VISUAL DEPTH PRIOR DEBUG stamp=%.6f enabled=1 source=%d tested=%d projected_hits=%d raycast_attempts=%d raycast_hits=%d updated=%d kept_old=%d rejected=%d active=%zu\n",
                     cur_time,
@@ -1040,16 +1047,19 @@ void FeatureTracker::rejectWithLioPrior(vector<uchar> &status)
                 reason = "no_camera";
             else if (LIDAR_PRIOR_REPROJ_THRESHOLD <= 0.0)
                 reason = "disabled_threshold";
-            std::printf("LIO PRIOR GATE DEBUG stamp=%.6f enabled=0 reason=%s active_depth=%zu active_gated=%d prev_depth=%d status=%zu threshold=%.3f prior_valid=%d camera=%d\n",
-                        cur_time,
-                        reason,
-                        active_lidar_priors.size(),
-                        active_gated_tracks,
-                        last_prev_lidar_track_count,
-                        status.size(),
-                        LIDAR_PRIOR_REPROJ_THRESHOLD,
-                        lio_prior_gate.valid ? 1 : 0,
-                        m_camera.empty() ? 0 : 1);
+            if (VIO_DEBUG_FACTOR_COSTS)
+            {
+                std::printf("LIO PRIOR GATE DEBUG stamp=%.6f enabled=0 reason=%s active_depth=%zu active_gated=%d prev_depth=%d status=%zu threshold=%.3f prior_valid=%d camera=%d\n",
+                            cur_time,
+                            reason,
+                            active_lidar_priors.size(),
+                            active_gated_tracks,
+                            last_prev_lidar_track_count,
+                            status.size(),
+                            LIDAR_PRIOR_REPROJ_THRESHOLD,
+                            lio_prior_gate.valid ? 1 : 0,
+                            m_camera.empty() ? 0 : 1);
+            }
         }
         return;
     }
@@ -1112,21 +1122,24 @@ void FeatureTracker::rejectWithLioPrior(vector<uchar> &status)
         const double alpha = idx - static_cast<double>(lo);
         return reproj_errors[lo] * (1.0 - alpha) + reproj_errors[hi] * alpha;
     };
-    std::printf("LIO PRIOR GATE DEBUG stamp=%.6f enabled=1 active_depth=%zu active_gated=%d prev_depth=%d tested=%d kept=%d reject_reproj=%d reject_behind=%d already_failed=%d threshold=%.3f err_med=%.3f err_p90=%.3f err_max=%.3f prior_z=%.6f\n",
-                cur_time,
-                active_lidar_priors.size(),
-                active_gated_tracks,
-                last_prev_lidar_track_count,
-                tested,
-                kept,
-                rejected_reproj,
-                rejected_behind,
-                already_failed,
-                LIDAR_PRIOR_REPROJ_THRESHOLD,
-                percentile(0.5),
-                percentile(0.9),
-                reproj_errors.empty() ? std::numeric_limits<double>::quiet_NaN() : reproj_errors.back(),
-                lio_prior_gate.p_WB.z());
+    if (VIO_DEBUG_FACTOR_COSTS)
+    {
+        std::printf("LIO PRIOR GATE DEBUG stamp=%.6f enabled=1 active_depth=%zu active_gated=%d prev_depth=%d tested=%d kept=%d reject_reproj=%d reject_behind=%d already_failed=%d threshold=%.3f err_med=%.3f err_p90=%.3f err_max=%.3f prior_z=%.6f\n",
+                    cur_time,
+                    active_lidar_priors.size(),
+                    active_gated_tracks,
+                    last_prev_lidar_track_count,
+                    tested,
+                    kept,
+                    rejected_reproj,
+                    rejected_behind,
+                    already_failed,
+                    LIDAR_PRIOR_REPROJ_THRESHOLD,
+                    percentile(0.5),
+                    percentile(0.9),
+                    reproj_errors.empty() ? std::numeric_limits<double>::quiet_NaN() : reproj_errors.back(),
+                    lio_prior_gate.p_WB.z());
+    }
 }
 
 int FeatureTracker::addLidarCandidatePoints(int max_num)
