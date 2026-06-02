@@ -57,6 +57,7 @@ struct LidarConfig
   int scan_line = 6;            ///< Number of scan lines.
   int scan_rate = 10;           ///< Scan rate [Hz].
   int point_filter_num = 3;     ///< Preprocess decimation stride.
+  int confidence_threshold = 0;  ///< Optional raw point confidence gate.
   double blind = 0.01;          ///< Near-range rejection distance [m].
   bool feature_extract = false; ///< Whether to extract edge/surface features.
   double filter_size_surf = 0.5;///< Voxel leaf size for LIO surf cloud [m].

@@ -113,6 +113,7 @@ void SlamNode::configureModules()
     preprocess_.reset(new Preprocess());
     preprocess_->set(config_.lidar.feature_extract, config_.lidar.type, config_.lidar.blind,
                      config_.lidar.point_filter_num);
+    preprocess_->set_odin_confidence_threshold(config_.lidar.confidence_threshold);
     preprocess_->N_SCANS = config_.lidar.scan_line;
     preprocess_->SCAN_RATE = config_.lidar.scan_rate;
     preprocess_->blind = config_.lidar.blind;

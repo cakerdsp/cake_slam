@@ -1,0 +1,20 @@
+%YAML:1.0
+# Odin1 RGB after /odin1/image_undistort.
+# The raw camera model is FishPoly and is not represented here. This file is
+# only for already-undistorted images. The source calibration has A12 skew
+# -0.074793136 px; camodocal PINHOLE has no skew field, so it is ignored.
+
+model_type: PINHOLE
+camera_name: odin1_rgb_undistort
+image_width: 1600
+image_height: 1296
+distortion_parameters:
+  k1: 0.0
+  k2: 0.0
+  p1: 0.0
+  p2: 0.0
+projection_parameters:
+  fx: 735.9960279181064
+  fy: 735.7977029902014
+  cx: 776.8585703844866
+  cy: 640.7240739753099

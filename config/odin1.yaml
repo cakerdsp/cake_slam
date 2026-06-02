@@ -1,0 +1,167 @@
+%YAML:1.0
+# Odin1 draft runtime config.
+#
+# Compatibility notes:
+# - Use /odin1/image_undistort, not /odin1/image. The raw RGB model is FishPoly,
+#   which the current camodocal/VINS loader does not support.
+# - lidar.type=7 selects the Odin1 PointCloud2 parser. It maps offset_time[s]
+#   to PointType.curvature[ms] and filters points by confidence_threshold.
+# - Extrinsics assume the provided T_lidar^imu means P_imu = T_I_L * P_lidar.
+
+common:
+  lidar_enable: 1
+  image_enable: 1
+  ros_driver_bug_fix: 0
+  imu_time_offset: 0.0
+  image_time_offset: 0.0
+  max_buffer_size: 200000
+  gravity_align_enable: 1
+  imu_propagation_enable: 1
+
+imu:
+  enable: 1
+  topic: "/odin1/imu"
+  acc_n: 0.02
+  acc_w: 0.0001
+  acc_scale: 1.0
+  gyr_n: 0.01
+  gyr_w: 0.0001
+  g_norm: 9.81
+  gyr_cov: 0.3
+  acc_cov: 0.5
+  imu_int_frame: 30
+  gravity_est: 1
+  bias_est: 1
+
+lidar:
+  topic: "/odin1/cloud_raw"
+  type: 7
+  scan_line: 1
+  scan_rate: 10
+  point_filter_num: 2
+  confidence_threshold: 30
+  blind: 0.20
+  feature_extract: 0
+  filter_size_surf: 0.10
+
+map:
+  voxel_size: 0.30
+  max_layer: 2
+  min_eigen_value: 0.0001
+  sigma_num: 3.0
+  beam_err: 0.03
+  dept_err: 0.05
+  layer_init_num: [5, 5, 5, 5, 5]
+  max_points_num: 80
+  min_iterations: 5
+  sliding_enable: 0
+  half_map_size: 60
+  sliding_thresh: 8.0
+  update_after_vio: 1
+  update_after_vio_fallback: "lio"
+  max_vio_map_update_pos_delta: 0.30
+  max_vio_map_update_rot_delta_deg: 5.0
+
+vision:
+  image_topic: "/odin1/image_undistort"
+  cam0_calib: "odin1_cam0.yaml"
+  image_height: 1296
+  image_width: 1600
+  max_cnt: 300
+  min_dist: 35
+  fisheye_mask: ""
+  show_track: 0
+  flow_back: 1
+  use_fast_fisheye_undistort: 0
+  image_process_interval: 1
+  multiple_thread: 0
+  max_solver_time: 0.04
+  max_num_iterations: 8
+  keyframe_parallax: 10.0
+  estimate_extrinsic: 0
+  lidar_depth_enable: 1
+  lidar_prior_feature_enable: 1
+  optimize_lidar_inv_depth: 1
+  # 0: LocalVoxelMap assisted depth, 1: current scan, 2: disabled.
+  lidar_depth_source: 1
+  visual_feature_depth_prior_enable: 1
+  voxel_raycast_enable: 1
+  max_lidar_features: 300
+  min_lidar_depth: 0.25
+  max_lidar_depth: 30.0
+  z_buffer_cell_size: 10
+  z_buffer_depth_tolerance: 0.3
+  shi_tomasi_min_score: 1.0e-6
+  lidar_mask_radius: 24.0
+  lidar_depth_grid_rows: 12
+  lidar_depth_grid_cols: 16
+  max_lidar_depth_ratio: 0.6
+  depth_search_radius: 8.0
+  visual_depth_min_track_cnt: 2
+  max_depth_update_features: 250
+  max_raycast_features: 120
+  max_raycast_steps: 160
+  raycast_step: 0.3
+  raycast_min_cos: 0.15
+  raycast_plane_radius_scale: 3.0
+  depth_prior_update_var_ratio: 0.7
+  lio_prior_reproj_threshold: 3.0
+  lidar_depth_std: 0.10
+  min_inv_depth_var: 1.0e-6
+  min_lio_pose_prior_var: 1.0e-6
+  lio_full_state_prior_enable: 1
+  vio_debug_factor_costs: 0
+
+extrinsic:
+  # P_imu = R_I_L * P_lidar + t_I_L
+  lidar_T: [-0.02663, 0.03447, 0.02174]
+  lidar_R: [1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0]
+
+  # P_cam = R_C_L * P_lidar + t_C_L, from calib.yaml Tcl_0 without inversion.
+  camera_T: [0.01586, 0.00157, -0.00500]
+  camera_R: [-0.00918, -0.99996, 0.00164,
+             0.00190, -0.00166, -1.00000,
+             0.99996, -0.00918, 0.00192]
+
+  # P_imu = R_I_C * P_cam + t_I_C, composed from T_I_L and T_C_L.
+  body_T_cam0: !!opencv-matrix
+    rows: 4
+    cols: 4
+    dt: d
+    data: [-0.00918, 0.00190, 0.99996, -0.0214875882,
+           -0.99996, -0.00166, -0.00918, 0.0502860718,
+           0.00164, -1.00000, 0.00192, 0.0232935896,
+           0.0, 0.0, 0.0, 1.0]
+
+frame:
+  world: "world"
+  body: "odin1_imu"
+  lidar: "odin1_base_link"
+  camera: "odin1_camera"
+
+output:
+  path: "Log/odin1"
+  record_trajectory: 1
+  lio_trajectory_file: "lio_tum.txt"
+  vio_trajectory_file: "vio_tum.txt"
+
+visualization:
+  lio_odom_topic: "/cake_slam/odin1/lio/odom"
+  lio_path_topic: "/cake_slam/odin1/lio/path"
+  mavros_pose_topic: "/cake_slam/odin1/mavros_pose"
+  vio_odom_topic: "/cake_slam/odin1/vio/odom"
+  vio_path_topic: "/cake_slam/odin1/vio/path"
+  vio_pose_topic: "/cake_slam/odin1/vio/pose"
+  vio_landmarks_topic: "/cake_slam/odin1/vio/landmarks"
+  vio_window_path_topic: "/cake_slam/odin1/vio/window_path"
+  vio_window_poses_topic: "/cake_slam/odin1/vio/window_poses"
+  publish_lio_colored_cloud: 1
+  lio_colored_cloud_topic: "/cake_slam/odin1/cloud_colored_lio"
+  publish_vio_colored_cloud: 0
+  vio_colored_cloud_topic: "/cake_slam/odin1/cloud_colored_vio"
+
+time_offset:
+  td: 0.0
+  estimate_td: 0

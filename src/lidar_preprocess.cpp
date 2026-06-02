@@ -15,14 +15,19 @@ which is included as part of this source code package.
 
 #include "cake_slam/lidar_preprocess.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include <omp.h>
+
+#include "cake_slam/utils/logging.h"
 
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
 
 // 预处理器构造阶段设置各种经验阈值。
 // 这些阈值主要用于几何特征分类，不会直接改变原始点云坐标。
-Preprocess::Preprocess() : feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
+Preprocess::Preprocess() : feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1), odin_confidence_threshold(30)
 {
   inf_bound = 10;
   N_SCANS = 6;
@@ -61,6 +66,11 @@ void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
   point_filter_num = pfilt_num;
 }
 
+void Preprocess::set_odin_confidence_threshold(int confidence_threshold)
+{
+  odin_confidence_threshold = std::max(0, confidence_threshold);
+}
+
 void Preprocess::process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
   // Livox 走专用消息解析路径。
@@ -92,6 +102,11 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &ms
   case PANDAR128:
     Pandar128_handler(msg);
     break;
+
+  case ODIN1:
+    odin1_handler(msg);
+    break;
+
   default:
     printf("Error LiDAR Type: %d \n", lidar_type);
     break;
@@ -214,6 +229,71 @@ void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
     }
   }
   printf("[ Preprocess ] Output point number: %zu \n", pl_surf.points.size());
+}
+
+void Preprocess::odin1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
+{
+  // Odin1 /cloud_raw uses x/y/z [m], uint8 intensity, uint16 confidence,
+  // and float offset_time [s]. cake_slam stores per-point time in curvature [ms].
+  pl_surf.clear();
+  pl_corn.clear();
+  pl_full.clear();
+
+  pcl::PointCloud<odin1_ros::Point> pl_orig;
+  pcl::fromROSMsg(*msg, pl_orig);
+  const int plsize = static_cast<int>(pl_orig.points.size());
+  pl_surf.reserve(plsize);
+
+  int valid_num = 0;
+  const int filter_stride = std::max(1, point_filter_num);
+  for (int i = 0; i < plsize; ++i)
+  {
+    const auto &src = pl_orig.points[i];
+    if (odin_confidence_threshold > 0 &&
+        static_cast<int>(src.confidence) < odin_confidence_threshold)
+    {
+      continue;
+    }
+
+    if (!std::isfinite(src.x) || !std::isfinite(src.y) || !std::isfinite(src.z) ||
+        !std::isfinite(src.offset_time) || src.offset_time < 0.0f)
+    {
+      continue;
+    }
+
+    ++valid_num;
+    if (valid_num % filter_stride != 0)
+    {
+      continue;
+    }
+
+    const double range = src.x * src.x + src.y * src.y + src.z * src.z;
+    if (range < blind_sqr)
+    {
+      continue;
+    }
+
+    PointType added_pt;
+    added_pt.x = src.x;
+    added_pt.y = src.y;
+    added_pt.z = src.z;
+    added_pt.intensity = static_cast<float>(src.intensity);
+    added_pt.normal_x = 0.0f;
+    added_pt.normal_y = 0.0f;
+    added_pt.normal_z = 0.0f;
+    added_pt.curvature = src.offset_time * 1000.0f;
+    pl_surf.points.push_back(added_pt);
+  }
+
+  std::sort(pl_surf.points.begin(), pl_surf.points.end(),
+            [](const PointType &a, const PointType &b) {
+              return a.curvature < b.curvature;
+            });
+
+  CAKE_INFO_THROTTLE_MS(
+      2000,
+      "Odin1 preprocess: input=%d output=%zu confidence_threshold=%d point_filter=%d",
+      plsize, pl_surf.points.size(), odin_confidence_threshold, point_filter_num);
 }
 
 void Preprocess::l515_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)

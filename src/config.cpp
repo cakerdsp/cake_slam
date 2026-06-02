@@ -113,6 +113,7 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "lidar.scan_line", config.lidar.scan_line);
   readIfPresent(fs, "lidar.scan_rate", config.lidar.scan_rate);
   readIfPresent(fs, "lidar.point_filter_num", config.lidar.point_filter_num);
+  readIfPresent(fs, "lidar.confidence_threshold", config.lidar.confidence_threshold);
   readIfPresent(fs, "lidar.blind", config.lidar.blind);
   readIfPresent(fs, "lidar.feature_extract", config.lidar.feature_extract);
   readIfPresent(fs, "lidar.filter_size_surf", config.lidar.filter_size_surf);

@@ -141,6 +141,27 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(Pandar128_ros::Point,
                                   (float, x, x)(float, y, y)(float, z, z)(float, timestamp, timestamp))
 /*****************/
 
+/*** Odin1 raw cloud ***/
+namespace odin1_ros
+{
+struct EIGEN_ALIGN16 Point
+{
+  float x;
+  float y;
+  float z;
+  std::uint8_t intensity;
+  std::uint16_t confidence;
+  float offset_time;
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+} // namespace odin1_ros
+POINT_CLOUD_REGISTER_POINT_STRUCT(odin1_ros::Point,
+                                  (float, x, x)(float, y, y)(float, z, z)
+                                  (std::uint8_t, intensity, intensity)
+                                  (std::uint16_t, confidence, confidence)
+                                  (float, offset_time, offset_time))
+/*****************/
+
 // 预处理器：负责解析各雷达格式点云，并输出统一特征点云。
 class Preprocess
 {
@@ -161,6 +182,7 @@ public:
   // bld：盲区阈值；
   // pfilt_num：点过滤步长。
   void set(bool feat_en, int lid_type, double bld, int pfilt_num);
+  void set_odin_confidence_threshold(int confidence_threshold);
 
   // 完整点云、角点、平面点输出缓存。
   PointCloudXYZI pl_full, pl_corn, pl_surf;
@@ -169,7 +191,7 @@ public:
   // 各线束点的几何属性缓存，和 pl_buff 按索引一一对应。
   vector<orgtype> typess[128];
   // 当前雷达类型、滤波步长、线数和扫描频率。
-  int lidar_type, point_filter_num, N_SCANS, SCAN_RATE;
+  int lidar_type, point_filter_num, N_SCANS, SCAN_RATE, odin_confidence_threshold;
   
   // 盲区阈值及其平方，用于快速距离判定。
   double blind, blind_sqr;
@@ -187,6 +209,7 @@ private:
   void velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void xt32_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void Pandar128_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+  void odin1_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void l515_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   // 针对单条 scan line 做几何特征分类。
   void give_feature(PointCloudXYZI &pl, vector<orgtype> &types);
