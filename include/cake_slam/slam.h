@@ -84,7 +84,7 @@ private:
 
   // Synchronization and scheduling.
   void syncProcessLoop();
-  void drainRawInputBuffers();
+  void drainRawInputBuffers(std::size_t max_messages = 0);
   void enqueueProcessedCloud(double stamp, const PointCloudXYZI::Ptr &cloud);
   void enqueueImagePacket(ImagePacket &&packet);
   bool syncPackages(FusionMeasureGroup &meas);

@@ -33,6 +33,7 @@ void LocalVoxelMap::Configure(const Config &config, const M3D &lidar_to_body_R, 
   map_cfg.half_map_size = config.map.half_map_size;
   map_cfg.sliding_thresh = config.map.sliding_thresh;
   map_cfg.is_pub_plane_map_ = false;
+  map_cfg.verbose_logging_ = config.vision.vio_debug_factor_costs;
 
   std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map;
   voxel_manager_.reset(new VoxelMapManager(map_cfg, voxel_map));

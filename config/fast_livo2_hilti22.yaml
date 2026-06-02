@@ -51,7 +51,7 @@ map:
   layer_init_num: [5, 5, 5, 5, 5]
   max_points_num: 100
   min_iterations: 5
-  sliding_enable: 0
+  sliding_enable: 1
   half_map_size: 100
   sliding_thresh: 8.0
   # 1: LIVO模式下当前scan先只参与LIO注册，等VIO/local BA完成后再写入local voxel map。
@@ -114,7 +114,7 @@ vision:
   lio_prior_reproj_threshold: 3.0
   # These are diagnostic priors, not ground truth. Extremely small variances
   # over-constrain HILTI22 and can dominate the IMU/visual factors.
-  lidar_depth_std: 1.0e-10
+  lidar_depth_std: 1.0e-8
   min_inv_depth_var: 1.0e-8
   min_lio_pose_prior_var: 1.0e-8
   lio_full_state_prior_enable: 1

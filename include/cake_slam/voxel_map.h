@@ -47,6 +47,7 @@ typedef struct VoxelMapConfig
   double dept_err_;
   double sigma_num_;
   bool is_pub_plane_map_;
+  bool verbose_logging_;
 
   // config of local map sliding
   double sliding_thresh;

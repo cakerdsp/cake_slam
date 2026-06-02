@@ -371,12 +371,16 @@ void SlamNode::syncProcessLoop()
   // Heavy work lives in this worker thread. ROS callbacks only enqueue raw
   // messages, while this loop decodes, synchronizes, optimizes, colors, and
   // publishes.
+  constexpr std::size_t kRawDrainBurst = 8;
+  constexpr int kSyncBurst = 2;  // In LIVO this usually covers one LIO+VIO pair.
   while (rclcpp::ok() && sync_thread_running_.load()) {
-    drainRawInputBuffers();
+    drainRawInputBuffers(kRawDrainBurst);
 
     bool did_work = false;
-    while (syncPackages(measures_)) {
+    int sync_count = 0;
+    while (sync_count < kSyncBurst && syncPackages(measures_)) {
       did_work = true;
+      ++sync_count;
       switch (measures_.lio_vio_flg) {
         case LIO:
         case LO:
@@ -388,7 +392,7 @@ void SlamNode::syncProcessLoop()
         default:
           break;
       }
-      drainRawInputBuffers();
+      drainRawInputBuffers(kRawDrainBurst);
     }
 
     if (!did_work) {
@@ -403,18 +407,26 @@ void SlamNode::syncProcessLoop()
 }
 
 // 取出原始消息并完成解码/预处理。
-void SlamNode::drainRawInputBuffers()
+void SlamNode::drainRawInputBuffers(std::size_t max_messages)
 {
   // Pop raw messages under the mutex, then decode/preprocess them outside the
   // critical section so sensor callbacks remain lightweight.
+  std::size_t processed = 0;
   while (sync_thread_running_.load()) {
+    if (max_messages > 0 && processed >= max_messages) {
+      break;
+    }
     livox_ros_driver2::msg::CustomMsg::ConstSharedPtr livox_msg;
     sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud_msg;
     sensor_msgs::msg::Image::ConstSharedPtr image_msg;
 
     {
       std::lock_guard<std::mutex> lock(buffer_mutex_);
-      if (!raw_livox_buffer_.empty()) {
+      const bool prefer_image = (processed % 3) == 1;
+      if (prefer_image && !raw_image_buffer_.empty()) {
+        image_msg = raw_image_buffer_.front();
+        raw_image_buffer_.pop_front();
+      } else if (!raw_livox_buffer_.empty()) {
         livox_msg = raw_livox_buffer_.front();
         raw_livox_buffer_.pop_front();
       } else if (!raw_cloud_buffer_.empty()) {
@@ -444,6 +456,7 @@ void SlamNode::drainRawInputBuffers()
       packet.color = colorImageFromMsg(image_msg);
       enqueueImagePacket(std::move(packet));
     }
+    ++processed;
   }
 }
 
