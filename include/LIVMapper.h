@@ -14,7 +14,7 @@ which is included as part of this source code package.
 #define LIV_MAPPER_H
 
 #include "IMU_Processing.h"
-#include "vio.h"
+#include "vio_fisheye.h"
 #include "preprocess.h"
 #ifdef PRE_ROS_IRON
 #include <cv_bridge/cv_bridge.h>
@@ -122,6 +122,15 @@ public:
   int lidar_en = 1;
   bool is_first_frame = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;
+  bool virtual_fisheye_patch_en = false;
+  double virtual_focal_length = 300.0;
+  int virtual_patch_margin = 4;
+  int virtual_max_search_level = 1;
+  std::string virtual_patch_resampling_mode = "forward_splat";
+  int virtual_raw_window_half_size = 48;
+  double virtual_splat_min_weight = 1.0e-6;
+  bool virtual_splat_require_full_core_coverage = true;
+  bool virtual_splat_debug_compare_pull_exact = false;
   int frontend_mode = 0;
   int optical_flow_max_cnt = 250;
   int optical_flow_min_dist = 20;

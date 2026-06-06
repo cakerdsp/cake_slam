@@ -37,6 +37,15 @@
       img_point_cov: 100 # 100 1000 
       patch_size: 8
       patch_pyrimid_level: 3
+      virtual_fisheye_patch_en: false
+      virtual_focal_length: 300.0
+      virtual_patch_margin: 4
+      virtual_max_search_level: 1
+      virtual_patch_resampling_mode: "forward_splat"
+      virtual_raw_window_half_size: 48
+      virtual_splat_min_weight: 1.0e-6
+      virtual_splat_require_full_core_coverage: true
+      virtual_splat_debug_compare_pull_exact: false
       normal_en: true
       raycast_en: false
       inverse_composition_en: false
