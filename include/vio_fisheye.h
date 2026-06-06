@@ -10,24 +10,60 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
-#ifndef VIO_H_
-#define VIO_H_
+#ifndef VIO_FISHEYE_H_
+#define VIO_FISHEYE_H_
 
 #include "voxel_map.h"
-#include "feature.h"
+#include "feature_fisheye.h"
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <limits>
 #include <map>
+#include <memory>
+#include <numeric>
 #include <opencv2/imgproc/imgproc_c.h>
 #include <opencv2/video/tracking.hpp>
 #include <pcl/filters/voxel_grid.h>
 #include <set>
+#include <stdexcept>
+#include <string>
 #include <tuple>
 #include <vikit/math_utils.h>
 #include <vikit/robust_cost.h>
 #include <vikit/vision.h>
 #include <vikit/pinhole_camera.h>
+
+struct VirtualPatchImage
+{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+  cv::Mat values;        //!< CV_32FC1 local virtual support image.
+  cv::Mat valid_mask;    //!< CV_8UC1 validity mask for values.
+  M3D R_v_from_c = M3D::Identity();  //!< {}^V R_C.
+  M3D R_c_from_v = M3D::Identity();  //!< {}^C R_V.
+  SE3<double> T_v_w_seed;            //!< {}^V T_W at submap construction.
+  bool valid = false;
+};
+
+struct VirtualTrackPatch
+{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+  VirtualPatchImage cur_support;
+  M3D R_vcur_from_ccur_seed = M3D::Identity();
+  M3D R_ccur_from_vcur_seed = M3D::Identity();
+  SE3<double> T_vcur_w_seed;
+  Matrix2d A_cur_ref = Matrix2d::Identity();
+  int search_level = 0;
+  bool valid = false;
+};
+
+enum class VirtualPatchResamplingMode
+{
+  FORWARD_SPLAT = 0,
+  PULL_EXACT
+};
 
 struct SubSparseMap
 {
@@ -38,6 +74,7 @@ struct SubSparseMap
   vector<VisualPoint *> voxel_points;
   vector<double> inv_expo_list;
   vector<pointWithVar> add_from_voxel_map;
+  vector<VirtualTrackPatch> virtual_track_patches;
 
   SubSparseMap()
   {
@@ -48,6 +85,7 @@ struct SubSparseMap
     voxel_points.reserve(SIZE_LARGE);
     inv_expo_list.reserve(SIZE_LARGE);
     add_from_voxel_map.reserve(SIZE_SMALL);
+    virtual_track_patches.reserve(SIZE_LARGE);
   };
 
   void reset()
@@ -59,6 +97,7 @@ struct SubSparseMap
     voxel_points.clear();
     inv_expo_list.clear();
     add_from_voxel_map.clear();
+    virtual_track_patches.clear();
   }
 };
 
@@ -129,6 +168,7 @@ public:
   vector<float> patch_buffer;
   bool normal_en, inverse_composition_en, exposure_estimate_en, raycast_en, has_ref_patch_cache;
   bool ncc_en = false, colmap_output_en = false;
+  bool virtual_fisheye_patch_en = false;
 
   int width, height, grid_n_width, grid_n_height, length;
   double image_resize_factor;
@@ -137,6 +177,30 @@ public:
   int max_iterations, total_points;
 
   double img_point_cov, outlier_threshold, ncc_thre;
+
+  double virtual_focal_length = 300.0;
+  int virtual_patch_margin = 4;
+  int virtual_max_search_level = 1;
+  double virtual_min_z = 1.0e-6;
+  std::string virtual_patch_resampling_mode = "forward_splat";
+  VirtualPatchResamplingMode virtual_patch_resampling_mode_enum = VirtualPatchResamplingMode::FORWARD_SPLAT;
+  int virtual_raw_window_half_size = 48;
+  double virtual_splat_min_weight = 1.0e-6;
+  bool virtual_splat_require_full_core_coverage = true;
+  bool virtual_splat_debug_compare_pull_exact = false;
+  int virtual_support_radius = 0;
+  int virtual_support_size = 0;
+  std::vector<V3F> virtual_support_ray_lut_;
+  std::vector<V2F> core_patch_offsets_;
+  std::vector<V3F> raw_pixel_to_unit_ray_lut_;
+  std::vector<uint8_t> raw_pixel_unit_ray_valid_mask_;
+
+  int rejected_virtual_support_oob_ = 0;
+  int rejected_virtual_projection_invalid_ = 0;
+  int rejected_virtual_z_ = 0;
+  int rejected_virtual_affine_oob_ = 0;
+  double build_virtual_support_time_ = 0.0;
+  double virtual_affine_time_ = 0.0;
   
   SubSparseMap *visual_submap;
   std::vector<std::vector<V3D>> rays_with_sample_points;
@@ -210,6 +274,7 @@ public:
   void initializeVIO();
   void getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level);
   void computeProjectionJacobian(V3D p, MD(2, 3) & J);
+  void computeVirtualProjectionJacobian(const V3D &p_v, MD(2, 3) &J) const;
   void computeJacobianAndUpdateEKF(cv::Mat img);
   void resetGrid();
   void updateVisualMapPoints(cv::Mat img);
@@ -220,6 +285,39 @@ public:
                                      const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
   void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
+  bool buildVirtualFrameRotation(const V3D &point_in_raw_camera, M3D &R_v_from_c, M3D &R_c_from_v) const;
+  bool projectRawFisheyeIfValid(const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const;
+  bool buildVirtualSupportPatchPullExact(const cv::Mat &raw_img, const M3D &R_c_from_v, VirtualPatchImage &output) const;
+  void splatRawPixelToVirtualPatch(const cv::Mat &raw_img, int raw_x, int raw_y, const M3D &R_v_from_c, cv::Mat &value_sum,
+                                   cv::Mat &weight_sum) const;
+  bool hasFullVirtualCoreCoverage(const cv::Mat &valid_mask) const;
+  bool buildVirtualSupportPatchForwardSplat(const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c,
+                                            VirtualPatchImage &output) const;
+  bool buildVirtualSupportPatch(const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c, const M3D &R_c_from_v,
+                                VirtualPatchImage &output) const;
+  bool interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value) const;
+  bool interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value) const;
+  V2D virtualProject(const V3D &p_v) const;
+  V3D virtualCam2World(const V2D &px_v) const;
+  bool createVirtualFeaturePatch(const cv::Mat &raw_img, const SE3<double> &T_c_w, const V3D &point_w, float *core_patch,
+                                 cv::Mat &virtual_support_img, SE3<double> &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const;
+  bool getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
+                                  int halfpatch_size, Matrix2d &A_cur_ref) const;
+  bool getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_vcur_vref,
+                                            int level_ref, Matrix2d &A_cur_ref) const;
+  bool warpAffineVirtual(const Matrix2d &A_cur_ref, const cv::Mat &virtual_ref_img, int level_ref, int search_level,
+                         int pyramid_level, int halfpatch_size, float *patch) const;
+  bool sampleVirtualCorePatch(const VirtualPatchImage &support, const V2D &center, int scale, float *patch) const;
+  bool sampleVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px, int scale, float &value, V2D &gradient) const;
+  bool sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V2D &px, int scale, float &value, V2D &gradient) const;
+  SE3<double> composeVirtualPose(const M3D &R_v_from_c, const SE3<double> &T_c_w) const;
+  void retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWithVar> &pg,
+                                          const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+  void generateVisualMapPointsVirtual(cv::Mat img, vector<pointWithVar> &pg);
+  void updateVisualMapPointsVirtual(cv::Mat img);
+  void precomputeReferencePatchesVirtual(int level);
+  void updateStateVirtual(cv::Mat img, int level);
+  void updateStateInverseVirtual(cv::Mat img, int level);
   void insertPointIntoVoxelMap(VisualPoint *pt_new);
   void plotTrackedPoints();
   void updateFrameState(StatesGroup state);
@@ -244,4 +342,4 @@ public:
 };
 typedef std::shared_ptr<VIOManager> VIOManagerPtr;
 
-#endif // VIO_H_
+#endif // VIO_FISHEYE_H_

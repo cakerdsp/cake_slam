@@ -83,7 +83,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<double>("vio.inv_expo_cov", 0.1);
   try_declare.template operator()<int>("vio.grid_size", 5);
   try_declare.template operator()<int>("vio.grid_n_height", 17);
-  try_declare.template operator()<int>("vio.patch_pyrimid_level", 4);
+  try_declare.template operator()<int>("vio.patch_pyrimid_level", 3);
   try_declare.template operator()<int>("vio.patch_size", 8);
   try_declare.template operator()<int>("vio.outlier_threshold", 100);
   try_declare.template operator()<int>("vio.frontend_mode", 0);

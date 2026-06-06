@@ -10,12 +10,73 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
-#include "vio.h"
+#include "vio_fisheye.h"
 
 using namespace Eigen;
+
+namespace
+{
+struct VirtualPatchWorkspace
+{
+  cv::Mat values;
+  cv::Mat weight_sum;
+  cv::Mat valid_mask;
+  std::vector<int> touched_indices;
+  std::vector<uint8_t> touched_flag;
+};
+
+static VirtualPatchWorkspace workspace;
+#ifdef _OPENMP
+#pragma omp threadprivate(workspace)
+#endif
+
+void clearVirtualPatchWorkspaceTouched(VirtualPatchWorkspace &workspace)
+{
+  if (workspace.touched_indices.empty()) return;
+
+  float *values = workspace.values.ptr<float>(0);
+  float *weights = workspace.weight_sum.ptr<float>(0);
+  uint8_t *mask = workspace.valid_mask.ptr<uint8_t>(0);
+  for (const int idx : workspace.touched_indices)
+  {
+    values[idx] = 0.0f;
+    weights[idx] = 0.0f;
+    mask[idx] = 0;
+    workspace.touched_flag[idx] = 0;
+  }
+  workspace.touched_indices.clear();
+}
+
+void prepareVirtualPatchWorkspace(VirtualPatchWorkspace &workspace, int support_size)
+{
+  const int support_total = support_size * support_size;
+  const bool resize_required = workspace.values.rows != support_size || workspace.values.cols != support_size ||
+                               workspace.weight_sum.rows != support_size || workspace.weight_sum.cols != support_size ||
+                               workspace.valid_mask.rows != support_size || workspace.valid_mask.cols != support_size ||
+                               static_cast<int>(workspace.touched_flag.size()) != support_total;
+
+  if (resize_required)
+  {
+    workspace.values.create(support_size, support_size, CV_32FC1);
+    workspace.weight_sum.create(support_size, support_size, CV_32FC1);
+    workspace.valid_mask.create(support_size, support_size, CV_8UC1);
+    workspace.values.setTo(0.0f);
+    workspace.weight_sum.setTo(0.0f);
+    workspace.valid_mask.setTo(0);
+    workspace.touched_flag.assign(support_total, 0);
+    workspace.touched_indices.clear();
+    return;
+  }
+
+  clearVirtualPatchWorkspaceTouched(workspace);
+}
+}
+
 VIOManager::VIOManager()
 {
   // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
+  visual_submap = nullptr;
+  pinhole_cam = nullptr;
   optical_flow_triangulated_points.reset(new PointCloudXYZI());
 }
 
@@ -90,9 +151,9 @@ void VIOManager::initializeVIO()
     rays_with_sample_points.reserve(length);
     printf("grid_size: %d, grid_n_height: %d, grid_n_width: %d, length: %d\n", grid_size, grid_n_height, grid_n_width, length);
 
-    float d_min = 0.1;
-    float d_max = 3.0;
-    float step = 0.2;
+    float range_min = 0.1;
+    float range_max = 3.0;
+    float range_step = 0.2;
     for (int grid_row = 1; grid_row <= grid_n_height; grid_row++)
     {
       for (int grid_col = 1; grid_col <= grid_n_width; grid_col++)
@@ -105,14 +166,20 @@ void VIOManager::initializeVIO()
         int u = grid_size / 2 + (grid_col - 1) * grid_size;
         int v = grid_size / 2 + (grid_row - 1) * grid_size;
         // it[ u + v * width ] = 255;
-        for (float d_temp = d_min; d_temp <= d_max; d_temp += step)
+        for (float range_temp = range_min; range_temp <= range_max; range_temp += range_step)
         {
-          V3D xyz;
-          xyz = cam->cam2world(u, v);
-          xyz *= d_temp / xyz[2];
-          // xyz[0] = (u - cx) / fx * d_temp;
-          // xyz[1] = (v - cy) / fy * d_temp;
-          // xyz[2] = d_temp;
+          V3D xyz = cam->cam2world(u, v);
+          if (virtual_fisheye_patch_en)
+          {
+            if (xyz.norm() <= virtual_min_z) continue;
+            xyz.normalize();
+            xyz *= range_temp;
+          }
+          else
+          {
+            if (std::fabs(xyz[2]) <= virtual_min_z) continue;
+            xyz *= range_temp / xyz[2];
+          }
           SamplePointsEachGrid.push_back(xyz);
         }
         rays_with_sample_points.push_back(SamplePointsEachGrid);
@@ -130,6 +197,15 @@ void VIOManager::initializeVIO()
   if(colmap_output_en)
   {
     pinhole_cam = dynamic_cast<vk::PinholeCamera*>(cam);
+    if (pinhole_cam == nullptr)
+    {
+      printf("[ VIO ] COLMAP output disabled: the active camera model is not pinhole.\n");
+      colmap_output_en = false;
+    }
+  }
+
+  if(colmap_output_en)
+  {
     fout_colmap.open(DEBUG_FILE_DIR("Colmap/sparse/0/images.txt"), ios::out);
     fout_colmap << "# Image list with two lines of data per image:\n";
     fout_colmap << "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n";
@@ -154,6 +230,73 @@ void VIOManager::initializeVIO()
   patch_buffer.resize(patch_size_total);
   warp_len = patch_size_total * patch_pyrimid_level;
   border = (patch_size_half + 1) * (1 << patch_pyrimid_level);
+
+  if (virtual_fisheye_patch_en)
+  {
+    if (virtual_focal_length <= 0.0) throw std::runtime_error("virtual_focal_length must be positive");
+    if (virtual_max_search_level < 0) throw std::runtime_error("virtual_max_search_level must be non-negative");
+    if (virtual_raw_window_half_size < 0) throw std::runtime_error("virtual_raw_window_half_size must be non-negative");
+    if (virtual_splat_min_weight <= 0.0) throw std::runtime_error("virtual_splat_min_weight must be positive");
+    if (virtual_patch_resampling_mode == "pull_exact")
+    {
+      virtual_patch_resampling_mode_enum = VirtualPatchResamplingMode::PULL_EXACT;
+    }
+    else if (virtual_patch_resampling_mode == "forward_splat")
+    {
+      virtual_patch_resampling_mode_enum = VirtualPatchResamplingMode::FORWARD_SPLAT;
+    }
+    else
+    {
+      throw std::runtime_error("virtual_patch_resampling_mode must be forward_splat or pull_exact");
+    }
+
+    const int max_scale = 1 << ((patch_pyrimid_level - 1) + virtual_max_search_level);
+    virtual_support_radius = patch_size_half * max_scale + virtual_patch_margin + 2;
+    virtual_support_size = 2 * virtual_support_radius + 1;
+    virtual_support_ray_lut_.resize(virtual_support_size * virtual_support_size);
+    for (int y = 0; y < virtual_support_size; ++y)
+    {
+      for (int x = 0; x < virtual_support_size; ++x)
+      {
+        V3F ray((x - virtual_support_radius) / static_cast<float>(virtual_focal_length),
+                (y - virtual_support_radius) / static_cast<float>(virtual_focal_length), 1.0f);
+        virtual_support_ray_lut_[y * virtual_support_size + x] = ray.normalized();
+      }
+    }
+
+    core_patch_offsets_.resize(patch_size_total);
+    for (int y = 0; y < patch_size; ++y)
+    {
+      for (int x = 0; x < patch_size; ++x)
+      {
+        core_patch_offsets_[y * patch_size + x] = V2F(x - patch_size_half, y - patch_size_half);
+      }
+    }
+
+    raw_pixel_to_unit_ray_lut_.resize(width * height);
+    raw_pixel_unit_ray_valid_mask_.assign(width * height, 0);
+    int valid_raw_rays = 0;
+    for (int raw_y = 0; raw_y < height; ++raw_y)
+    {
+      for (int raw_x = 0; raw_x < width; ++raw_x)
+      {
+        const int raw_idx = raw_y * width + raw_x;
+        if (!cam->isInFrame(V2D(raw_x, raw_y).cast<int>(), 0)) continue;
+        V3D ray_c = cam->cam2world(raw_x, raw_y);
+        if (!ray_c.array().isFinite().all()) continue;
+        const double ray_norm = ray_c.norm();
+        if (!std::isfinite(ray_norm) || ray_norm <= virtual_min_z) continue;
+        ray_c /= ray_norm;
+        raw_pixel_to_unit_ray_lut_[raw_idx] = ray_c.cast<float>();
+        raw_pixel_unit_ray_valid_mask_[raw_idx] = 1;
+        ++valid_raw_rays;
+      }
+    }
+
+    printf("[ VIO ] Virtual fisheye patches enabled: focal=%.3f support=%dx%d max_search_level=%d resampling=%s raw_window_half=%d raw_lut=%d/%d\n",
+           virtual_focal_length, virtual_support_size, virtual_support_size, virtual_max_search_level,
+           virtual_patch_resampling_mode.c_str(), virtual_raw_window_half_size, valid_raw_rays, width * height);
+  }
 
   retrieve_voxel_points.reserve(length);
   append_voxel_points.reserve(length);
@@ -224,6 +367,476 @@ void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
           w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * width] + w_ref_br * img_ptr[scale * width + scale];
     }
   }
+}
+
+SE3<double> VIOManager::composeVirtualPose(const M3D &R_v_from_c, const SE3<double> &T_c_w) const
+{
+  // {}^V T_W = {}^V T_C * {}^C T_W. The virtual and raw cameras share the optical center.
+  return SE3<double>(R_v_from_c * T_c_w.rotationMatrix(), R_v_from_c * T_c_w.translation());
+}
+
+bool VIOManager::buildVirtualFrameRotation(const V3D &point_in_raw_camera, M3D &R_v_from_c, M3D &R_c_from_v) const
+{
+  const double norm = point_in_raw_camera.norm();
+  if (!std::isfinite(norm) || norm <= virtual_min_z) return false;
+
+  const V3D z_v_in_c = point_in_raw_camera / norm;
+  V3D reference_axis = V3D::UnitX();
+  if (std::fabs(reference_axis.dot(z_v_in_c)) > 0.95) reference_axis = V3D::UnitY();
+
+  V3D x_v_in_c = reference_axis - reference_axis.dot(z_v_in_c) * z_v_in_c;
+  const double x_norm = x_v_in_c.norm();
+  if (!std::isfinite(x_norm) || x_norm <= virtual_min_z) return false;
+  x_v_in_c /= x_norm;
+
+  V3D y_v_in_c = z_v_in_c.cross(x_v_in_c);
+  const double y_norm = y_v_in_c.norm();
+  if (!std::isfinite(y_norm) || y_norm <= virtual_min_z) return false;
+  y_v_in_c /= y_norm;
+
+  R_v_from_c.row(0) = x_v_in_c.transpose();
+  R_v_from_c.row(1) = y_v_in_c.transpose();
+  R_v_from_c.row(2) = z_v_in_c.transpose();
+  R_c_from_v = R_v_from_c.transpose();
+  return R_v_from_c.array().isFinite().all() && std::fabs(R_v_from_c.determinant() - 1.0) < 1e-6;
+}
+
+bool VIOManager::projectRawFisheyeIfValid(const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const
+{
+  if (!ray_or_point_in_raw_camera.array().isFinite().all() || ray_or_point_in_raw_camera.norm() <= virtual_min_z) return false;
+  raw_px = cam->world2cam(ray_or_point_in_raw_camera);
+  if (!raw_px.array().isFinite().all()) return false;
+  if (raw_px[0] < required_border || raw_px[1] < required_border || raw_px[0] >= width - required_border - 1 ||
+      raw_px[1] >= height - required_border - 1)
+    return false;
+  return cam->isInFrame(raw_px.cast<int>(), required_border);
+}
+
+bool VIOManager::buildVirtualSupportPatchPullExact(const cv::Mat &raw_img, const M3D &R_c_from_v, VirtualPatchImage &output) const
+{
+  if (!virtual_fisheye_patch_en || raw_img.empty() || raw_img.type() != CV_8UC1 || virtual_support_size <= 0) return false;
+
+  output.values.create(virtual_support_size, virtual_support_size, CV_32FC1);
+  output.valid_mask.create(virtual_support_size, virtual_support_size, CV_8UC1);
+  output.values.setTo(std::numeric_limits<float>::quiet_NaN());
+  output.valid_mask.setTo(0);
+  output.R_c_from_v = R_c_from_v;
+  output.R_v_from_c = R_c_from_v.transpose();
+
+  for (int y = 0; y < virtual_support_size; ++y)
+  {
+    float *values = output.values.ptr<float>(y);
+    uint8_t *mask = output.valid_mask.ptr<uint8_t>(y);
+    for (int x = 0; x < virtual_support_size; ++x)
+    {
+      const V3D ray_v = virtual_support_ray_lut_[y * virtual_support_size + x].cast<double>();
+      const V3D ray_c = R_c_from_v * ray_v;
+      V2D raw_px;
+      if (!projectRawFisheyeIfValid(ray_c, 1, raw_px)) continue;
+      values[x] = static_cast<float>(vk::interpolateMat_8u(raw_img, raw_px[0], raw_px[1]));
+      mask[x] = 255;
+    }
+  }
+
+  output.valid = true;
+  return true;
+}
+
+void VIOManager::splatRawPixelToVirtualPatch(const cv::Mat &raw_img, int raw_x, int raw_y, const M3D &R_v_from_c, cv::Mat &value_sum,
+                                             cv::Mat &weight_sum) const
+{
+  const int raw_idx = raw_y * width + raw_x;
+  if (raw_idx < 0 || raw_idx >= static_cast<int>(raw_pixel_unit_ray_valid_mask_.size()) || !raw_pixel_unit_ray_valid_mask_[raw_idx]) return;
+
+  const V3D ray_c = raw_pixel_to_unit_ray_lut_[raw_idx].cast<double>();
+  const V3D ray_v = R_v_from_c * ray_c;
+  if (!ray_v.array().isFinite().all() || ray_v[2] <= virtual_min_z) return;
+
+  const float u_v = static_cast<float>(virtual_focal_length * ray_v[0] / ray_v[2] + virtual_support_radius);
+  const float v_v = static_cast<float>(virtual_focal_length * ray_v[1] / ray_v[2] + virtual_support_radius);
+  const int x0 = static_cast<int>(std::floor(u_v));
+  const int y0 = static_cast<int>(std::floor(v_v));
+  if (x0 < 0 || y0 < 0 || x0 + 1 >= virtual_support_size || y0 + 1 >= virtual_support_size) return;
+
+  const float dx = u_v - x0;
+  const float dy = v_v - y0;
+  const float w00 = (1.0f - dx) * (1.0f - dy);
+  const float w10 = dx * (1.0f - dy);
+  const float w01 = (1.0f - dx) * dy;
+  const float w11 = dx * dy;
+  const float intensity = static_cast<float>(raw_img.ptr<uint8_t>(raw_y)[raw_x]);
+  float *value_row0 = value_sum.ptr<float>(y0);
+  float *value_row1 = value_sum.ptr<float>(y0 + 1);
+  float *weight_row0 = weight_sum.ptr<float>(y0);
+  float *weight_row1 = weight_sum.ptr<float>(y0 + 1);
+
+  value_row0[x0] += w00 * intensity;
+  value_row0[x0 + 1] += w10 * intensity;
+  value_row1[x0] += w01 * intensity;
+  value_row1[x0 + 1] += w11 * intensity;
+
+  weight_row0[x0] += w00;
+  weight_row0[x0 + 1] += w10;
+  weight_row1[x0] += w01;
+  weight_row1[x0 + 1] += w11;
+}
+
+bool VIOManager::hasFullVirtualCoreCoverage(const cv::Mat &valid_mask) const
+{
+  if (valid_mask.empty()) return false;
+  const int center = virtual_support_radius;
+  for (const V2F &offset : core_patch_offsets_)
+  {
+    const int x = center + static_cast<int>(std::lround(offset[0]));
+    const int y = center + static_cast<int>(std::lround(offset[1]));
+    if (x < 0 || y < 0 || x + 1 >= valid_mask.cols || y + 1 >= valid_mask.rows) return false;
+    const uint8_t *row0 = valid_mask.ptr<uint8_t>(y);
+    const uint8_t *row1 = valid_mask.ptr<uint8_t>(y + 1);
+    if (row0[x] == 0 || row0[x + 1] == 0 || row1[x] == 0 || row1[x + 1] == 0)
+      return false;
+  }
+  return true;
+}
+
+bool VIOManager::buildVirtualSupportPatchForwardSplat(const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c,
+                                                      VirtualPatchImage &output) const
+{
+  if (!virtual_fisheye_patch_en || raw_img.empty() || raw_img.type() != CV_8UC1 || virtual_support_size <= 0) return false;
+  if (raw_pixel_to_unit_ray_lut_.size() != static_cast<size_t>(width * height) ||
+      raw_pixel_unit_ray_valid_mask_.size() != static_cast<size_t>(width * height))
+    return false;
+
+  VirtualPatchWorkspace &patch_workspace = workspace;
+  prepareVirtualPatchWorkspace(patch_workspace, virtual_support_size);
+
+  output.values.create(virtual_support_size, virtual_support_size, CV_32FC1);
+  output.valid_mask.create(virtual_support_size, virtual_support_size, CV_8UC1);
+  output.values.setTo(std::numeric_limits<float>::quiet_NaN());
+  output.valid_mask.setTo(0);
+  output.R_v_from_c = R_v_from_c;
+  output.R_c_from_v = R_v_from_c.transpose();
+  output.valid = false;
+
+  float *value_sum = patch_workspace.values.ptr<float>(0);
+  float *weight_sum = patch_workspace.weight_sum.ptr<float>(0);
+  uint8_t *workspace_mask = patch_workspace.valid_mask.ptr<uint8_t>(0);
+  uint8_t *touched_flag = patch_workspace.touched_flag.data();
+
+  auto add_splat_value = [&](int idx, float weight, float intensity) {
+    if (weight == 0.0f) return;
+    if (touched_flag[idx] == 0)
+    {
+      touched_flag[idx] = 1;
+      patch_workspace.touched_indices.push_back(idx);
+    }
+    value_sum[idx] += weight * intensity;
+    weight_sum[idx] += weight;
+  };
+
+  const int raw_center_x = static_cast<int>(std::lround(raw_center_px[0]));
+  const int raw_center_y = static_cast<int>(std::lround(raw_center_px[1]));
+  for (int raw_y = raw_center_y - virtual_raw_window_half_size; raw_y <= raw_center_y + virtual_raw_window_half_size; ++raw_y)
+  {
+    if (raw_y < 0 || raw_y >= height) continue;
+    const uint8_t *raw_row = raw_img.ptr<uint8_t>(raw_y);
+    for (int raw_x = raw_center_x - virtual_raw_window_half_size; raw_x <= raw_center_x + virtual_raw_window_half_size; ++raw_x)
+    {
+      if (raw_x < 0 || raw_x >= width) continue;
+      const int raw_idx = raw_y * width + raw_x;
+      if (!raw_pixel_unit_ray_valid_mask_[raw_idx]) continue;
+
+      const V3D ray_c = raw_pixel_to_unit_ray_lut_[raw_idx].cast<double>();
+      const V3D ray_v = R_v_from_c * ray_c;
+      if (!ray_v.array().isFinite().all() || ray_v[2] <= virtual_min_z) continue;
+
+      const float u_v = static_cast<float>(virtual_focal_length * ray_v[0] / ray_v[2] + virtual_support_radius);
+      const float v_v = static_cast<float>(virtual_focal_length * ray_v[1] / ray_v[2] + virtual_support_radius);
+      const int x0 = static_cast<int>(std::floor(u_v));
+      const int y0 = static_cast<int>(std::floor(v_v));
+      if (x0 < 0 || y0 < 0 || x0 + 1 >= virtual_support_size || y0 + 1 >= virtual_support_size) continue;
+
+      const float dx = u_v - x0;
+      const float dy = v_v - y0;
+      const float w00 = (1.0f - dx) * (1.0f - dy);
+      const float w10 = dx * (1.0f - dy);
+      const float w01 = (1.0f - dx) * dy;
+      const float w11 = dx * dy;
+      const float intensity = static_cast<float>(raw_row[raw_x]);
+      const int idx00 = y0 * virtual_support_size + x0;
+      const int idx10 = idx00 + 1;
+      const int idx01 = idx00 + virtual_support_size;
+      const int idx11 = idx01 + 1;
+
+      add_splat_value(idx00, w00, intensity);
+      add_splat_value(idx10, w10, intensity);
+      add_splat_value(idx01, w01, intensity);
+      add_splat_value(idx11, w11, intensity);
+    }
+  }
+
+  float *output_values = output.values.ptr<float>(0);
+  uint8_t *output_mask = output.valid_mask.ptr<uint8_t>(0);
+  for (const int idx : patch_workspace.touched_indices)
+  {
+    if (weight_sum[idx] > virtual_splat_min_weight)
+    {
+      output_values[idx] = value_sum[idx] / weight_sum[idx];
+      output_mask[idx] = 255;
+      workspace_mask[idx] = 255;
+    }
+  }
+
+  const bool has_required_coverage = !virtual_splat_require_full_core_coverage || hasFullVirtualCoreCoverage(patch_workspace.valid_mask);
+  clearVirtualPatchWorkspaceTouched(patch_workspace);
+  if (!has_required_coverage) return false;
+  output.valid = true;
+  return true;
+}
+
+bool VIOManager::buildVirtualSupportPatch(const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c, const M3D &R_c_from_v,
+                                          VirtualPatchImage &output) const
+{
+  if (virtual_patch_resampling_mode_enum == VirtualPatchResamplingMode::PULL_EXACT)
+    return buildVirtualSupportPatchPullExact(raw_img, R_c_from_v, output);
+
+  const double splat_start = omp_get_wtime();
+  const bool splat_valid = buildVirtualSupportPatchForwardSplat(raw_img, raw_center_px, R_v_from_c, output);
+  const double splat_time = omp_get_wtime() - splat_start;
+
+  if (virtual_splat_debug_compare_pull_exact)
+  {
+    VirtualPatchImage pull_exact_patch;
+    const double pull_start = omp_get_wtime();
+    const bool pull_valid = buildVirtualSupportPatchPullExact(raw_img, R_c_from_v, pull_exact_patch);
+    const double pull_time = omp_get_wtime() - pull_start;
+
+    std::vector<float> absolute_errors;
+    absolute_errors.reserve(patch_size_total);
+    const V2D center(virtual_support_radius, virtual_support_radius);
+    for (const V2F &offset : core_patch_offsets_)
+    {
+      float splat_value = 0.0f;
+      float pull_value = 0.0f;
+      const V2D px = center + offset.cast<double>();
+      if (!splat_valid || !pull_valid ||
+          !interpolateVirtualFloat(output.values, output.valid_mask, px[0], px[1], splat_value) ||
+          !interpolateVirtualFloat(pull_exact_patch.values, pull_exact_patch.valid_mask, px[0], px[1], pull_value))
+        continue;
+      absolute_errors.push_back(std::fabs(splat_value - pull_value));
+    }
+
+    double mean_error = 0.0;
+    double max_error = 0.0;
+    double p95_error = 0.0;
+    if (!absolute_errors.empty())
+    {
+      std::sort(absolute_errors.begin(), absolute_errors.end());
+      max_error = absolute_errors.back();
+      mean_error = std::accumulate(absolute_errors.begin(), absolute_errors.end(), 0.0) / absolute_errors.size();
+      const size_t p95_index = std::min(absolute_errors.size() - 1, static_cast<size_t>(std::floor(0.95 * (absolute_errors.size() - 1))));
+      p95_error = absolute_errors[p95_index];
+    }
+
+    printf("[ VIO Virtual Splat A/B ] pull_valid=%d splat_valid=%d valid_core=%zu mean_abs=%.6f max_abs=%.6f p95_abs=%.6f pull=%.6f s splat=%.6f s speedup=%.3f\n",
+           pull_valid ? 1 : 0, splat_valid ? 1 : 0, absolute_errors.size(), mean_error, max_error, p95_error, pull_time, splat_time,
+           splat_time > 1e-12 ? pull_time / splat_time : 0.0);
+  }
+
+  return splat_valid;
+}
+
+bool VIOManager::interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value) const
+{
+  if (!std::isfinite(u) || !std::isfinite(v) || img.empty() || valid_mask.empty()) return false;
+  const int x = static_cast<int>(std::floor(u));
+  const int y = static_cast<int>(std::floor(v));
+  if (x < 0 || y < 0 || x + 1 >= img.cols || y + 1 >= img.rows) return false;
+  if (valid_mask.at<uint8_t>(y, x) == 0 || valid_mask.at<uint8_t>(y, x + 1) == 0 ||
+      valid_mask.at<uint8_t>(y + 1, x) == 0 || valid_mask.at<uint8_t>(y + 1, x + 1) == 0)
+    return false;
+
+  const float dx = u - x;
+  const float dy = v - y;
+  const float top = (1.0f - dx) * img.at<float>(y, x) + dx * img.at<float>(y, x + 1);
+  const float bottom = (1.0f - dx) * img.at<float>(y + 1, x) + dx * img.at<float>(y + 1, x + 1);
+  value = (1.0f - dy) * top + dy * bottom;
+  return std::isfinite(value);
+}
+
+bool VIOManager::interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value) const
+{
+  if (!std::isfinite(u) || !std::isfinite(v) || img.empty() || img.type() != CV_32FC1) return false;
+
+  const int x = static_cast<int>(std::floor(u));
+  const int y = static_cast<int>(std::floor(v));
+  if (x < 0 || y < 0 || x + 1 >= img.cols || y + 1 >= img.rows) return false;
+
+  const float tl = img.at<float>(y, x);
+  const float tr = img.at<float>(y, x + 1);
+  const float bl = img.at<float>(y + 1, x);
+  const float br = img.at<float>(y + 1, x + 1);
+  if (!std::isfinite(tl) || !std::isfinite(tr) || !std::isfinite(bl) || !std::isfinite(br)) return false;
+
+  const float dx = u - x;
+  const float dy = v - y;
+  const float top = (1.0f - dx) * tl + dx * tr;
+  const float bottom = (1.0f - dx) * bl + dx * br;
+  value = (1.0f - dy) * top + dy * bottom;
+  return std::isfinite(value);
+}
+
+V2D VIOManager::virtualProject(const V3D &p_v) const
+{
+  if (!p_v.array().isFinite().all() || p_v[2] <= virtual_min_z)
+    return V2D::Constant(std::numeric_limits<double>::quiet_NaN());
+  return V2D(virtual_focal_length * p_v[0] / p_v[2] + virtual_support_radius,
+             virtual_focal_length * p_v[1] / p_v[2] + virtual_support_radius);
+}
+
+V3D VIOManager::virtualCam2World(const V2D &px_v) const
+{
+  V3D ray((px_v[0] - virtual_support_radius) / virtual_focal_length,
+          (px_v[1] - virtual_support_radius) / virtual_focal_length, 1.0);
+  return ray.normalized();
+}
+
+void VIOManager::computeVirtualProjectionJacobian(const V3D &p_v, MD(2, 3) &J) const
+{
+  const double z_inv = 1.0 / p_v[2];
+  const double z_inv_2 = z_inv * z_inv;
+  J << virtual_focal_length * z_inv, 0.0, -virtual_focal_length * p_v[0] * z_inv_2, 0.0,
+      virtual_focal_length * z_inv, -virtual_focal_length * p_v[1] * z_inv_2;
+}
+
+bool VIOManager::sampleVirtualCorePatch(const VirtualPatchImage &support, const V2D &center, int scale, float *patch) const
+{
+  if (!support.valid || patch == nullptr) return false;
+  for (int y = 0; y < patch_size; ++y)
+  {
+    for (int x = 0; x < patch_size; ++x)
+    {
+      const V2F offset = core_patch_offsets_[y * patch_size + x] * static_cast<float>(scale);
+      if (!interpolateVirtualFloat(support.values, support.valid_mask, center[0] + offset[0], center[1] + offset[1],
+                                   patch[y * patch_size + x]))
+        return false;
+    }
+  }
+  return true;
+}
+
+bool VIOManager::sampleVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px, int scale, float &value, V2D &gradient) const
+{
+  float left, right, up, down;
+  if (!interpolateVirtualFloat(support.values, support.valid_mask, px[0], px[1], value) ||
+      !interpolateVirtualFloat(support.values, support.valid_mask, px[0] - scale, px[1], left) ||
+      !interpolateVirtualFloat(support.values, support.valid_mask, px[0] + scale, px[1], right) ||
+      !interpolateVirtualFloat(support.values, support.valid_mask, px[0], px[1] - scale, up) ||
+      !interpolateVirtualFloat(support.values, support.valid_mask, px[0], px[1] + scale, down))
+    return false;
+  gradient << 0.5 * (right - left), 0.5 * (down - up);
+  return true;
+}
+
+bool VIOManager::sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V2D &px, int scale, float &value, V2D &gradient) const
+{
+  float left, right, up, down;
+  if (!interpolateStoredVirtualImage(img, px[0], px[1], value) ||
+      !interpolateStoredVirtualImage(img, px[0] - scale, px[1], left) ||
+      !interpolateStoredVirtualImage(img, px[0] + scale, px[1], right) ||
+      !interpolateStoredVirtualImage(img, px[0], px[1] - scale, up) ||
+      !interpolateStoredVirtualImage(img, px[0], px[1] + scale, down))
+    return false;
+  gradient << 0.5 * (right - left), 0.5 * (down - up);
+  return true;
+}
+
+bool VIOManager::createVirtualFeaturePatch(const cv::Mat &raw_img, const SE3<double> &T_c_w, const V3D &point_w, float *core_patch,
+                                           cv::Mat &virtual_support_img, SE3<double> &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const
+{
+  const V3D point_c = T_c_w * point_w;
+  V2D raw_center_px;
+  if (!projectRawFisheyeIfValid(point_c, 1, raw_center_px)) return false;
+  if (!buildVirtualFrameRotation(point_c, R_v_from_c, R_c_from_v)) return false;
+  T_v_w = composeVirtualPose(R_v_from_c, T_c_w);
+  VirtualPatchImage support;
+  support.T_v_w_seed = T_v_w;
+  if (!buildVirtualSupportPatch(raw_img, raw_center_px, R_v_from_c, R_c_from_v, support)) return false;
+  const V2D center(virtual_support_radius, virtual_support_radius);
+  if (!sampleVirtualCorePatch(support, center, 1, core_patch)) return false;
+
+  // Keep the complete immutable local virtual image for future warpAffineVirtual().
+  // cv::Mat assignment keeps the underlying storage alive through reference counting.
+  virtual_support_img = support.values;
+  return true;
+}
+
+bool VIOManager::getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
+                                            int halfpatch_size, Matrix2d &A_cur_ref) const
+{
+  if (xyz_ref[2] <= virtual_min_z) return false;
+  const V2D px_ref(virtual_support_radius, virtual_support_radius);
+  const double offset = halfpatch_size * (1 << level_ref) * (1 << pyramid_level);
+  V3D xyz_du_ref = virtualCam2World(px_ref + V2D(offset, 0.0));
+  V3D xyz_dv_ref = virtualCam2World(px_ref + V2D(0.0, offset));
+  xyz_du_ref *= xyz_ref[2] / xyz_du_ref[2];
+  xyz_dv_ref *= xyz_ref[2] / xyz_dv_ref[2];
+
+  const V3D xyz_cur = T_vcur_vref * xyz_ref;
+  const V3D xyz_du_cur = T_vcur_vref * xyz_du_ref;
+  const V3D xyz_dv_cur = T_vcur_vref * xyz_dv_ref;
+  if (xyz_cur[2] <= virtual_min_z || xyz_du_cur[2] <= virtual_min_z || xyz_dv_cur[2] <= virtual_min_z) return false;
+  const V2D px_cur = virtualProject(xyz_cur);
+  const V2D px_du = virtualProject(xyz_du_cur);
+  const V2D px_dv = virtualProject(xyz_dv_cur);
+  A_cur_ref.col(0) = (px_du - px_cur) / halfpatch_size;
+  A_cur_ref.col(1) = (px_dv - px_cur) / halfpatch_size;
+  return A_cur_ref.array().isFinite().all() && std::fabs(A_cur_ref.determinant()) > 1e-9;
+}
+
+bool VIOManager::getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_vcur_vref,
+                                                      int level_ref, Matrix2d &A_cur_ref) const
+{
+  const V3D t = T_vcur_vref.inverse().translation();
+  const M3D H_cur_ref =
+      T_vcur_vref.rotationMatrix() * (normal_ref.dot(xyz_ref) * M3D::Identity() - t * normal_ref.transpose());
+  const int halfpatch_size = 4;
+  const V2D px_ref(virtual_support_radius, virtual_support_radius);
+  const V3D f_ref = xyz_ref.normalized();
+  const V3D f_du_ref = virtualCam2World(px_ref + V2D(halfpatch_size * (1 << level_ref), 0.0));
+  const V3D f_dv_ref = virtualCam2World(px_ref + V2D(0.0, halfpatch_size * (1 << level_ref)));
+  const V3D f_cur = H_cur_ref * f_ref;
+  const V3D f_du_cur = H_cur_ref * f_du_ref;
+  const V3D f_dv_cur = H_cur_ref * f_dv_ref;
+  if (f_cur[2] <= virtual_min_z || f_du_cur[2] <= virtual_min_z || f_dv_cur[2] <= virtual_min_z) return false;
+  const V2D px_cur = virtualProject(f_cur);
+  const V2D px_du = virtualProject(f_du_cur);
+  const V2D px_dv = virtualProject(f_dv_cur);
+  A_cur_ref.col(0) = (px_du - px_cur) / halfpatch_size;
+  A_cur_ref.col(1) = (px_dv - px_cur) / halfpatch_size;
+  return A_cur_ref.array().isFinite().all() && std::fabs(A_cur_ref.determinant()) > 1e-9;
+}
+
+bool VIOManager::warpAffineVirtual(const Matrix2d &A_cur_ref, const cv::Mat &virtual_ref_img, int level_ref, int search_level,
+                                   int pyramid_level, int halfpatch_size, float *patch) const
+{
+  (void)level_ref;
+  if (virtual_ref_img.empty() || virtual_ref_img.type() != CV_32FC1 || std::fabs(A_cur_ref.determinant()) <= 1e-9) return false;
+  const Matrix2f A_ref_cur = A_cur_ref.inverse().cast<float>();
+  const int local_patch_size = halfpatch_size * 2;
+  const V2F center(virtual_support_radius, virtual_support_radius);
+  for (int y = 0; y < local_patch_size; ++y)
+  {
+    for (int x = 0; x < local_patch_size; ++x)
+    {
+      V2F offset(x - halfpatch_size, y - halfpatch_size);
+      offset *= static_cast<float>((1 << search_level) * (1 << pyramid_level));
+      const V2F px = A_ref_cur * offset + center;
+      float value;
+      if (!interpolateStoredVirtualImage(virtual_ref_img, px[0], px[1], value)) return false;
+      patch[patch_size_total * pyramid_level + y * local_patch_size + x] = value;
+    }
+  }
+  return true;
 }
 
 void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
@@ -351,8 +964,357 @@ double VIOManager::calculateNCC(float *ref_patch, float *cur_patch, int patch_si
   return numerator / sqrt(demoniator1 * demoniator2 + 1e-10);
 }
 
+void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWithVar> &pg,
+                                                    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
+{
+  visual_submap->reset();
+  total_points = 0;
+  if (feat_map.empty()) return;
+
+  sub_feat_map.clear();
+  rejected_virtual_support_oob_ = 0;
+  rejected_virtual_projection_invalid_ = 0;
+  rejected_virtual_z_ = 0;
+  rejected_virtual_affine_oob_ = 0;
+  build_virtual_support_time_ = 0.0;
+  virtual_affine_time_ = 0.0;
+
+  const float voxel_size = 0.5f;
+  cv::Mat range_img = cv::Mat::zeros(height, width, CV_32FC1);
+  int loc_xyz[3];
+
+  for (const auto &point : pg)
+  {
+    const V3D &pt_w = point.point_w;
+    for (int j = 0; j < 3; ++j) loc_xyz[j] = static_cast<int>(std::floor(pt_w[j] / voxel_size));
+    sub_feat_map[VOXEL_LOCATION(loc_xyz[0], loc_xyz[1], loc_xyz[2])] = 0;
+
+    const V3D pt_c = new_frame_->w2f(pt_w);
+    V2D px;
+    if (!projectRawFisheyeIfValid(pt_c, 1, px)) continue;
+    const int col = static_cast<int>(px[0]);
+    const int row = static_cast<int>(px[1]);
+    float &stored_range = range_img.at<float>(row, col);
+    const float range = static_cast<float>(pt_c.norm());
+    if (stored_range == 0.0f || range < stored_range) stored_range = range;
+  }
+
+  vector<VOXEL_LOCATION> delete_keys;
+  for (auto &sub_voxel : sub_feat_map)
+  {
+    auto map_voxel = feat_map.find(sub_voxel.first);
+    if (map_voxel == feat_map.end()) continue;
+
+    bool voxel_in_fov = false;
+    for (VisualPoint *pt : map_voxel->second->voxel_points)
+    {
+      if (pt == nullptr || pt->obs_.empty()) continue;
+      V2D raw_px;
+      if (!projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, raw_px)) continue;
+      const int grid_col = static_cast<int>(raw_px[0] / grid_size);
+      const int grid_row = static_cast<int>(raw_px[1] / grid_size);
+      if (grid_col < 0 || grid_col >= grid_n_width || grid_row < 0 || grid_row >= grid_n_height) continue;
+      const int index = grid_row * grid_n_width + grid_col;
+      voxel_in_fov = true;
+      grid_num[index] = TYPE_MAP;
+      const float cur_dist = static_cast<float>((new_frame_->pos() - pt->pos_).norm());
+      if (cur_dist <= map_dist[index])
+      {
+        map_dist[index] = cur_dist;
+        retrieve_voxel_points[index] = pt;
+      }
+    }
+    if (!voxel_in_fov) delete_keys.push_back(sub_voxel.first);
+  }
+
+  if (raycast_en)
+  {
+    for (int i = 0; i < length; ++i)
+    {
+      if (grid_num[i] == TYPE_MAP || border_flag[i] == 1) continue;
+      for (const V3D &sample_c : rays_with_sample_points[i])
+      {
+        const V3D sample_w = new_frame_->f2w(sample_c);
+        for (int j = 0; j < 3; ++j) loc_xyz[j] = static_cast<int>(std::floor(sample_w[j] / voxel_size));
+        const VOXEL_LOCATION sample_pos(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
+        if (sub_feat_map.find(sample_pos) != sub_feat_map.end()) break;
+
+        auto visual_voxel = feat_map.find(sample_pos);
+        if (visual_voxel != feat_map.end())
+        {
+          bool found = false;
+          for (VisualPoint *pt : visual_voxel->second->voxel_points)
+          {
+            if (pt == nullptr || pt->obs_.empty()) continue;
+            V2D raw_px;
+            if (!projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, raw_px)) continue;
+            const int grid_col = static_cast<int>(raw_px[0] / grid_size);
+            const int grid_row = static_cast<int>(raw_px[1] / grid_size);
+            if (grid_col < 0 || grid_col >= grid_n_width || grid_row < 0 || grid_row >= grid_n_height) continue;
+            const int index = grid_row * grid_n_width + grid_col;
+            grid_num[index] = TYPE_MAP;
+            const float cur_dist = static_cast<float>((new_frame_->pos() - pt->pos_).norm());
+            if (cur_dist <= map_dist[index])
+            {
+              map_dist[index] = cur_dist;
+              retrieve_voxel_points[index] = pt;
+            }
+            found = true;
+          }
+          if (found) sub_feat_map[sample_pos] = 0;
+          break;
+        }
+
+        auto plane_voxel = plane_map.find(sample_pos);
+        if (plane_voxel != plane_map.end())
+        {
+          VoxelOctoTree *octo = plane_voxel->second->find_correspond(sample_w);
+          if (octo->plane_ptr_->is_plane_)
+          {
+            pointWithVar plane_center;
+            plane_center.point_w = octo->plane_ptr_->center_;
+            plane_center.normal = octo->plane_ptr_->normal_;
+            visual_submap->add_from_voxel_map.push_back(plane_center);
+            break;
+          }
+        }
+      }
+    }
+  }
+  for (const auto &key : delete_keys) sub_feat_map.erase(key);
+
+  struct VirtualCandidate
+  {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    VisualPoint *point = nullptr;
+    Feature *reference = nullptr;
+    V3D point_c_seed = V3D::Zero();
+    V2D current_raw_center_px = V2D::Zero();
+  };
+  struct VirtualCandidateResult
+  {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    VirtualTrackPatch track;
+    vector<float> warped_reference;
+    float error = 0.0f;
+    double inverse_reference_exposure = 0.0;
+    double build_time = 0.0;
+    double affine_time = 0.0;
+    int rejection = 0;
+    bool valid = false;
+  };
+
+  vector<VirtualCandidate> candidates;
+  candidates.reserve(length);
+  for (int i = 0; i < length; ++i)
+  {
+    if (grid_num[i] != TYPE_MAP) continue;
+    VisualPoint *pt = retrieve_voxel_points[i];
+    if (pt == nullptr || !pt->is_normal_initialized_) continue;
+
+    V2D raw_px;
+    const V3D pt_c_seed = new_frame_->w2f(pt->pos_);
+    if (!projectRawFisheyeIfValid(pt_c_seed, 1, raw_px))
+    {
+      ++rejected_virtual_projection_invalid_;
+      continue;
+    }
+
+    bool range_discontinuous = false;
+    const double point_range = pt_c_seed.norm();
+    const int center_col = static_cast<int>(raw_px[0]);
+    const int center_row = static_cast<int>(raw_px[1]);
+    for (int dv = -patch_size_half; dv <= patch_size_half && !range_discontinuous; ++dv)
+    {
+      for (int du = -patch_size_half; du <= patch_size_half; ++du)
+      {
+        if (du == 0 && dv == 0) continue;
+        const int col = center_col + du;
+        const int row = center_row + dv;
+        if (col < 0 || col >= width || row < 0 || row >= height) continue;
+        const float range = range_img.at<float>(row, col);
+        if (range > 0.0f && std::fabs(point_range - range) > 0.5)
+        {
+          range_discontinuous = true;
+          break;
+        }
+      }
+    }
+    if (range_discontinuous) continue;
+
+    Feature *ref_ftr = nullptr;
+    if (normal_en)
+    {
+      if (pt->has_ref_patch_ && pt->ref_patch != nullptr && pt->ref_patch->virtual_patch_valid_)
+      {
+        ref_ftr = pt->ref_patch;
+      }
+      else
+      {
+        float minimum_error = std::numeric_limits<float>::max();
+        for (Feature *candidate_ref : pt->obs_)
+        {
+          if (candidate_ref == nullptr || !candidate_ref->virtual_patch_valid_) continue;
+          float error = 0.0f;
+          int comparisons = 0;
+          for (Feature *other : pt->obs_)
+          {
+            if (other == nullptr || other == candidate_ref || !other->virtual_patch_valid_) continue;
+            for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
+            {
+              const float residual = candidate_ref->patch_[patch_index] - other->patch_[patch_index];
+              error += residual * residual;
+            }
+            ++comparisons;
+          }
+          if (comparisons > 0) error /= comparisons;
+          if (error < minimum_error)
+          {
+            minimum_error = error;
+            ref_ftr = candidate_ref;
+          }
+        }
+        if (ref_ftr != nullptr)
+        {
+          pt->ref_patch = ref_ftr;
+          pt->has_ref_patch_ = true;
+        }
+      }
+    }
+    else if (!pt->getCloseViewObs(new_frame_->pos(), ref_ftr, raw_px))
+      continue;
+    if (ref_ftr == nullptr || !ref_ftr->virtual_patch_valid_) continue;
+
+    VirtualCandidate candidate;
+    candidate.point = pt;
+    candidate.reference = ref_ftr;
+    candidate.point_c_seed = pt_c_seed;
+    candidate.current_raw_center_px = raw_px;
+    candidates.push_back(candidate);
+  }
+
+  vector<VirtualCandidateResult> results(candidates.size());
+#ifdef MP_EN
+  omp_set_num_threads(MP_PROC_NUM);
+#pragma omp parallel for
+#endif
+  for (int candidate_index = 0; candidate_index < static_cast<int>(candidates.size()); ++candidate_index)
+  {
+    const VirtualCandidate &candidate = candidates[candidate_index];
+    VirtualCandidateResult &result = results[candidate_index];
+    VisualPoint *pt = candidate.point;
+    Feature *ref_ftr = candidate.reference;
+
+    if (!buildVirtualFrameRotation(candidate.point_c_seed, result.track.R_vcur_from_ccur_seed, result.track.R_ccur_from_vcur_seed))
+    {
+      result.rejection = 3;
+      continue;
+    }
+    result.track.T_vcur_w_seed = composeVirtualPose(result.track.R_vcur_from_ccur_seed, new_frame_->T_f_w_);
+    result.track.cur_support.T_v_w_seed = result.track.T_vcur_w_seed;
+
+    const double build_start = omp_get_wtime();
+    const bool supports_ok = buildVirtualSupportPatch(img, candidate.current_raw_center_px, result.track.R_vcur_from_ccur_seed,
+                                                      result.track.R_ccur_from_vcur_seed, result.track.cur_support);
+    result.build_time = omp_get_wtime() - build_start;
+    if (!supports_ok)
+    {
+      result.rejection = 1;
+      continue;
+    }
+
+    const SE3<double> T_vcur_vref = result.track.T_vcur_w_seed * ref_ftr->T_v_w_.inverse();
+    const V3D point_vref = ref_ftr->T_v_w_ * pt->pos_;
+    const double affine_start = omp_get_wtime();
+    bool affine_ok;
+    if (normal_en)
+    {
+      const V3D normal_vref = ref_ftr->T_v_w_.rotationMatrix() * pt->normal_;
+      affine_ok = getWarpMatrixAffineHomographyVirtual(point_vref, normal_vref, T_vcur_vref, ref_ftr->level_, result.track.A_cur_ref);
+    }
+    else
+    {
+      affine_ok = getWarpMatrixAffineVirtual(point_vref, T_vcur_vref, ref_ftr->level_, 0, patch_size_half, result.track.A_cur_ref);
+    }
+    result.affine_time = omp_get_wtime() - affine_start;
+    if (!affine_ok)
+    {
+      result.rejection = 2;
+      continue;
+    }
+    result.track.search_level = getBestSearchLevel(result.track.A_cur_ref, virtual_max_search_level);
+
+    result.warped_reference.assign(warp_len, 0.0f);
+    for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+    {
+      // [MODIFY] 使用第一次生成的参考 patch，不再每帧重构
+      if (!warpAffineVirtual(result.track.A_cur_ref, ref_ftr->img_, ref_ftr->level_, result.track.search_level, pyramid_level,
+                             patch_size_half, result.warped_reference.data()))
+      {
+        result.rejection = 4;
+        break;
+      }
+    }
+    if (result.rejection != 0) continue;
+
+    vector<float> current_core(patch_size_total);
+    const V3D point_vcur = result.track.T_vcur_w_seed * pt->pos_;
+    if (point_vcur[2] <= virtual_min_z ||
+        !sampleVirtualCorePatch(result.track.cur_support, virtualProject(point_vcur), 1, current_core.data()))
+    {
+      result.rejection = 1;
+      continue;
+    }
+
+    for (int k = 0; k < patch_size_total; ++k)
+    {
+      const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[k] - state->inv_expo_time * current_core[k];
+      result.error += residual * residual;
+    }
+    if (ncc_en && calculateNCC(result.warped_reference.data(), current_core.data(), patch_size_total) < ncc_thre) continue;
+    if (result.error > outlier_threshold * patch_size_total) continue;
+
+    result.inverse_reference_exposure = ref_ftr->inv_expo_time_;
+    result.track.valid = true;
+    result.valid = true;
+  }
+
+  for (int candidate_index = 0; candidate_index < static_cast<int>(candidates.size()); ++candidate_index)
+  {
+    VirtualCandidateResult &result = results[candidate_index];
+    build_virtual_support_time_ += result.build_time;
+    virtual_affine_time_ += result.affine_time;
+    if (!result.valid)
+    {
+      if (result.rejection == 1) ++rejected_virtual_support_oob_;
+      else if (result.rejection == 2) ++rejected_virtual_projection_invalid_;
+      else if (result.rejection == 3) ++rejected_virtual_z_;
+      else if (result.rejection == 4) ++rejected_virtual_affine_oob_;
+      continue;
+    }
+
+    visual_submap->voxel_points.push_back(candidates[candidate_index].point);
+    visual_submap->propa_errors.push_back(result.error);
+    visual_submap->search_levels.push_back(result.track.search_level);
+    visual_submap->errors.push_back(result.error);
+    visual_submap->warp_patch.push_back(std::move(result.warped_reference));
+    visual_submap->inv_expo_list.push_back(result.inverse_reference_exposure);
+    visual_submap->virtual_track_patches.push_back(std::move(result.track));
+  }
+
+  total_points = static_cast<int>(visual_submap->voxel_points.size());
+  printf("[ VIO Virtual ] Retrieve %d points, reject support=%d projection=%d z=%d affine=%d, build=%.6f s affine=%.6f s\n",
+         total_points, rejected_virtual_support_oob_, rejected_virtual_projection_invalid_, rejected_virtual_z_,
+         rejected_virtual_affine_oob_, build_virtual_support_time_, virtual_affine_time_);
+}
+
 void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
+  if (virtual_fisheye_patch_en)
+  {
+    retrieveFromVisualSparseMapVirtual(img, pg, plane_map);
+    return;
+  }
   if (feat_map.size() <= 0) return;
   double ts0 = omp_get_wtime();
 
@@ -803,8 +1765,84 @@ void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
   updateFrameState(*state);
 }
 
+void VIOManager::generateVisualMapPointsVirtual(cv::Mat img, vector<pointWithVar> &pg)
+{
+  if (pg.size() <= 10) return;
+
+  auto consider_candidate = [&](const pointWithVar &candidate) {
+    if (candidate.normal == V3D::Zero()) return;
+    V2D raw_px;
+    if (!projectRawFisheyeIfValid(new_frame_->w2f(candidate.point_w), border, raw_px)) return;
+    const int grid_col = static_cast<int>(raw_px[0] / grid_size);
+    const int grid_row = static_cast<int>(raw_px[1] / grid_size);
+    if (grid_col < 0 || grid_col >= grid_n_width || grid_row < 0 || grid_row >= grid_n_height) return;
+    const int index = grid_row * grid_n_width + grid_col;
+    if (grid_num[index] == TYPE_MAP) return;
+
+    const float score = vk::shiTomasiScore(img, raw_px[0], raw_px[1]);
+    if (!std::isfinite(score)) return;
+    if (score > scan_value[index])
+    {
+      scan_value[index] = score;
+      append_voxel_points[index] = candidate;
+      grid_num[index] = TYPE_POINTCLOUD;
+    }
+  };
+
+  for (const auto &candidate : pg) consider_candidate(candidate);
+  for (const auto &candidate : visual_submap->add_from_voxel_map) consider_candidate(candidate);
+
+  int add = 0;
+  for (int i = 0; i < length; ++i)
+  {
+    if (grid_num[i] != TYPE_POINTCLOUD) continue;
+    const pointWithVar &pt_var = append_voxel_points[i];
+    V2D raw_px;
+    if (!projectRawFisheyeIfValid(new_frame_->w2f(pt_var.point_w), 1, raw_px)) continue;
+
+    std::unique_ptr<float[]> patch(new float[patch_size_total]);
+    cv::Mat virtual_support_img;
+    SE3<double> T_v_w;
+    M3D R_v_from_c, R_c_from_v;
+    if (!createVirtualFeaturePatch(img, new_frame_->T_f_w_, pt_var.point_w, patch.get(), virtual_support_img, T_v_w, R_v_from_c,
+                                   R_c_from_v))
+    {
+      ++rejected_virtual_support_oob_;
+      continue;
+    }
+
+    VisualPoint *pt_new = new VisualPoint(pt_var.point_w);
+    const V3D bearing = cam->cam2world(raw_px);
+    Feature *ftr_new = new Feature(pt_new, patch.release(), raw_px, bearing, new_frame_->T_f_w_, 0);
+    // [MODIFY] 使用第一次生成的参考 patch，不再每帧重构
+    ftr_new->img_ = virtual_support_img;
+    ftr_new->id_ = new_frame_->id_;
+    ftr_new->inv_expo_time_ = state->inv_expo_time;
+    ftr_new->T_v_w_ = T_v_w;
+    ftr_new->R_v_from_c_ = R_v_from_c;
+    ftr_new->R_c_from_v_ = R_c_from_v;
+    ftr_new->virtual_patch_valid_ = true;
+
+    pt_new->addFrameRef(ftr_new);
+    pt_new->covariance_ = pt_var.var;
+    pt_new->is_normal_initialized_ = true;
+    const V3D dir = new_frame_->w2f(pt_var.point_w).normalized();
+    const V3D normal_c = new_frame_->T_f_w_.rotationMatrix() * pt_var.normal;
+    pt_new->normal_ = dir.dot(normal_c) < 0.0 ? -pt_var.normal : pt_var.normal;
+    pt_new->previous_normal_ = pt_new->normal_;
+    insertPointIntoVoxelMap(pt_new);
+    ++add;
+  }
+  printf("[ VIO Virtual ] Append %d new visual map points\n", add);
+}
+
 void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 {
+  if (virtual_fisheye_patch_en)
+  {
+    generateVisualMapPointsVirtual(img, pg);
+    return;
+  }
   if (pg.size() <= 10) return;
 
   // double t0 = omp_get_wtime();
@@ -907,8 +1945,74 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
   // printf("B2. : %.6lf \n", t_b2);
 }
 
+void VIOManager::updateVisualMapPointsVirtual(cv::Mat img)
+{
+  if (total_points == 0) return;
+
+  int update_num = 0;
+  const SE3<double> pose_cur = new_frame_->T_f_w_;
+  for (int i = 0; i < total_points; ++i)
+  {
+    VisualPoint *pt = visual_submap->voxel_points[i];
+    if (pt == nullptr) continue;
+    if (pt->is_converged_)
+    {
+      pt->deleteNonRefPatchFeatures();
+      continue;
+    }
+
+    V2D raw_px;
+    if (!projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, raw_px)) continue;
+    Feature *last_feature = pt->obs_.back();
+    bool add_flag = false;
+    const SE3<double> delta_pose = last_feature->T_f_w_ * pose_cur.inverse();
+    const double delta_p = delta_pose.translation().norm();
+    const double trace = delta_pose.rotationMatrix().trace();
+    const double delta_theta = trace > 3.0 - 1e-6 ? 0.0 : std::acos(std::clamp(0.5 * (trace - 1.0), -1.0, 1.0));
+    if (delta_p > 0.5 || delta_theta > 0.3 || (raw_px - last_feature->px_).norm() > 40.0) add_flag = true;
+
+    if (pt->obs_.size() >= 30)
+    {
+      Feature *ref_ftr;
+      pt->findMinScoreFeature(new_frame_->pos(), ref_ftr);
+      pt->deleteFeatureRef(ref_ftr);
+    }
+    if (!add_flag) continue;
+
+    std::unique_ptr<float[]> patch(new float[patch_size_total]);
+    cv::Mat virtual_support_img;
+    SE3<double> T_v_w;
+    M3D R_v_from_c, R_c_from_v;
+    if (!createVirtualFeaturePatch(img, new_frame_->T_f_w_, pt->pos_, patch.get(), virtual_support_img, T_v_w, R_v_from_c, R_c_from_v))
+    {
+      ++rejected_virtual_support_oob_;
+      continue;
+    }
+
+    const V3D bearing = cam->cam2world(raw_px);
+    Feature *ftr_new = new Feature(pt, patch.release(), raw_px, bearing, new_frame_->T_f_w_, visual_submap->search_levels[i]);
+    // [MODIFY] 使用第一次生成的参考 patch，不再每帧重构
+    ftr_new->img_ = virtual_support_img;
+    ftr_new->id_ = new_frame_->id_;
+    ftr_new->inv_expo_time_ = state->inv_expo_time;
+    ftr_new->T_v_w_ = T_v_w;
+    ftr_new->R_v_from_c_ = R_v_from_c;
+    ftr_new->R_c_from_v_ = R_c_from_v;
+    ftr_new->virtual_patch_valid_ = true;
+    pt->addFrameRef(ftr_new);
+    update_flag[i] = 1;
+    ++update_num;
+  }
+  printf("[ VIO Virtual ] Update %d points in visual submap\n", update_num);
+}
+
 void VIOManager::updateVisualMapPoints(cv::Mat img)
 {
+  if (virtual_fisheye_patch_en)
+  {
+    updateVisualMapPointsVirtual(img);
+    return;
+  }
   if (total_points == 0) return;
 
   int update_num = 0;
@@ -1103,6 +2207,16 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
 
 void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
+  if (virtual_fisheye_patch_en)
+  {
+    static bool warned = false;
+    if (!warned)
+    {
+      printf("[ VIO Virtual ] projectPatchFromRefToCur raw-coordinate debug output is disabled in virtual patch mode.\n");
+      warned = true;
+    }
+    return;
+  }
   if (total_points == 0) return;
   // if(new_frame_->id_ != 2) return; //124
 
@@ -1326,8 +2440,57 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
   cv::imwrite(dir + std::to_string(new_frame_->id_) + "_0_" + "normal" + ".png", ref_cur_combine_normal);
 }
 
+void VIOManager::precomputeReferencePatchesVirtual(int level)
+{
+  if (total_points == 0) return;
+  const int H_DIM = total_points * patch_size_total;
+  H_sub_inv.resize(H_DIM, 6);
+  H_sub_inv.setZero();
+
+  for (int i = 0; i < total_points; ++i)
+  {
+    VisualPoint *pt = visual_submap->voxel_points[i];
+    if (pt == nullptr || pt->ref_patch == nullptr || !pt->ref_patch->virtual_patch_valid_) continue;
+    if (i >= static_cast<int>(visual_submap->virtual_track_patches.size())) continue;
+
+    const V3D point_vref = pt->ref_patch->T_v_w_ * pt->pos_;
+    if (point_vref[2] <= virtual_min_z) continue;
+    const V2D center = virtualProject(point_vref);
+    MD(2, 3) Jdpi;
+    computeVirtualProjectionJacobian(point_vref, Jdpi);
+    const M3D R_vref_w = pt->ref_patch->T_v_w_.rotationMatrix();
+    M3D p_w_hat;
+    p_w_hat << SKEW_SYM_MATRX(pt->pos_);
+    const int scale = 1 << level;
+
+    for (int y = 0; y < patch_size; ++y)
+    {
+      for (int x = 0; x < patch_size; ++x)
+      {
+        const int patch_index = y * patch_size + x;
+        const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
+        float value;
+        V2D gradient;
+        // [MODIFY] 使用第一次生成的参考 patch，不再每帧重构
+        if (!sampleStoredVirtualValueAndGradient(pt->ref_patch->img_, center + offset.cast<double>(), scale, value, gradient)) continue;
+        MD(1, 2) Jimg;
+        Jimg << gradient[0] / scale, gradient[1] / scale;
+        const MD(1, 3) JdR = Jimg * Jdpi * R_vref_w * p_w_hat;
+        const MD(1, 3) Jdt = -Jimg * Jdpi * R_vref_w;
+        H_sub_inv.block<1, 6>(i * patch_size_total + patch_index, 0) << JdR, Jdt;
+      }
+    }
+  }
+  has_ref_patch_cache = true;
+}
+
 void VIOManager::precomputeReferencePatches(int level)
 {
+  if (virtual_fisheye_patch_en)
+  {
+    precomputeReferencePatchesVirtual(level);
+    return;
+  }
   double t1 = omp_get_wtime();
   if (total_points == 0) return;
   MD(1, 2) Jimg;
@@ -1397,8 +2560,129 @@ void VIOManager::precomputeReferencePatches(int level)
   has_ref_patch_cache = true;
 }
 
+void VIOManager::updateStateInverseVirtual(cv::Mat img, int level)
+{
+  (void)img;
+  if (total_points == 0) return;
+  StatesGroup old_state = *state;
+  const int H_DIM = total_points * patch_size_total;
+  VectorXd z(H_DIM);
+  MatrixXd H_sub(H_DIM, 6);
+  bool EKF_end = false;
+  float last_error = std::numeric_limits<float>::max();
+  compute_jacobian_time = update_ekf_time = 0.0;
+
+  for (int iteration = 0; iteration < max_iterations; ++iteration)
+  {
+    const double t1 = omp_get_wtime();
+    if (!has_ref_patch_cache) precomputeReferencePatchesVirtual(level);
+    z.setZero();
+    H_sub.setZero();
+
+    M3D Rwi(state->rot_end);
+    const V3D Pwi(state->pos_end);
+    M3D P_wi_hat;
+    P_wi_hat << SKEW_SYM_MATRX(Pwi);
+    Rcw = Rci * Rwi.transpose();
+    Pcw = -Rci * Rwi.transpose() * Pwi + Pci;
+
+    int n_meas = 0;
+    double error = 0.0;
+    for (int i = 0; i < total_points; ++i)
+    {
+      VisualPoint *pt = visual_submap->voxel_points[i];
+      if (pt == nullptr || i >= static_cast<int>(visual_submap->virtual_track_patches.size())) continue;
+      const VirtualTrackPatch &track = visual_submap->virtual_track_patches[i];
+      const V3D point_c = Rcw * pt->pos_ + Pcw;
+      const V3D point_v = track.R_vcur_from_ccur_seed * point_c;
+      if (point_v[2] <= virtual_min_z)
+      {
+        ++rejected_virtual_z_;
+        continue;
+      }
+      const V2D center = virtualProject(point_v);
+      const int scale = 1 << level;
+
+      vector<float> current_values(patch_size_total);
+      bool patch_valid = true;
+      for (int y = 0; y < patch_size && patch_valid; ++y)
+      {
+        for (int x = 0; x < patch_size; ++x)
+        {
+          const int patch_index = y * patch_size + x;
+          const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
+          if (!interpolateVirtualFloat(track.cur_support.values, track.cur_support.valid_mask, center[0] + offset[0],
+                                       center[1] + offset[1], current_values[patch_index]))
+          {
+            patch_valid = false;
+            break;
+          }
+        }
+      }
+      if (!patch_valid)
+      {
+        ++rejected_virtual_support_oob_;
+        continue;
+      }
+
+      double patch_error = 0.0;
+      const vector<float> &reference = visual_submap->warp_patch[i];
+      for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
+      {
+        const int row = i * patch_size_total + patch_index;
+        const double residual = current_values[patch_index] - reference[patch_size_total * level + patch_index];
+        z(row) = residual;
+        patch_error += residual * residual;
+        const MD(1, 3) J_dR = H_sub_inv.block<1, 3>(row, 0);
+        const MD(1, 3) J_dt = H_sub_inv.block<1, 3>(row, 3);
+        const MD(1, 3) JdR = J_dR * Rwi + J_dt * P_wi_hat * Rwi;
+        const MD(1, 3) Jdt = J_dt * Rwi;
+        H_sub.block<1, 6>(row, 0) << JdR, Jdt;
+      }
+      visual_submap->errors[i] = patch_error;
+      error += patch_error;
+      n_meas += patch_size_total;
+    }
+    if (n_meas == 0) return;
+    error /= n_meas;
+    compute_jacobian_time += omp_get_wtime() - t1;
+
+    const double t3 = omp_get_wtime();
+    if (error <= last_error)
+    {
+      old_state = *state;
+      last_error = static_cast<float>(error);
+      const auto H_sub_T = H_sub.transpose();
+      H_T_H.setZero();
+      G.setZero();
+      H_T_H.block<6, 6>(0, 0) = H_sub_T * H_sub;
+      const MD(DIM_STATE, DIM_STATE) K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
+      const auto HTz = H_sub_T * z;
+      const MD(DIM_STATE, 1) vec = *state_propagat - *state;
+      G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
+      const MD(DIM_STATE, 1) solution =
+          -K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
+      *state += solution;
+      if (solution.block<3, 1>(0, 0).norm() * 57.3f < 0.001f && solution.block<3, 1>(3, 0).norm() * 100.0f < 0.001f)
+        EKF_end = true;
+    }
+    else
+    {
+      *state = old_state;
+      EKF_end = true;
+    }
+    update_ekf_time += omp_get_wtime() - t3;
+    if (EKF_end) break;
+  }
+}
+
 void VIOManager::updateStateInverse(cv::Mat img, int level)
 {
+  if (virtual_fisheye_patch_en)
+  {
+    updateStateInverseVirtual(img, level);
+    return;
+  }
   if (total_points == 0) return;
   StatesGroup old_state = (*state);
   V2D pc;
@@ -1519,8 +2803,139 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
   }
 }
 
+void VIOManager::updateStateVirtual(cv::Mat img, int level)
+{
+  (void)img;
+  if (total_points == 0) return;
+  StatesGroup old_state = *state;
+  const int H_DIM = total_points * patch_size_total;
+  VectorXd z(H_DIM);
+  MatrixXd H_sub(H_DIM, 7);
+  bool EKF_end = false;
+  float last_error = std::numeric_limits<float>::max();
+
+  for (int iteration = 0; iteration < max_iterations; ++iteration)
+  {
+    const double t1 = omp_get_wtime();
+    z.setZero();
+    H_sub.setZero();
+
+    M3D Rwi(state->rot_end);
+    const V3D Pwi(state->pos_end);
+    Rcw = Rci * Rwi.transpose();
+    Pcw = -Rci * Rwi.transpose() * Pwi + Pci;
+    Jdp_dt = Rci * Rwi.transpose();
+
+    double error = 0.0;
+    int n_meas = 0;
+#ifdef MP_EN
+    omp_set_num_threads(MP_PROC_NUM);
+#pragma omp parallel for reduction(+ : error, n_meas)
+#endif
+    for (int i = 0; i < total_points; ++i)
+    {
+      VisualPoint *pt = visual_submap->voxel_points[i];
+      if (pt == nullptr || i >= static_cast<int>(visual_submap->virtual_track_patches.size())) continue;
+      const VirtualTrackPatch &track = visual_submap->virtual_track_patches[i];
+      const V3D point_c = Rcw * pt->pos_ + Pcw;
+      const V3D point_v = track.R_vcur_from_ccur_seed * point_c;
+      if (point_v[2] <= virtual_min_z) continue;
+      const V2D center = virtualProject(point_v);
+      const int search_level = visual_submap->search_levels[i];
+      const int pyramid_level = level + search_level;
+      const int scale = 1 << pyramid_level;
+      const double inv_scale = 1.0 / scale;
+
+      vector<float> current_values(patch_size_total);
+      vector<V2D> gradients(patch_size_total);
+      bool patch_valid = true;
+      for (int y = 0; y < patch_size && patch_valid; ++y)
+      {
+        for (int x = 0; x < patch_size; ++x)
+        {
+          const int patch_index = y * patch_size + x;
+          const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
+          if (!sampleVirtualValueAndGradient(track.cur_support, center + offset.cast<double>(), scale, current_values[patch_index],
+                                             gradients[patch_index]))
+          {
+            patch_valid = false;
+            break;
+          }
+        }
+      }
+      if (!patch_valid) continue;
+
+      MD(2, 3) Jdpi;
+      computeVirtualProjectionJacobian(point_v, Jdpi);
+      M3D point_c_hat;
+      point_c_hat << SKEW_SYM_MATRX(point_c);
+      const vector<float> &reference = visual_submap->warp_patch[i];
+      const double inv_ref_expo = visual_submap->inv_expo_list[i];
+      double patch_error = 0.0;
+
+      for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
+      {
+        MD(1, 2) Jimg;
+        Jimg << gradients[patch_index][0], gradients[patch_index][1];
+        Jimg *= state->inv_expo_time * inv_scale;
+        const MD(1, 3) Jimg_Jpi_R = Jimg * Jdpi * track.R_vcur_from_ccur_seed;
+        const MD(1, 3) Jdphi = Jimg_Jpi_R * point_c_hat;
+        const MD(1, 3) Jdp = -Jimg_Jpi_R;
+        const MD(1, 3) JdR = Jdphi * Jdphi_dR + Jdp * Jdp_dR;
+        const MD(1, 3) Jdt = Jdp * Jdp_dt;
+        const double cur_value = current_values[patch_index];
+        const double residual =
+            state->inv_expo_time * cur_value - inv_ref_expo * reference[patch_size_total * level + patch_index];
+        const int row = i * patch_size_total + patch_index;
+        z(row) = residual;
+        if (exposure_estimate_en) H_sub.block<1, 7>(row, 0) << JdR, Jdt, cur_value;
+        else H_sub.block<1, 6>(row, 0) << JdR, Jdt;
+        patch_error += residual * residual;
+      }
+      visual_submap->errors[i] = patch_error;
+      error += patch_error;
+      n_meas += patch_size_total;
+    }
+    if (n_meas == 0) return;
+    error /= n_meas;
+    compute_jacobian_time += omp_get_wtime() - t1;
+
+    const double t3 = omp_get_wtime();
+    if (error <= last_error)
+    {
+      old_state = *state;
+      last_error = static_cast<float>(error);
+      const auto H_sub_T = H_sub.transpose();
+      H_T_H.setZero();
+      G.setZero();
+      H_T_H.block<7, 7>(0, 0) = H_sub_T * H_sub;
+      const MD(DIM_STATE, DIM_STATE) K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
+      const auto HTz = H_sub_T * z;
+      const MD(DIM_STATE, 1) vec = *state_propagat - *state;
+      G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
+      const MD(DIM_STATE, 1) solution =
+          -K_1.block<DIM_STATE, 7>(0, 0) * HTz + vec - G.block<DIM_STATE, 7>(0, 0) * vec.block<7, 1>(0, 0);
+      *state += solution;
+      if (solution.block<3, 1>(0, 0).norm() * 57.3f < 0.001f && solution.block<3, 1>(3, 0).norm() * 100.0f < 0.001f)
+        EKF_end = true;
+    }
+    else
+    {
+      *state = old_state;
+      EKF_end = true;
+    }
+    update_ekf_time += omp_get_wtime() - t3;
+    if (EKF_end) break;
+  }
+}
+
 void VIOManager::updateState(cv::Mat img, int level)
 {
+  if (virtual_fisheye_patch_en)
+  {
+    updateStateVirtual(img, level);
+    return;
+  }
   if (total_points == 0) return;
   StatesGroup old_state = (*state);
 
@@ -1722,7 +3137,15 @@ void VIOManager::plotTrackedPoints()
   for (int i = 0; i < total_points; i++)
   {
     VisualPoint *pt = visual_submap->voxel_points[i];
-    V2D pc(new_frame_->w2c(pt->pos_));
+    V2D pc;
+    if (virtual_fisheye_patch_en)
+    {
+      if (!projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, pc)) continue;
+    }
+    else
+    {
+      pc = new_frame_->w2c(pt->pos_);
+    }
 
     if (visual_submap->errors[i] <= visual_submap->propa_errors[i])
     {
@@ -1763,6 +3186,12 @@ V3F VIOManager::getInterpolatedPixel(cv::Mat img, V2D pc)
 
 void VIOManager::dumpDataForColmap()
 {
+  if (pinhole_cam == nullptr)
+  {
+    colmap_output_en = false;
+    printf("[ VIO ] COLMAP output disabled: pinhole camera conversion is unavailable.\n");
+    return;
+  }
   static int cnt = 1;
   std::ostringstream ss;
   ss << std::setw(5) << std::setfill('0') << cnt;
@@ -1877,7 +3306,16 @@ bool VIOManager::triangulateOpticalFlowTrack(OpticalFlowTrack &track)
   for (const auto &obs : track.observations)
   {
     V3D point_c = obs.T_f_w * point_w;
-    if (point_c[2] <= 0.05 || !point_c.array().isFinite().all()) return false;
+    if (!point_c.array().isFinite().all()) return false;
+    if (virtual_fisheye_patch_en)
+    {
+      V2D raw_px;
+      if (!projectRawFisheyeIfValid(point_c, 1, raw_px)) return false;
+    }
+    else if (point_c[2] <= 0.05)
+    {
+      return false;
+    }
   }
 
   track.point_w = point_w;
