@@ -43,7 +43,7 @@ imu:
   # LIO 中陀螺仪协方差缩放系数。
   gyr_cov: 0.3
   # LIO 中加速度计协方差缩放系数。
-  acc_cov: 0.5
+  acc_cov: 0.3
   # IMU 初始化使用的积分帧数。
   imu_int_frame: 30
   # 是否在线估计重力方向。
@@ -89,14 +89,14 @@ map:
   # LIO 最小迭代次数，过小会影响收敛稳定性。
   min_iterations: 5
   # 是否启用局部地图滑窗更新。
-  sliding_enable: 0
+  sliding_enable: 1
   # 局部地图半径 [m]。
   half_map_size: 100
   # 超过该位移触发地图滑动 [m]。
   sliding_thresh: 8.0
   # 1: LIVO模式下当前scan先只参与LIO注册，等VIO/local BA完成后再写入local voxel map。
   # 0: 保持原FAST-LIVO2风格，在LIO注册后立即写入地图。
-  update_after_vio: 1
+  update_after_vio: 0
   # VIO未初始化、优化失败或位姿门限拒绝时的回退策略：
   # "lio": 用同帧LIO位姿写图，避免地图冻结；"skip": 跳过该帧写图。
   update_after_vio_fallback: "lio"
@@ -115,7 +115,7 @@ vision:
   # 目标图像宽度 [pixel]；系统会在必要时对图像做 resize。
   image_width: 640
   # 特征点最大数量；过大会影响前端与优化速度。
-  max_cnt: 250
+  max_cnt: 300
   # 特征点最小像素间距；用于均匀化分布。
   min_dist: 30
   # 鱼眼遮罩图路径；空字符串表示不启用。
@@ -127,7 +127,7 @@ vision:
   # 是否启用多线程 VIO 后端。
   multiple_thread: 0
   # 视觉后端最大求解时间 [s]。
-  max_solver_time: 0.04
+  max_solver_time: 0.1
   # 视觉后端最大迭代次数。
   max_num_iterations: 5
   # 关键帧视差阈值（像素尺度）；越大越不易选关键帧。
@@ -138,14 +138,16 @@ vision:
   lidar_depth_enable: 1
   # 是否将 LiDAR 先验点注入 VIO 优化。
   lidar_prior_feature_enable: 1
+  # 1: 前端只跟踪 LiDAR 先验点，后端只优化 LiDAR-depth tracks。
+  only_lidar_depth_features: 1
   # 是否优化 LiDAR 先验点的逆深度；关闭则固定先验深度。
   optimize_lidar_inv_depth: 1
   # 0: LocalVoxelMap assisted depth, 1: current scan, 2: disabled.
   lidar_depth_source: 1
-  visual_feature_depth_prior_enable: 1
+  visual_feature_depth_prior_enable: 0
   voxel_raycast_enable: 1
   # 每帧最多使用的 LiDAR 先验点数量。
-  max_lidar_features: 250
+  max_lidar_features: 300
   # 最小 LiDAR 深度 [m]；小于该值不参与视觉先验。
   min_lidar_depth: 0.8
   # 最大 LiDAR 深度 [m]；大于该值不参与视觉先验。
@@ -160,7 +162,7 @@ vision:
   lidar_mask_radius: 20.0
   lidar_depth_grid_rows: 12
   lidar_depth_grid_cols: 16
-  max_lidar_depth_ratio: 0.6
+  max_lidar_depth_ratio: 0.4
   depth_search_radius: 8.0
   visual_depth_min_track_cnt: 2
   max_depth_update_features: 250
@@ -173,9 +175,9 @@ vision:
   # LIO 位姿先验重投影门限 [pixel]。
   lio_prior_reproj_threshold: 3.0
   # LiDAR 深度先验标准差 [m]。
-  lidar_depth_std: 0.10
+  lidar_depth_std: 1.0e-10
   # 逆深度先验方差下限 [1/m^2]。
-  min_inv_depth_var: 1.0e-6
+  min_inv_depth_var: 1.0e-10
   # LIO 位姿先验方差下限 [rad^2 或 m^2]。
   min_lio_pose_prior_var: 1.0e-15
 extrinsic:

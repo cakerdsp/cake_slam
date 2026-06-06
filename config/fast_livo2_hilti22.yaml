@@ -87,6 +87,7 @@ vision:
   estimate_extrinsic: 0
   lidar_depth_enable: 1
   lidar_prior_feature_enable: 1
+  only_lidar_depth_features: 0
   optimize_lidar_inv_depth: 1
   # 0: LocalVoxelMap assisted depth, 1: current scan, 2: disabled.
   lidar_depth_source: 1

@@ -1262,11 +1262,12 @@ void SlamNode::loadExtrinsicsForMain()
             camera_to_imu_R_(1, 0), camera_to_imu_R_(1, 1), camera_to_imu_R_(1, 2),
             camera_to_imu_R_(2, 0), camera_to_imu_R_(2, 1), camera_to_imu_R_(2, 2),
             camera_to_imu_t_.x(), camera_to_imu_t_.y(), camera_to_imu_t_.z());
-  CAKE_INFO("Image config: topic=%s target=%dx%d image_time_offset=%.6f td=%.6f cam0_calib=%s lidar_depth_source=%d lidar_prior_feature_enable=%d visual_depth_prior=%d",
+  CAKE_INFO("Image config: topic=%s target=%dx%d image_time_offset=%.6f td=%.6f cam0_calib=%s lidar_depth_source=%d lidar_prior_feature_enable=%d only_lidar_depth_features=%d visual_depth_prior=%d",
             config_.vision.image_topic.c_str(), config_.vision.image_width, config_.vision.image_height,
             config_.common.image_time_offset, config_.time_offset.td, config_.vision.cam0_calib.c_str(),
             config_.vision.lidar_depth_source,
             config_.vision.lidar_prior_feature_enable ? 1 : 0,
+            config_.vision.only_lidar_depth_features ? 1 : 0,
             config_.vision.visual_feature_depth_prior_enable ? 1 : 0);
 }
 

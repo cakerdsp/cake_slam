@@ -14,13 +14,6 @@
 #include "cake_slam/common_lib.h"
 #include "cake_slam/vision/estimator/parameters.h"
 
-// Experimental depth-isolation switch:
-// 0: optimize both triangulated visual-only points and LiDAR-depth points.
-// 1: keep tracking/triangulation, but exclude visual-only points from Ceres.
-#ifndef ONLY_USE_LIDAR_DEPTH
-#define ONLY_USE_LIDAR_DEPTH 0
-#endif
-
 // 特征的结束帧号 = 起始帧号 + 观测长度 - 1。
 int FeaturePerId::endFrame()
 {
@@ -34,10 +27,8 @@ int FeaturePerId::minObservationCountForOptimization() const
 
 bool FeaturePerId::isUsableForOptimization() const
 {
-#if ONLY_USE_LIDAR_DEPTH
-    if (!has_lidar_depth_prior)
+    if (ONLY_LIDAR_DEPTH_FEATURES && !has_lidar_depth_prior)
         return false;
-#endif
     return used_num >= minObservationCountForOptimization();
 }
 

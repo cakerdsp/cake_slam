@@ -110,6 +110,7 @@ struct VisionConfig
 
   bool lidar_depth_enable = true;          ///< Enable LiDAR/local-map depth assistance for VIO.
   bool lidar_prior_feature_enable = true;  ///< Insert LiDAR/local-map depth points as new visual tracks.
+  bool only_lidar_depth_features = false;  ///< Track/optimize only features with LiDAR depth priors.
   bool optimize_lidar_inv_depth = true;    ///< Optimize inverse depth for tracks with LiDAR/local-map priors.
   int lidar_depth_source = 1;              ///< 0 local voxel map, 1 current scan, 2 disabled.
   bool visual_feature_depth_prior_enable = false; ///< Attach map/scan depth priors to stable Shi-Tomasi tracks.

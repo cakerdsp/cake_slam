@@ -373,6 +373,16 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
         reduceVector(ids, status);
         reduceVector(track_cnt, status);
         pruneLidarTracks();
+        if (ONLY_LIDAR_DEPTH_FEATURES)
+        {
+            vector<uchar> lidar_status(ids.size(), 0);
+            for (size_t i = 0; i < ids.size(); ++i)
+                lidar_status[i] = active_lidar_priors.find(ids[i]) != active_lidar_priors.end() ? 1 : 0;
+            reduceVector(cur_pts, lidar_status);
+            reduceVector(ids, lidar_status);
+            reduceVector(track_cnt, lidar_status);
+            pruneLidarTracks();
+        }
         last_timing.reduce_ms = t_reduce.toc();
         last_tracked_after_flow_count = static_cast<int>(cur_pts.size());
         last_timing.after_flow_tracks = last_tracked_after_flow_count;
@@ -416,8 +426,12 @@ std::map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::tr
             n_max_cnt = MAX_CNT - static_cast<int>(cur_pts.size());
             ROS_DEBUG("add LiDAR visual candidates: %d", added_lidar);
         }
-        last_timing.requested_visual = std::max(0, n_max_cnt);
-        if(!USE_GPU)
+        last_timing.requested_visual = ONLY_LIDAR_DEPTH_FEATURES ? 0 : std::max(0, n_max_cnt);
+        if (ONLY_LIDAR_DEPTH_FEATURES)
+        {
+            n_pts.clear();
+        }
+        else if(!USE_GPU)
         {
             if (n_max_cnt > 0)
             {

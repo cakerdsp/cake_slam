@@ -162,6 +162,7 @@ bool LoadConfig(const std::string &path, Config &config)
   readIfPresent(fs, "vision.image_width", config.vision.image_width);
   readIfPresent(fs, "vision.lidar_depth_enable", config.vision.lidar_depth_enable);
   readIfPresent(fs, "vision.lidar_prior_feature_enable", config.vision.lidar_prior_feature_enable);
+  readIfPresent(fs, "vision.only_lidar_depth_features", config.vision.only_lidar_depth_features);
   readIfPresent(fs, "vision.optimize_lidar_inv_depth", config.vision.optimize_lidar_inv_depth);
   readIfPresent(fs, "vision.lidar_depth_source", config.vision.lidar_depth_source);
   readIfPresent(fs, "vision.visual_feature_depth_prior_enable", config.vision.visual_feature_depth_prior_enable);
