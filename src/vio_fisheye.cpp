@@ -25,10 +25,11 @@ struct VirtualPatchWorkspace
   std::vector<uint8_t> touched_flag;
 };
 
-static VirtualPatchWorkspace workspace;
+extern VirtualPatchWorkspace workspace;
 #ifdef _OPENMP
 #pragma omp threadprivate(workspace)
 #endif
+VirtualPatchWorkspace workspace;
 
 void clearVirtualPatchWorkspaceTouched(VirtualPatchWorkspace &workspace)
 {
