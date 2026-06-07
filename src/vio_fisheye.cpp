@@ -981,8 +981,24 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   virtual_result_collect_time_ = 0.0;
   virtual_warp_time_ = 0.0;
   virtual_current_core_time_ = 0.0;
+  virtual_map_grid_count_ = 0;
+  virtual_candidate_null_count_ = 0;
+  virtual_candidate_normal_uninit_count_ = 0;
+  virtual_candidate_projection_fail_count_ = 0;
+  virtual_candidate_range_reject_count_ = 0;
+  virtual_candidate_close_view_fail_count_ = 0;
+  virtual_candidate_ref_missing_count_ = 0;
+  virtual_candidate_ref_invalid_count_ = 0;
   virtual_candidate_count_ = 0;
   virtual_valid_track_count_ = 0;
+  virtual_track_rotation_fail_count_ = 0;
+  virtual_track_support_fail_count_ = 0;
+  virtual_track_affine_fail_count_ = 0;
+  virtual_track_warp_fail_count_ = 0;
+  virtual_track_current_z_fail_count_ = 0;
+  virtual_track_current_core_fail_count_ = 0;
+  virtual_track_ncc_reject_count_ = 0;
+  virtual_track_photometric_reject_count_ = 0;
   if (feat_map.empty()) return;
 
   const double candidate_select_start = omp_get_wtime();
@@ -1100,6 +1116,18 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     V3D point_c_seed = V3D::Zero();
     V2D current_raw_center_px = V2D::Zero();
   };
+  enum VirtualRejectReason
+  {
+    VIRTUAL_REJECT_NONE = 0,
+    VIRTUAL_REJECT_ROTATION,
+    VIRTUAL_REJECT_SUPPORT_BUILD,
+    VIRTUAL_REJECT_AFFINE_MATRIX,
+    VIRTUAL_REJECT_REFERENCE_WARP,
+    VIRTUAL_REJECT_CURRENT_Z,
+    VIRTUAL_REJECT_CURRENT_CORE,
+    VIRTUAL_REJECT_NCC,
+    VIRTUAL_REJECT_PHOTOMETRIC
+  };
   struct VirtualCandidateResult
   {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -1111,6 +1139,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     double affine_time = 0.0;
     double warp_time = 0.0;
     double current_core_time = 0.0;
+    int search_level = -1;
+    int warp_fail_pyramid_level = -1;
     int rejection = 0;
     bool valid = false;
   };
@@ -1120,14 +1150,24 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   for (int i = 0; i < length; ++i)
   {
     if (grid_num[i] != TYPE_MAP) continue;
+    ++virtual_map_grid_count_;
     VisualPoint *pt = retrieve_voxel_points[i];
-    if (pt == nullptr || !pt->is_normal_initialized_) continue;
+    if (pt == nullptr)
+    {
+      ++virtual_candidate_null_count_;
+      continue;
+    }
+    if (!pt->is_normal_initialized_)
+    {
+      ++virtual_candidate_normal_uninit_count_;
+      continue;
+    }
 
     V2D raw_px;
     const V3D pt_c_seed = new_frame_->w2f(pt->pos_);
     if (!projectRawFisheyeIfValid(pt_c_seed, 1, raw_px))
     {
-      ++rejected_virtual_projection_invalid_;
+      ++virtual_candidate_projection_fail_count_;
       continue;
     }
 
@@ -1151,7 +1191,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
         }
       }
     }
-    if (range_discontinuous) continue;
+    if (range_discontinuous)
+    {
+      ++virtual_candidate_range_reject_count_;
+      continue;
+    }
 
     Feature *ref_ftr = nullptr;
     if (normal_en)
@@ -1193,8 +1237,20 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
       }
     }
     else if (!pt->getCloseViewObs(new_frame_->pos(), ref_ftr, raw_px))
+    {
+      ++virtual_candidate_close_view_fail_count_;
       continue;
-    if (ref_ftr == nullptr || !ref_ftr->virtual_patch_valid_) continue;
+    }
+    if (ref_ftr == nullptr)
+    {
+      ++virtual_candidate_ref_missing_count_;
+      continue;
+    }
+    if (!ref_ftr->virtual_patch_valid_)
+    {
+      ++virtual_candidate_ref_invalid_count_;
+      continue;
+    }
 
     VirtualCandidate candidate;
     candidate.point = pt;
@@ -1221,7 +1277,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
 
     if (!buildVirtualFrameRotation(candidate.point_c_seed, result.track.R_vcur_from_ccur_seed, result.track.R_ccur_from_vcur_seed))
     {
-      result.rejection = 3;
+      result.rejection = VIRTUAL_REJECT_ROTATION;
       continue;
     }
     result.track.T_vcur_w_seed = composeVirtualPose(result.track.R_vcur_from_ccur_seed, new_frame_->T_f_w_);
@@ -1233,7 +1289,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     result.build_time = omp_get_wtime() - build_start;
     if (!supports_ok)
     {
-      result.rejection = 1;
+      result.rejection = VIRTUAL_REJECT_SUPPORT_BUILD;
       continue;
     }
 
@@ -1253,10 +1309,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     result.affine_time = omp_get_wtime() - affine_start;
     if (!affine_ok)
     {
-      result.rejection = 2;
+      result.rejection = VIRTUAL_REJECT_AFFINE_MATRIX;
       continue;
     }
     result.track.search_level = getBestSearchLevel(result.track.A_cur_ref, virtual_max_search_level);
+    result.search_level = result.track.search_level;
 
     const double warp_start = omp_get_wtime();
     result.warped_reference.assign(warp_len, 0.0f);
@@ -1266,7 +1323,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
       if (!warpAffineVirtual(result.track.A_cur_ref, ref_ftr->img_, ref_ftr->level_, result.track.search_level, pyramid_level,
                              patch_size_half, result.warped_reference.data()))
       {
-        result.rejection = 4;
+        result.rejection = VIRTUAL_REJECT_REFERENCE_WARP;
+        result.warp_fail_pyramid_level = pyramid_level;
         break;
       }
     }
@@ -1276,11 +1334,16 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     const double current_core_start = omp_get_wtime();
     vector<float> current_core(patch_size_total);
     const V3D point_vcur = result.track.T_vcur_w_seed * pt->pos_;
-    if (point_vcur[2] <= virtual_min_z ||
-        !sampleVirtualCorePatch(result.track.cur_support, virtualProject(point_vcur), 1, current_core.data()))
+    if (point_vcur[2] <= virtual_min_z)
     {
       result.current_core_time = omp_get_wtime() - current_core_start;
-      result.rejection = 1;
+      result.rejection = VIRTUAL_REJECT_CURRENT_Z;
+      continue;
+    }
+    if (!sampleVirtualCorePatch(result.track.cur_support, virtualProject(point_vcur), 1, current_core.data()))
+    {
+      result.current_core_time = omp_get_wtime() - current_core_start;
+      result.rejection = VIRTUAL_REJECT_CURRENT_CORE;
       continue;
     }
 
@@ -1292,11 +1355,13 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     if (ncc_en && calculateNCC(result.warped_reference.data(), current_core.data(), patch_size_total) < ncc_thre)
     {
       result.current_core_time = omp_get_wtime() - current_core_start;
+      result.rejection = VIRTUAL_REJECT_NCC;
       continue;
     }
     if (result.error > outlier_threshold * patch_size_total)
     {
       result.current_core_time = omp_get_wtime() - current_core_start;
+      result.rejection = VIRTUAL_REJECT_PHOTOMETRIC;
       continue;
     }
     result.current_core_time = omp_get_wtime() - current_core_start;
@@ -1308,6 +1373,9 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   virtual_parallel_track_time_ = omp_get_wtime() - parallel_track_start;
 
   const double result_collect_start = omp_get_wtime();
+  vector<int> virtual_search_level_count(std::max(virtual_max_search_level + 1, 1), 0);
+  vector<int> virtual_warp_fail_search_level_count(std::max(virtual_max_search_level + 1, 1), 0);
+  vector<int> virtual_warp_fail_pyramid_level_count(std::max(patch_pyrimid_level, 1), 0);
   for (int candidate_index = 0; candidate_index < static_cast<int>(candidates.size()); ++candidate_index)
   {
     VirtualCandidateResult &result = results[candidate_index];
@@ -1315,12 +1383,44 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     virtual_affine_time_ += result.affine_time;
     virtual_warp_time_ += result.warp_time;
     virtual_current_core_time_ += result.current_core_time;
+    if (result.search_level >= 0 && result.search_level < static_cast<int>(virtual_search_level_count.size()))
+      ++virtual_search_level_count[result.search_level];
     if (!result.valid)
     {
-      if (result.rejection == 1) ++rejected_virtual_support_oob_;
-      else if (result.rejection == 2) ++rejected_virtual_projection_invalid_;
-      else if (result.rejection == 3) ++rejected_virtual_z_;
-      else if (result.rejection == 4) ++rejected_virtual_affine_oob_;
+      switch (result.rejection)
+      {
+      case VIRTUAL_REJECT_ROTATION:
+        ++virtual_track_rotation_fail_count_;
+        break;
+      case VIRTUAL_REJECT_SUPPORT_BUILD:
+        ++virtual_track_support_fail_count_;
+        break;
+      case VIRTUAL_REJECT_AFFINE_MATRIX:
+        ++virtual_track_affine_fail_count_;
+        break;
+      case VIRTUAL_REJECT_REFERENCE_WARP:
+        ++virtual_track_warp_fail_count_;
+        if (result.search_level >= 0 && result.search_level < static_cast<int>(virtual_warp_fail_search_level_count.size()))
+          ++virtual_warp_fail_search_level_count[result.search_level];
+        if (result.warp_fail_pyramid_level >= 0 &&
+            result.warp_fail_pyramid_level < static_cast<int>(virtual_warp_fail_pyramid_level_count.size()))
+          ++virtual_warp_fail_pyramid_level_count[result.warp_fail_pyramid_level];
+        break;
+      case VIRTUAL_REJECT_CURRENT_Z:
+        ++virtual_track_current_z_fail_count_;
+        break;
+      case VIRTUAL_REJECT_CURRENT_CORE:
+        ++virtual_track_current_core_fail_count_;
+        break;
+      case VIRTUAL_REJECT_NCC:
+        ++virtual_track_ncc_reject_count_;
+        break;
+      case VIRTUAL_REJECT_PHOTOMETRIC:
+        ++virtual_track_photometric_reject_count_;
+        break;
+      default:
+        break;
+      }
       continue;
     }
 
@@ -1336,9 +1436,41 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   virtual_result_collect_time_ = omp_get_wtime() - result_collect_start;
 
   total_points = static_cast<int>(visual_submap->voxel_points.size());
-  printf("[ VIO Virtual ] Retrieve %d points, reject support=%d projection=%d z=%d affine=%d, build=%.6f s affine=%.6f s\n",
-         total_points, rejected_virtual_support_oob_, rejected_virtual_projection_invalid_, rejected_virtual_z_,
-         rejected_virtual_affine_oob_, build_virtual_support_time_, virtual_affine_time_);
+  rejected_virtual_support_oob_ = virtual_track_support_fail_count_ + virtual_track_current_core_fail_count_;
+  rejected_virtual_projection_invalid_ = virtual_candidate_projection_fail_count_;
+  rejected_virtual_z_ = virtual_track_rotation_fail_count_ + virtual_track_current_z_fail_count_;
+  rejected_virtual_affine_oob_ = virtual_track_affine_fail_count_ + virtual_track_warp_fail_count_;
+
+  auto formatCountVector = [](const vector<int> &counts) {
+    std::string text;
+    for (int i = 0; i < static_cast<int>(counts.size()); ++i)
+    {
+      if (!text.empty()) text += ",";
+      text += std::to_string(i) + ":" + std::to_string(counts[i]);
+    }
+    return text;
+  };
+  const std::string search_level_text = formatCountVector(virtual_search_level_count);
+  const std::string warp_fail_search_text = formatCountVector(virtual_warp_fail_search_level_count);
+  const std::string warp_fail_pyramid_text = formatCountVector(virtual_warp_fail_pyramid_level_count);
+
+  printf("[ VIO Virtual ] Retrieve %d/%d tracked from map_grid=%d candidates=%d\n",
+         total_points, virtual_candidate_count_, virtual_map_grid_count_, virtual_candidate_count_);
+  printf("[ VIO Virtual Candidate ] null=%d normal_uninit=%d proj_fail=%d range_reject=%d close_view_fail=%d ref_missing=%d ref_invalid=%d select_wall=%.6f s\n",
+         virtual_candidate_null_count_, virtual_candidate_normal_uninit_count_, virtual_candidate_projection_fail_count_,
+         virtual_candidate_range_reject_count_, virtual_candidate_close_view_fail_count_, virtual_candidate_ref_missing_count_,
+         virtual_candidate_ref_invalid_count_, virtual_candidate_select_time_);
+  printf("[ VIO Virtual Reject ] rotation=%d support_build=%d affine_matrix=%d warp_ref=%d current_z=%d current_core=%d ncc=%d photometric=%d\n",
+         virtual_track_rotation_fail_count_, virtual_track_support_fail_count_, virtual_track_affine_fail_count_,
+         virtual_track_warp_fail_count_, virtual_track_current_z_fail_count_, virtual_track_current_core_fail_count_,
+         virtual_track_ncc_reject_count_, virtual_track_photometric_reject_count_);
+  printf("[ VIO Virtual Warp ] search_level{%s} warp_fail_search{%s} warp_fail_pyramid{%s}\n",
+         search_level_text.c_str(), warp_fail_search_text.c_str(), warp_fail_pyramid_text.c_str());
+  printf("[ VIO Virtual Timing ] retrieve_wall=%.6f s parallel_wall=%.6f s support_sum=%.6f s affine_sum=%.6f s warp_sum=%.6f s current_core_sum=%.6f s result_collect_wall=%.6f s\n",
+         virtual_candidate_select_time_ + virtual_parallel_track_time_ + virtual_result_collect_time_,
+         virtual_parallel_track_time_, build_virtual_support_time_, virtual_affine_time_, virtual_warp_time_,
+         virtual_current_core_time_, virtual_result_collect_time_);
+  printf("[ VIO Virtual Timing Note ] *_sum accumulates per-candidate time across OpenMP workers; wall fields are real elapsed time.\n");
 }
 
 void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
@@ -3688,22 +3820,27 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   
   if (virtual_fisheye_patch_en)
   {
+    const int virtual_candidate_reject_count = virtual_map_grid_count_ - virtual_candidate_count_;
+    const int virtual_track_reject_count = virtual_candidate_count_ - virtual_valid_track_count_;
     printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
     printf("\033[1;34m|                      VIO Virtual Time                       |\033[0m\n");
     printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
     printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+    printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Map Grid Points", virtual_map_grid_count_);
     printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Virtual Candidates", virtual_candidate_count_);
     printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Tracked Virtual Points", virtual_valid_track_count_);
+    printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Candidate Rejects", virtual_candidate_reject_count);
+    printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Track Rejects", virtual_track_reject_count);
     printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
     printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
     printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
     printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t2 - t1);
     printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> candidate/select wall", virtual_candidate_select_time_);
     printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> parallel track wall", virtual_parallel_track_time_);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> support build sum", build_virtual_support_time_);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> affine matrix sum", virtual_affine_time_);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> warp reference sum", virtual_warp_time_);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> current core/residual", virtual_current_core_time_);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> support build sum(all)", build_virtual_support_time_);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> affine matrix sum(all)", virtual_affine_time_);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> warp reference sum(all)", virtual_warp_time_);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> current core sum(all)", virtual_current_core_time_);
     printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> result collect wall", virtual_result_collect_time_);
     printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
     printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);

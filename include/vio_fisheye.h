@@ -206,8 +206,24 @@ public:
   double virtual_result_collect_time_ = 0.0;
   double virtual_warp_time_ = 0.0;
   double virtual_current_core_time_ = 0.0;
+  int virtual_map_grid_count_ = 0;
+  int virtual_candidate_null_count_ = 0;
+  int virtual_candidate_normal_uninit_count_ = 0;
+  int virtual_candidate_projection_fail_count_ = 0;
+  int virtual_candidate_range_reject_count_ = 0;
+  int virtual_candidate_close_view_fail_count_ = 0;
+  int virtual_candidate_ref_missing_count_ = 0;
+  int virtual_candidate_ref_invalid_count_ = 0;
   int virtual_candidate_count_ = 0;
   int virtual_valid_track_count_ = 0;
+  int virtual_track_rotation_fail_count_ = 0;
+  int virtual_track_support_fail_count_ = 0;
+  int virtual_track_affine_fail_count_ = 0;
+  int virtual_track_warp_fail_count_ = 0;
+  int virtual_track_current_z_fail_count_ = 0;
+  int virtual_track_current_core_fail_count_ = 0;
+  int virtual_track_ncc_reject_count_ = 0;
+  int virtual_track_photometric_reject_count_ = 0;
   
   SubSparseMap *visual_submap;
   std::vector<std::vector<V3D>> rays_with_sample_points;
