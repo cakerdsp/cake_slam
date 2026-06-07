@@ -126,6 +126,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<int>("preprocess.point_filter_num", 3);
   try_declare.template operator()<int>("preprocess.scan_rate", 10);
   try_declare.template operator()<bool>("preprocess.feature_extract_enabled", false);
+  try_declare.template operator()<bool>("preprocess.hilti_en", false);
 
   try_declare.template operator()<int>("pcd_save.interval", -1);
   try_declare.template operator()<bool>("pcd_save.pcd_save_en", false);
@@ -203,6 +204,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("preprocess.scan_rate", p_pre->SCAN_RATE);
   this->node->get_parameter("preprocess.point_filter_num", p_pre->point_filter_num);
   this->node->get_parameter("preprocess.feature_extract_enabled", p_pre->feature_enabled);
+  this->node->get_parameter("preprocess.hilti_en", hilti_en);
 
   this->node->get_parameter("pcd_save.interval", pcd_save_interval);
   this->node->get_parameter("pcd_save.pcd_save_en", pcd_save_en);
@@ -321,13 +323,28 @@ void LIVMapper::initializeFiles()
 void LIVMapper::initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &node, image_transport::ImageTransport &it_)
 {
   image_transport::ImageTransport it(this->node);
+  auto sensor_qos = rclcpp::QoS(rclcpp::KeepLast(200000)).best_effort().durability_volatile();
   if (p_pre->lidar_type == AVIA) {
-    sub_pcl = this->node->create_subscription<livox_ros_driver2::msg::CustomMsg>(lid_topic, 200000, std::bind(&LIVMapper::livox_pcl_cbk, this, std::placeholders::_1));
+    sub_pcl = this->node->create_subscription<livox_ros_driver2::msg::CustomMsg>(lid_topic, sensor_qos, std::bind(&LIVMapper::livox_pcl_cbk, this, std::placeholders::_1));
   } else {
-    sub_pcl = this->node->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, 200000, std::bind(&LIVMapper::standard_pcl_cbk, this, std::placeholders::_1));
+    sub_pcl = this->node->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, sensor_qos, std::bind(&LIVMapper::standard_pcl_cbk, this, std::placeholders::_1));
   }
-  sub_imu = this->node->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 200000, std::bind(&LIVMapper::imu_cbk, this, std::placeholders::_1));
-  sub_img = this->node->create_subscription<sensor_msgs::msg::Image>(img_topic, 200000, std::bind(&LIVMapper::img_cbk, this, std::placeholders::_1));
+  sub_imu = this->node->create_subscription<sensor_msgs::msg::Imu>(imu_topic, sensor_qos, std::bind(&LIVMapper::imu_cbk, this, std::placeholders::_1));
+  const std::string compressed_suffix = "/compressed";
+  const bool compressed_img_topic = img_topic.size() >= compressed_suffix.size() &&
+                                    img_topic.compare(img_topic.size() - compressed_suffix.size(), compressed_suffix.size(), compressed_suffix) == 0;
+  if (compressed_img_topic)
+  {
+    sub_img_compressed = this->node->create_subscription<sensor_msgs::msg::CompressedImage>(
+        img_topic, sensor_qos, std::bind(&LIVMapper::compressed_img_cbk, this, std::placeholders::_1));
+  }
+  else
+  {
+    sub_img = this->node->create_subscription<sensor_msgs::msg::Image>(img_topic, sensor_qos, std::bind(&LIVMapper::img_cbk, this, std::placeholders::_1));
+  }
+
+  RCLCPP_INFO(this->node->get_logger(), "Subscribed LiDAR: %s, IMU: %s, image: %s (%s) with best-effort sensor QoS",
+              lid_topic.c_str(), imu_topic.c_str(), img_topic.c_str(), compressed_img_topic ? "compressed" : "raw");
   
   pubLaserCloudFullRes = this->node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 100);
   pubNormal = this->node->create_publisher<visualization_msgs::msg::MarkerArray>("/visualization_marker", 100);
@@ -856,6 +873,8 @@ void LIVMapper::RGBpointBodyToWorld(PointType const *const pi, PointType *const 
 void LIVMapper::standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 {
   if (!lidar_en) return;
+  RCLCPP_INFO_ONCE(this->node->get_logger(), "Get standard PointCloud2 LiDAR, first header time: %.6f", stamp2Sec(msg->header.stamp));
+  static size_t lidar_cb_count = 0;
   mtx_buffer.lock();
   // cout<<"got feature"<<endl;
   if (stamp2Sec(msg->header.stamp) < last_timestamp_lidar)
@@ -866,9 +885,20 @@ void LIVMapper::standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstShare
   // ROS_INFO("get point cloud at time: %.6f", stamp2Sec(msg->header.stamp));
   PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
   p_pre->process(msg, ptr);
+  ++lidar_cb_count;
+  if (!ptr || ptr->empty())
+  {
+    RCLCPP_WARN(this->node->get_logger(), "Standard LiDAR callback #%zu got an empty processed cloud. raw width=%u height=%u fields=%zu",
+                lidar_cb_count, msg->width, msg->height, msg->fields.size());
+  }
   lid_raw_data_buffer.push_back(ptr);
   lid_header_time_buffer.push_back(stamp2Sec(msg->header.stamp));
   last_timestamp_lidar = stamp2Sec(msg->header.stamp);
+  if (lidar_cb_count == 1 || lidar_cb_count % 20 == 0)
+  {
+    RCLCPP_INFO(this->node->get_logger(), "Standard LiDAR callback #%zu: stamp=%.6f raw_points=%u processed_points=%zu lidar_buffer=%zu",
+                lidar_cb_count, stamp2Sec(msg->header.stamp), msg->width * msg->height, ptr ? ptr->size() : 0, lid_raw_data_buffer.size());
+  }
 
   mtx_buffer.unlock();
   sig_buffer.notify_all();
@@ -975,26 +1005,18 @@ cv::Mat LIVMapper::getImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr
   return img.clone();
 }
 
-// static int i = 0;
-void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
+void LIVMapper::handleImageFrame(const builtin_interfaces::msg::Time &stamp, const cv::Mat &img_cur)
 {
   if (!img_en) return;
-  sensor_msgs::msg::Image::SharedPtr msg(new sensor_msgs::msg::Image(*msg_in));
-  // if ((abs(stamp2Sec(msg->header.stamp) - last_timestamp_img) > 0.2 && last_timestamp_img > 0) || sync_jump_flag)
-  // {
-  //   RCLCPP_WARN(this->node->get_logger(), "img jumps %.3f\n", stamp2Sec(msg->header.stamp) - last_timestamp_img);
-  //   sync_jump_flag = true;
-  //   msg->header.stamp = rclcpp::Time().fromSec(last_timestamp_img + 0.1);
-  // }
 
   // Hiliti2022 40Hz
-  // if (hilti_en)
-  // {
-  //   i++;
-  //   if (i % 4 != 0) return;
-  // }
+  if (hilti_en)
+  {
+    static int frame_counter = 0;
+    if (++frame_counter % 4 != 0) return;
+  }
   // double msg_header_time =  stamp2Sec(msg->header.stamp);
-  double msg_header_time = stamp2Sec(msg->header.stamp) + img_time_offset;
+  double msg_header_time = stamp2Sec(stamp) + img_time_offset;
   if (abs(msg_header_time - last_timestamp_img) < 0.001) return;
   RCLCPP_INFO(this->node->get_logger(), "Get image, its header time: %.6f", msg_header_time);
   if (last_timestamp_lidar < 0) return;
@@ -1017,7 +1039,6 @@ void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
     return;
   }
 
-  cv::Mat img_cur = getImageFromMsg(msg);
   img_buffer.push_back(img_cur);
   img_time_buffer.push_back(img_time_correct);
 
@@ -1031,11 +1052,40 @@ void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
   sig_buffer.notify_all();
 }
 
+// static int i = 0;
+void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
+{
+  cv::Mat img_cur = getImageFromMsg(msg_in);
+  handleImageFrame(msg_in->header.stamp, img_cur);
+}
+
+void LIVMapper::compressed_img_cbk(const sensor_msgs::msg::CompressedImage::ConstSharedPtr &msg_in)
+{
+  if (!img_en) return;
+  const cv::Mat encoded(1, static_cast<int>(msg_in->data.size()), CV_8UC1, const_cast<uint8_t *>(msg_in->data.data()));
+  cv::Mat img_cur = cv::imdecode(encoded, cv::IMREAD_COLOR);
+  if (img_cur.empty())
+  {
+    RCLCPP_WARN(this->node->get_logger(), "Failed to decode compressed image at %.6f, format=%s, bytes=%zu",
+                stamp2Sec(msg_in->header.stamp), msg_in->format.c_str(), msg_in->data.size());
+    return;
+  }
+  RCLCPP_INFO_ONCE(this->node->get_logger(), "Decoded first compressed image from %s", img_topic.c_str());
+  handleImageFrame(msg_in->header.stamp, img_cur);
+}
+
 bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 {
-  if (lid_raw_data_buffer.empty() && lidar_en) return false;
-  if (img_buffer.empty() && img_en) return false;
-  if (imu_buffer.empty() && imu_en) return false;
+  if ((lid_raw_data_buffer.empty() && lidar_en) || (img_buffer.empty() && img_en) || (imu_buffer.empty() && imu_en))
+  {
+    static size_t wait_log_count = 0;
+    if (++wait_log_count % 5000 == 0)
+    {
+      RCLCPP_INFO(this->node->get_logger(), "Waiting sync buffers: lidar=%zu image=%zu imu=%zu (enabled lidar=%d image=%d imu=%d)",
+                  lid_raw_data_buffer.size(), img_buffer.size(), imu_buffer.size(), lidar_en, img_en, imu_en);
+    }
+    return false;
+  }
 
   switch (slam_mode_)
   {

@@ -25,6 +25,7 @@ which is included as part of this source code package.
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <vikit/camera_loader.h>
 
 class LIVMapper
@@ -55,6 +56,7 @@ public:
   void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg_in);
   void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in);
   void img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in);
+  void compressed_img_cbk(const sensor_msgs::msg::CompressedImage::ConstSharedPtr &msg_in);
   void publish_img_rgb(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager);
   void publish_optical_flow_image(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager);
   void publish_triangulated_points(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubCloud,
@@ -70,6 +72,7 @@ public:
   template <typename T> void pointBodyToWorld(const Eigen::Matrix<T, 3, 1> &pi, Eigen::Matrix<T, 3, 1> &po);
   template <typename T> Eigen::Matrix<T, 3, 1> pointBodyToWorld(const Eigen::Matrix<T, 3, 1> &pi);
   cv::Mat getImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &img_msg);
+  void handleImageFrame(const builtin_interfaces::msg::Time &stamp, const cv::Mat &img_cur);
 
   std::mutex mtx_buffer, mtx_buffer_imu_prop;
   std::condition_variable sig_buffer;
@@ -191,6 +194,7 @@ public:
   std::shared_ptr<rclcpp::SubscriptionBase> sub_pcl;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_img;
+  rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr sub_img_compressed;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFullRes;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubNormal;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubSubVisualMap;
@@ -213,5 +217,6 @@ public:
   double aver_time_icp = 0;
   double aver_time_map_inre = 0;
   bool colmap_output_en = false;
+  bool hilti_en = false;
 };
 #endif
