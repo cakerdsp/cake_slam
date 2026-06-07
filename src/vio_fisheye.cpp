@@ -970,15 +970,23 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
 {
   visual_submap->reset();
   total_points = 0;
-  if (feat_map.empty()) return;
-
-  sub_feat_map.clear();
   rejected_virtual_support_oob_ = 0;
   rejected_virtual_projection_invalid_ = 0;
   rejected_virtual_z_ = 0;
   rejected_virtual_affine_oob_ = 0;
   build_virtual_support_time_ = 0.0;
   virtual_affine_time_ = 0.0;
+  virtual_candidate_select_time_ = 0.0;
+  virtual_parallel_track_time_ = 0.0;
+  virtual_result_collect_time_ = 0.0;
+  virtual_warp_time_ = 0.0;
+  virtual_current_core_time_ = 0.0;
+  virtual_candidate_count_ = 0;
+  virtual_valid_track_count_ = 0;
+  if (feat_map.empty()) return;
+
+  const double candidate_select_start = omp_get_wtime();
+  sub_feat_map.clear();
 
   const float voxel_size = 0.5f;
   cv::Mat range_img = cv::Mat::zeros(height, width, CV_32FC1);
@@ -1101,6 +1109,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     double inverse_reference_exposure = 0.0;
     double build_time = 0.0;
     double affine_time = 0.0;
+    double warp_time = 0.0;
+    double current_core_time = 0.0;
     int rejection = 0;
     bool valid = false;
   };
@@ -1193,8 +1203,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     candidate.current_raw_center_px = raw_px;
     candidates.push_back(candidate);
   }
+  virtual_candidate_select_time_ = omp_get_wtime() - candidate_select_start;
+  virtual_candidate_count_ = static_cast<int>(candidates.size());
 
   vector<VirtualCandidateResult> results(candidates.size());
+  const double parallel_track_start = omp_get_wtime();
 #ifdef MP_EN
   omp_set_num_threads(MP_PROC_NUM);
 #pragma omp parallel for
@@ -1245,6 +1258,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     }
     result.track.search_level = getBestSearchLevel(result.track.A_cur_ref, virtual_max_search_level);
 
+    const double warp_start = omp_get_wtime();
     result.warped_reference.assign(warp_len, 0.0f);
     for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
     {
@@ -1256,13 +1270,16 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
         break;
       }
     }
+    result.warp_time = omp_get_wtime() - warp_start;
     if (result.rejection != 0) continue;
 
+    const double current_core_start = omp_get_wtime();
     vector<float> current_core(patch_size_total);
     const V3D point_vcur = result.track.T_vcur_w_seed * pt->pos_;
     if (point_vcur[2] <= virtual_min_z ||
         !sampleVirtualCorePatch(result.track.cur_support, virtualProject(point_vcur), 1, current_core.data()))
     {
+      result.current_core_time = omp_get_wtime() - current_core_start;
       result.rejection = 1;
       continue;
     }
@@ -1272,19 +1289,32 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
       const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[k] - state->inv_expo_time * current_core[k];
       result.error += residual * residual;
     }
-    if (ncc_en && calculateNCC(result.warped_reference.data(), current_core.data(), patch_size_total) < ncc_thre) continue;
-    if (result.error > outlier_threshold * patch_size_total) continue;
+    if (ncc_en && calculateNCC(result.warped_reference.data(), current_core.data(), patch_size_total) < ncc_thre)
+    {
+      result.current_core_time = omp_get_wtime() - current_core_start;
+      continue;
+    }
+    if (result.error > outlier_threshold * patch_size_total)
+    {
+      result.current_core_time = omp_get_wtime() - current_core_start;
+      continue;
+    }
+    result.current_core_time = omp_get_wtime() - current_core_start;
 
     result.inverse_reference_exposure = ref_ftr->inv_expo_time_;
     result.track.valid = true;
     result.valid = true;
   }
+  virtual_parallel_track_time_ = omp_get_wtime() - parallel_track_start;
 
+  const double result_collect_start = omp_get_wtime();
   for (int candidate_index = 0; candidate_index < static_cast<int>(candidates.size()); ++candidate_index)
   {
     VirtualCandidateResult &result = results[candidate_index];
     build_virtual_support_time_ += result.build_time;
     virtual_affine_time_ += result.affine_time;
+    virtual_warp_time_ += result.warp_time;
+    virtual_current_core_time_ += result.current_core_time;
     if (!result.valid)
     {
       if (result.rejection == 1) ++rejected_virtual_support_oob_;
@@ -1294,6 +1324,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
       continue;
     }
 
+    ++virtual_valid_track_count_;
     visual_submap->voxel_points.push_back(candidates[candidate_index].point);
     visual_submap->propa_errors.push_back(result.error);
     visual_submap->search_levels.push_back(result.track.search_level);
@@ -1302,6 +1333,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     visual_submap->inv_expo_list.push_back(result.inverse_reference_exposure);
     visual_submap->virtual_track_patches.push_back(std::move(result.track));
   }
+  virtual_result_collect_time_ = omp_get_wtime() - result_collect_start;
 
   total_points = static_cast<int>(visual_submap->voxel_points.size());
   printf("[ VIO Virtual ] Retrieve %d points, reject support=%d projection=%d z=%d affine=%d, build=%.6f s affine=%.6f s\n",
@@ -1748,9 +1780,8 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
 void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
 {
-  if (total_points == 0) return;
-  
   compute_jacobian_time = update_ekf_time = 0.0;
+  if (total_points == 0) return;
 
   for (int level = patch_pyrimid_level - 1; level >= 0; level--)
   {
@@ -2571,7 +2602,6 @@ void VIOManager::updateStateInverseVirtual(cv::Mat img, int level)
   MatrixXd H_sub(H_DIM, 6);
   bool EKF_end = false;
   float last_error = std::numeric_limits<float>::max();
-  compute_jacobian_time = update_ekf_time = 0.0;
 
   for (int iteration = 0; iteration < max_iterations; ++iteration)
   {
@@ -3656,24 +3686,57 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   // cout << BLUE << "ave_build_residual_time: " << ave_build_residual_time << RESET << endl;
   // cout << BLUE << "ave_ekf_time: " << ave_ekf_time << RESET << endl;
   
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t2 - t1);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
-  printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
-  printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t4 - t3);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateVisualMapPoints", t6 - t5);
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateReferencePatch", t7 - t6);
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - t1 - (t5 - t4));
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
-  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  if (virtual_fisheye_patch_en)
+  {
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m|                      VIO Virtual Time                       |\033[0m\n");
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+    printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Virtual Candidates", virtual_candidate_count_);
+    printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Tracked Virtual Points", virtual_valid_track_count_);
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t2 - t1);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> candidate/select wall", virtual_candidate_select_time_);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> parallel track wall", virtual_parallel_track_time_);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> support build sum", build_virtual_support_time_);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> affine matrix sum", virtual_affine_time_);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> warp reference sum", virtual_warp_time_);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> current core/residual", virtual_current_core_time_);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> result collect wall", virtual_result_collect_time_);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t4 - t3);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateVisualMapPoints", t6 - t5);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateReferencePatch", t7 - t6);
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - t1 - (t5 - t4));
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  }
+  else
+  {
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t2 - t1);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
+    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t4 - t3);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateVisualMapPoints", t6 - t5);
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateReferencePatch", t7 - t6);
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - t1 - (t5 - t4));
+    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
+    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  }
 
   // std::string text = std::to_string(int(1 / (t7 - t1 - (t5 - t4)))) + " HZ";
   // cv::Point2f origin;

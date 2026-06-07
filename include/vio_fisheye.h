@@ -201,6 +201,13 @@ public:
   int rejected_virtual_affine_oob_ = 0;
   double build_virtual_support_time_ = 0.0;
   double virtual_affine_time_ = 0.0;
+  double virtual_candidate_select_time_ = 0.0;
+  double virtual_parallel_track_time_ = 0.0;
+  double virtual_result_collect_time_ = 0.0;
+  double virtual_warp_time_ = 0.0;
+  double virtual_current_core_time_ = 0.0;
+  int virtual_candidate_count_ = 0;
+  int virtual_valid_track_count_ = 0;
   
   SubSparseMap *visual_submap;
   std::vector<std::vector<V3D>> rays_with_sample_points;
