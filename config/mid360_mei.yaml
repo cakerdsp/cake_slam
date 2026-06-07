@@ -48,7 +48,7 @@
       grid_size: 5
       grid_n_height: 17
       patch_size: 8
-      patch_pyrimid_level: 4
+      patch_pyrimid_level: 3
 
       # Adapted from the original cam0 virtual-patch values:
       # virtual_width/height and sphere LUT fields are not read by this project;
