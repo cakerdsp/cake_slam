@@ -41,7 +41,7 @@
     vio:
       # 0: direct; 1: optical_flow; 2: color_only.
       # Virtual fisheye patch logic is used by the direct/fisheye frontend.
-      frontend_mode: 2
+      frontend_mode: 0
       max_iterations: 5
       outlier_threshold: 1000
       img_point_cov: 100

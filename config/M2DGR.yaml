@@ -52,7 +52,7 @@
 
       # M2DGR left camera is configured as an equidistant fisheye camera.
       # Virtual patches keep direct alignment local and less distorted.
-      virtual_fisheye_patch_en: true
+      virtual_fisheye_patch_en: false
       virtual_focal_length: 300.0
       virtual_patch_margin: 4
       virtual_max_search_level: 1
@@ -117,7 +117,7 @@
       blind_rgb_points: 0.0
 
     evo:
-      seq_name: "m2dgr_fastlivo_fisheye_walk_01"
+      seq_name: "m2dgr"
       pose_output_en: true
 
     pcd_save:

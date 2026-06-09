@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "LIVMapper.h"
+#include <filesystem>
 #include <vikit/camera_loader.h>
 
 using namespace Sophus;
@@ -296,6 +297,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
 
 void LIVMapper::initializeFiles() 
 {
+  std::filesystem::create_directories(std::string(ROOT_DIR) + "Log");
   if (pcd_save_en && colmap_output_en)
   {
       const std::string folderPath = std::string(ROOT_DIR) + "/scripts/colmap_output.sh";
@@ -567,15 +569,18 @@ void LIVMapper::handleLIO()
     static bool pos_opend = false;
     static int ocount = 0;
     std::ofstream outFile, evoFile;
+    const std::string result_dir = std::string(ROOT_DIR) + "Log/result";
+    const std::string result_path = result_dir + "/" + seq_name + ".txt";
     if (!pos_opend) 
     {
-      evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::out);
+      std::filesystem::create_directories(result_dir);
+      evoFile.open(result_path, std::ios::out);
       pos_opend = true;
       if (!evoFile.is_open()) RCLCPP_ERROR(this->node->get_logger(), "open fail\n");
     } 
     else 
     {
-      evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::app);
+      evoFile.open(result_path, std::ios::app);
       if (!evoFile.is_open()) RCLCPP_ERROR(this->node->get_logger(), "open fail\n");
     }
     Eigen::Matrix4d outT;
