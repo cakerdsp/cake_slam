@@ -54,11 +54,12 @@
       # HILTI22 cam0 is an equidistant fisheye camera. Keep the original raw
       # fisheye model in camera_fisheye_HILTI22.yaml and use virtual patches
       # for the direct image alignment in this fork.
-      virtual_fisheye_patch_en: false
+      virtual_fisheye_patch_en: true
       virtual_focal_length: 300.0
       virtual_patch_margin: 4
       virtual_max_search_level: 1
-      virtual_patch_resampling_mode: "forward_splat"
+      # virtual_patch_resampling_mode: "forward_splat"
+      virtual_patch_resampling_mode: "pull_exact"
       virtual_raw_window_half_size: 96
       virtual_splat_min_weight: 1.0e-6
       virtual_splat_require_full_core_coverage: true
@@ -119,7 +120,7 @@
       blind_rgb_points: 0.0
 
     evo:
-      seq_name: "exp04_"
+      seq_name: "exp21"
       pose_output_en: true
 
     pcd_save:

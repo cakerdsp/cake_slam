@@ -55,9 +55,10 @@
       # ax/ay=120 maps to the current virtual_focal_length parameter.
       virtual_fisheye_patch_en: true
       virtual_focal_length: 120.0
-      virtual_patch_margin: 4
+      virtual_patch_margin: 8
       virtual_max_search_level: 1
-      virtual_patch_resampling_mode: "forward_splat"
+      # virtual_patch_resampling_mode: "forward_splat"
+      virtual_patch_resampling_mode: "pull_exact"
       virtual_raw_window_half_size: 96
       virtual_splat_min_weight: 1.0e-6
       virtual_splat_require_full_core_coverage: true
