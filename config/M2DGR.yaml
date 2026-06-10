@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     common:
-      img_topic: "/camera/left/image_raw/compressed"
+      img_topic: "/camera/left/image_raw"
       lid_topic: "/velodyne_points"
       imu_topic: "/handsfree/imu"
       img_en: 1
@@ -43,7 +43,7 @@
       # 0: direct; 1: optical_flow; 2: color_only.
       frontend_mode: 0
       max_iterations: 5
-      outlier_threshold: 500
+      outlier_threshold: 1000
       img_point_cov: 1000
       grid_size: 5
       grid_n_height: 17
@@ -52,7 +52,7 @@
 
       # M2DGR left camera is configured as an equidistant fisheye camera.
       # Virtual patches keep direct alignment local and less distorted.
-      virtual_fisheye_patch_en: false
+      virtual_fisheye_patch_en: true
       virtual_focal_length: 300.0
       virtual_patch_margin: 4
       virtual_max_search_level: 1

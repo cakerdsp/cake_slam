@@ -44,7 +44,7 @@
       # 0: direct; 1: optical_flow; 2: color_only.
       frontend_mode: 0
       max_iterations: 5
-      outlier_threshold: 500
+      outlier_threshold: 1000
       img_point_cov: 1000
       grid_size: 5
       grid_n_height: 17
@@ -54,7 +54,7 @@
       # HILTI22 cam0 is an equidistant fisheye camera. Keep the original raw
       # fisheye model in camera_fisheye_HILTI22.yaml and use virtual patches
       # for the direct image alignment in this fork.
-      virtual_fisheye_patch_en: true
+      virtual_fisheye_patch_en: false
       virtual_focal_length: 300.0
       virtual_patch_margin: 4
       virtual_max_search_level: 1
@@ -119,7 +119,7 @@
       blind_rgb_points: 0.0
 
     evo:
-      seq_name: "test"
+      seq_name: "exp04_"
       pose_output_en: true
 
     pcd_save:
