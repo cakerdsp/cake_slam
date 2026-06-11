@@ -63,14 +63,16 @@
       virtual_splat_min_weight: 1.0e-6
       virtual_splat_require_full_core_coverage: true
       virtual_splat_debug_compare_pull_exact: false
-      # 颜色大致对应：
-      #   range_reject：亮红
-      #   support_build：橙红
-      #   warp_ref：紫红/品红
-      #   affine_matrix：深红
-      #   current_z/current_core：浅红/玫红
-      #   ncc/photometric：暗红/绯红
-      #   ref_missing/ref_invalid/close_view/normal_uninit：不同深浅的红、粉、紫红
+      # Rejected-point color legend on /rgb_img:
+      #   range_reject: red
+      #   support_build: tangerine
+      #   warp_ref: hot pink
+      #   affine_matrix: deep red
+      #   current_z/current_core: salmon/coral
+      #   ncc/photometric: rose/plum
+      #   close_view: orange
+      #   ref_missing/ref_invalid: amber/peach
+      #   normal_uninit/rotation: burgundy/brick
       draw_rejected_points_en: false
 
       normal_en: true

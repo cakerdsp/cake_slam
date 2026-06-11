@@ -3374,31 +3374,31 @@ void VIOManager::plotTrackedPoints()
       switch (reason)
       {
       case VIOManager::REJECT_DRAW_NORMAL_UNINIT:
-        return cv::Scalar(40, 40, 170);   // dark red
+        return cv::Scalar(35, 25, 135);   // burgundy
       case VIOManager::REJECT_DRAW_RANGE:
-        return cv::Scalar(0, 0, 255);     // bright red
+        return cv::Scalar(0, 0, 255);     // red
       case VIOManager::REJECT_DRAW_CLOSE_VIEW:
-        return cv::Scalar(0, 90, 255);    // orange-red
+        return cv::Scalar(0, 165, 255);   // orange
       case VIOManager::REJECT_DRAW_REF_MISSING:
-        return cv::Scalar(110, 0, 255);   // pink-red
+        return cv::Scalar(0, 215, 255);   // amber
       case VIOManager::REJECT_DRAW_REF_INVALID:
-        return cv::Scalar(160, 0, 230);   // purple-red
+        return cv::Scalar(85, 190, 255);  // peach
       case VIOManager::REJECT_DRAW_ROTATION:
-        return cv::Scalar(60, 0, 150);    // deep purple-red
+        return cv::Scalar(30, 70, 190);   // brick
       case VIOManager::REJECT_DRAW_SUPPORT_BUILD:
-        return cv::Scalar(0, 130, 255);   // warm orange-red
+        return cv::Scalar(0, 110, 255);   // tangerine
       case VIOManager::REJECT_DRAW_AFFINE:
-        return cv::Scalar(0, 0, 140);     // deep red
+        return cv::Scalar(20, 20, 180);   // deep red
       case VIOManager::REJECT_DRAW_WARP_REF:
-        return cv::Scalar(190, 0, 255);   // magenta-red
+        return cv::Scalar(180, 0, 255);   // hot pink
       case VIOManager::REJECT_DRAW_CURRENT_Z:
-        return cv::Scalar(80, 80, 255);   // pale red
+        return cv::Scalar(95, 140, 255);  // salmon
       case VIOManager::REJECT_DRAW_CURRENT_CORE:
-        return cv::Scalar(120, 70, 255);  // rose-red
+        return cv::Scalar(70, 105, 255);  // coral
       case VIOManager::REJECT_DRAW_NCC:
-        return cv::Scalar(0, 45, 210);    // crimson
+        return cv::Scalar(120, 45, 255);  // rose
       case VIOManager::REJECT_DRAW_PHOTOMETRIC:
-        return cv::Scalar(35, 0, 210);    // dark crimson
+        return cv::Scalar(140, 0, 200);   // plum
       default:
         return cv::Scalar(0, 0, 255);
       }
