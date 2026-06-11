@@ -3374,31 +3374,31 @@ void VIOManager::plotTrackedPoints()
       switch (reason)
       {
       case VIOManager::REJECT_DRAW_NORMAL_UNINIT:
-        return cv::Scalar(35, 25, 135);   // burgundy
+        return cv::Scalar(255, 255, 255); // white
       case VIOManager::REJECT_DRAW_RANGE:
-        return cv::Scalar(0, 0, 255);     // red
+        return cv::Scalar(255, 0, 255);   // purple
       case VIOManager::REJECT_DRAW_CLOSE_VIEW:
-        return cv::Scalar(0, 165, 255);   // orange
+        return cv::Scalar(0, 128, 255);   // orange
       case VIOManager::REJECT_DRAW_REF_MISSING:
-        return cv::Scalar(0, 215, 255);   // amber
+        return cv::Scalar(255, 255, 0);   // cyan
       case VIOManager::REJECT_DRAW_REF_INVALID:
-        return cv::Scalar(85, 190, 255);  // peach
+        return cv::Scalar(255, 128, 0);   // sky blue
       case VIOManager::REJECT_DRAW_ROTATION:
-        return cv::Scalar(30, 70, 190);   // brick
+        return cv::Scalar(0, 80, 160);    // brown
       case VIOManager::REJECT_DRAW_SUPPORT_BUILD:
-        return cv::Scalar(0, 110, 255);   // tangerine
+        return cv::Scalar(0, 255, 255);   // yellow
       case VIOManager::REJECT_DRAW_AFFINE:
-        return cv::Scalar(20, 20, 180);   // deep red
+        return cv::Scalar(0, 0, 160);     // dark red
       case VIOManager::REJECT_DRAW_WARP_REF:
-        return cv::Scalar(180, 0, 255);   // hot pink
+        return cv::Scalar(0, 200, 255);   // orange-yellow
       case VIOManager::REJECT_DRAW_CURRENT_Z:
-        return cv::Scalar(95, 140, 255);  // salmon
+        return cv::Scalar(180, 180, 255); // light pink
       case VIOManager::REJECT_DRAW_CURRENT_CORE:
-        return cv::Scalar(70, 105, 255);  // coral
+        return cv::Scalar(128, 0, 255);   // rose
       case VIOManager::REJECT_DRAW_NCC:
-        return cv::Scalar(120, 45, 255);  // rose
+        return cv::Scalar(255, 0, 128);   // violet
       case VIOManager::REJECT_DRAW_PHOTOMETRIC:
-        return cv::Scalar(140, 0, 200);   // plum
+        return cv::Scalar(0, 0, 255);     // red
       default:
         return cv::Scalar(0, 0, 255);
       }
