@@ -225,7 +225,28 @@ public:
   int virtual_track_current_core_fail_count_ = 0;
   int virtual_track_ncc_reject_count_ = 0;
   int virtual_track_photometric_reject_count_ = 0;
-  std::vector<cv::Point2f> rejected_visual_points_for_draw_;
+  enum RejectedVisualPointReason
+  {
+    REJECT_DRAW_NORMAL_UNINIT = 0,
+    REJECT_DRAW_RANGE,
+    REJECT_DRAW_CLOSE_VIEW,
+    REJECT_DRAW_REF_MISSING,
+    REJECT_DRAW_REF_INVALID,
+    REJECT_DRAW_ROTATION,
+    REJECT_DRAW_SUPPORT_BUILD,
+    REJECT_DRAW_AFFINE,
+    REJECT_DRAW_WARP_REF,
+    REJECT_DRAW_CURRENT_Z,
+    REJECT_DRAW_CURRENT_CORE,
+    REJECT_DRAW_NCC,
+    REJECT_DRAW_PHOTOMETRIC
+  };
+  struct RejectedVisualPointForDraw
+  {
+    cv::Point2f px;
+    int reason = REJECT_DRAW_RANGE;
+  };
+  std::vector<RejectedVisualPointForDraw> rejected_visual_points_for_draw_;
   
   SubSparseMap *visual_submap;
   std::vector<std::vector<V3D>> rays_with_sample_points;

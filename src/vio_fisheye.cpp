@@ -999,7 +999,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   virtual_track_current_core_fail_count_ = 0;
   virtual_track_ncc_reject_count_ = 0;
   virtual_track_photometric_reject_count_ = 0;
-  if (draw_rejected_points_en)
+  if (draw_rejected_points_en && virtual_fisheye_patch_en)
   {
     rejected_visual_points_for_draw_.clear();
     rejected_visual_points_for_draw_.reserve(length);
@@ -1149,9 +1149,37 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     int rejection = 0;
     bool valid = false;
   };
-  auto recordRejectedPoint = [&](const V2D &raw_px) {
+  auto recordRejectedPoint = [&](const V2D &raw_px, int reason) {
     if (draw_rejected_points_en)
-      rejected_visual_points_for_draw_.emplace_back(static_cast<float>(raw_px[0]), static_cast<float>(raw_px[1]));
+    {
+      VIOManager::RejectedVisualPointForDraw rejected_point;
+      rejected_point.px = cv::Point2f(static_cast<float>(raw_px[0]), static_cast<float>(raw_px[1]));
+      rejected_point.reason = reason;
+      rejected_visual_points_for_draw_.push_back(rejected_point);
+    }
+  };
+  auto drawReasonFromVirtualReject = [](int rejection) {
+    switch (rejection)
+    {
+    case VIRTUAL_REJECT_ROTATION:
+      return VIOManager::REJECT_DRAW_ROTATION;
+    case VIRTUAL_REJECT_SUPPORT_BUILD:
+      return VIOManager::REJECT_DRAW_SUPPORT_BUILD;
+    case VIRTUAL_REJECT_AFFINE_MATRIX:
+      return VIOManager::REJECT_DRAW_AFFINE;
+    case VIRTUAL_REJECT_REFERENCE_WARP:
+      return VIOManager::REJECT_DRAW_WARP_REF;
+    case VIRTUAL_REJECT_CURRENT_Z:
+      return VIOManager::REJECT_DRAW_CURRENT_Z;
+    case VIRTUAL_REJECT_CURRENT_CORE:
+      return VIOManager::REJECT_DRAW_CURRENT_CORE;
+    case VIRTUAL_REJECT_NCC:
+      return VIOManager::REJECT_DRAW_NCC;
+    case VIRTUAL_REJECT_PHOTOMETRIC:
+      return VIOManager::REJECT_DRAW_PHOTOMETRIC;
+    default:
+      return VIOManager::REJECT_DRAW_RANGE;
+    }
   };
 
   vector<VirtualCandidate> candidates;
@@ -1172,7 +1200,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
       if (draw_rejected_points_en)
       {
         V2D raw_px;
-        if (projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, raw_px)) recordRejectedPoint(raw_px);
+        if (projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, raw_px))
+          recordRejectedPoint(raw_px, REJECT_DRAW_NORMAL_UNINIT);
       }
       continue;
     }
@@ -1208,7 +1237,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     if (range_discontinuous)
     {
       ++virtual_candidate_range_reject_count_;
-      recordRejectedPoint(raw_px);
+      recordRejectedPoint(raw_px, REJECT_DRAW_RANGE);
       continue;
     }
 
@@ -1254,19 +1283,19 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     else if (!pt->getCloseViewObs(new_frame_->pos(), ref_ftr, raw_px))
     {
       ++virtual_candidate_close_view_fail_count_;
-      recordRejectedPoint(raw_px);
+      recordRejectedPoint(raw_px, REJECT_DRAW_CLOSE_VIEW);
       continue;
     }
     if (ref_ftr == nullptr)
     {
       ++virtual_candidate_ref_missing_count_;
-      recordRejectedPoint(raw_px);
+      recordRejectedPoint(raw_px, REJECT_DRAW_REF_MISSING);
       continue;
     }
     if (!ref_ftr->virtual_patch_valid_)
     {
       ++virtual_candidate_ref_invalid_count_;
-      recordRejectedPoint(raw_px);
+      recordRejectedPoint(raw_px, REJECT_DRAW_REF_INVALID);
       continue;
     }
 
@@ -1405,7 +1434,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
       ++virtual_search_level_count[result.search_level];
     if (!result.valid)
     {
-      if (result.rejection != VIRTUAL_REJECT_NONE) recordRejectedPoint(candidates[candidate_index].current_raw_center_px);
+      if (result.rejection != VIRTUAL_REJECT_NONE)
+        recordRejectedPoint(candidates[candidate_index].current_raw_center_px, drawReasonFromVirtualReject(result.rejection));
       switch (result.rejection)
       {
       case VIRTUAL_REJECT_ROTATION:
@@ -3340,9 +3370,42 @@ void VIOManager::plotTrackedPoints()
   }
   if (draw_rejected_points_en)
   {
-    for (const cv::Point2f &pc : rejected_visual_points_for_draw_)
+    auto rejectedPointColor = [](int reason) {
+      switch (reason)
+      {
+      case VIOManager::REJECT_DRAW_NORMAL_UNINIT:
+        return cv::Scalar(40, 40, 170);   // dark red
+      case VIOManager::REJECT_DRAW_RANGE:
+        return cv::Scalar(0, 0, 255);     // bright red
+      case VIOManager::REJECT_DRAW_CLOSE_VIEW:
+        return cv::Scalar(0, 90, 255);    // orange-red
+      case VIOManager::REJECT_DRAW_REF_MISSING:
+        return cv::Scalar(110, 0, 255);   // pink-red
+      case VIOManager::REJECT_DRAW_REF_INVALID:
+        return cv::Scalar(160, 0, 230);   // purple-red
+      case VIOManager::REJECT_DRAW_ROTATION:
+        return cv::Scalar(60, 0, 150);    // deep purple-red
+      case VIOManager::REJECT_DRAW_SUPPORT_BUILD:
+        return cv::Scalar(0, 130, 255);   // warm orange-red
+      case VIOManager::REJECT_DRAW_AFFINE:
+        return cv::Scalar(0, 0, 140);     // deep red
+      case VIOManager::REJECT_DRAW_WARP_REF:
+        return cv::Scalar(190, 0, 255);   // magenta-red
+      case VIOManager::REJECT_DRAW_CURRENT_Z:
+        return cv::Scalar(80, 80, 255);   // pale red
+      case VIOManager::REJECT_DRAW_CURRENT_CORE:
+        return cv::Scalar(120, 70, 255);  // rose-red
+      case VIOManager::REJECT_DRAW_NCC:
+        return cv::Scalar(0, 45, 210);    // crimson
+      case VIOManager::REJECT_DRAW_PHOTOMETRIC:
+        return cv::Scalar(35, 0, 210);    // dark crimson
+      default:
+        return cv::Scalar(0, 0, 255);
+      }
+    };
+    for (const VIOManager::RejectedVisualPointForDraw &rejected_pt : rejected_visual_points_for_draw_)
     {
-      cv::circle(img_cp, pc, 5, cv::Scalar(0, 0, 255), -1, 8);
+      cv::circle(img_cp, rejected_pt.px, 5, rejectedPointColor(rejected_pt.reason), -1, 8);
     }
   }
   // std::string text = std::to_string(inlier_count) + " " + std::to_string(total_points);
