@@ -188,6 +188,7 @@ public:
   double virtual_splat_min_weight = 1.0e-6;
   bool virtual_splat_require_full_core_coverage = true;
   bool virtual_splat_debug_compare_pull_exact = false;
+  bool draw_rejected_points_en = false;
   int virtual_support_radius = 0;
   int virtual_support_size = 0;
   std::vector<V3F> virtual_support_ray_lut_;
@@ -224,6 +225,7 @@ public:
   int virtual_track_current_core_fail_count_ = 0;
   int virtual_track_ncc_reject_count_ = 0;
   int virtual_track_photometric_reject_count_ = 0;
+  std::vector<cv::Point2f> rejected_visual_points_for_draw_;
   
   SubSparseMap *visual_submap;
   std::vector<std::vector<V3D>> rays_with_sample_points;

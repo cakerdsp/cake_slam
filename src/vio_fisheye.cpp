@@ -999,6 +999,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   virtual_track_current_core_fail_count_ = 0;
   virtual_track_ncc_reject_count_ = 0;
   virtual_track_photometric_reject_count_ = 0;
+  if (draw_rejected_points_en)
+  {
+    rejected_visual_points_for_draw_.clear();
+    rejected_visual_points_for_draw_.reserve(length);
+  }
   if (feat_map.empty()) return;
 
   const double candidate_select_start = omp_get_wtime();
@@ -1144,6 +1149,10 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     int rejection = 0;
     bool valid = false;
   };
+  auto recordRejectedPoint = [&](const V2D &raw_px) {
+    if (draw_rejected_points_en)
+      rejected_visual_points_for_draw_.emplace_back(static_cast<float>(raw_px[0]), static_cast<float>(raw_px[1]));
+  };
 
   vector<VirtualCandidate> candidates;
   candidates.reserve(length);
@@ -1160,6 +1169,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     if (!pt->is_normal_initialized_)
     {
       ++virtual_candidate_normal_uninit_count_;
+      if (draw_rejected_points_en)
+      {
+        V2D raw_px;
+        if (projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, raw_px)) recordRejectedPoint(raw_px);
+      }
       continue;
     }
 
@@ -1194,6 +1208,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     if (range_discontinuous)
     {
       ++virtual_candidate_range_reject_count_;
+      recordRejectedPoint(raw_px);
       continue;
     }
 
@@ -1239,16 +1254,19 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     else if (!pt->getCloseViewObs(new_frame_->pos(), ref_ftr, raw_px))
     {
       ++virtual_candidate_close_view_fail_count_;
+      recordRejectedPoint(raw_px);
       continue;
     }
     if (ref_ftr == nullptr)
     {
       ++virtual_candidate_ref_missing_count_;
+      recordRejectedPoint(raw_px);
       continue;
     }
     if (!ref_ftr->virtual_patch_valid_)
     {
       ++virtual_candidate_ref_invalid_count_;
+      recordRejectedPoint(raw_px);
       continue;
     }
 
@@ -1387,6 +1405,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
       ++virtual_search_level_count[result.search_level];
     if (!result.valid)
     {
+      if (result.rejection != VIRTUAL_REJECT_NONE) recordRejectedPoint(candidates[candidate_index].current_raw_center_px);
       switch (result.rejection)
       {
       case VIRTUAL_REJECT_ROTATION:
@@ -3279,7 +3298,6 @@ void VIOManager::updateFrameState(StatesGroup state)
 void VIOManager::plotTrackedPoints()
 {
   int total_points = visual_submap->voxel_points.size();
-  if (total_points == 0) return;
   // int inlier_count = 0;
   // for (int i = 0; i < img_cp.rows / grid_size; i++)
   // {
@@ -3318,6 +3336,13 @@ void VIOManager::plotTrackedPoints()
     else
     {
       cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 7, cv::Scalar(255, 0, 0), -1, 8); // Blue Sparse Align tracked
+    }
+  }
+  if (draw_rejected_points_en)
+  {
+    for (const cv::Point2f &pc : rejected_visual_points_for_draw_)
+    {
+      cv::circle(img_cp, pc, 5, cv::Scalar(0, 0, 255), -1, 8);
     }
   }
   // std::string text = std::to_string(inlier_count) + " " + std::to_string(total_points);

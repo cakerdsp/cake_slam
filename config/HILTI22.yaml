@@ -64,7 +64,8 @@
       virtual_splat_min_weight: 1.0e-6
       virtual_splat_require_full_core_coverage: true
       virtual_splat_debug_compare_pull_exact: false
-
+      draw_rejected_points_en: false
+      
       normal_en: true
       raycast_en: true
       inverse_composition_en: false
