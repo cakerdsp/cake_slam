@@ -128,7 +128,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<int>("preprocess.point_filter_num", 3);
   try_declare.template operator()<int>("preprocess.scan_rate", 10);
   try_declare.template operator()<bool>("preprocess.feature_extract_enabled", false);
-  try_declare.template operator()<bool>("preprocess.hilti_en", false);
+  try_declare.template operator()<bool>("preprocess.image_downclock_en", false);
+  try_declare.template operator()<int>("preprocess.image_downclock_factor", 1);
 
   try_declare.template operator()<int>("pcd_save.interval", -1);
   try_declare.template operator()<bool>("pcd_save.pcd_save_en", false);
@@ -207,7 +208,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("preprocess.scan_rate", p_pre->SCAN_RATE);
   this->node->get_parameter("preprocess.point_filter_num", p_pre->point_filter_num);
   this->node->get_parameter("preprocess.feature_extract_enabled", p_pre->feature_enabled);
-  this->node->get_parameter("preprocess.hilti_en", hilti_en);
+  this->node->get_parameter("preprocess.image_downclock_en", image_downclock_en);
+  this->node->get_parameter("preprocess.image_downclock_factor", image_downclock_factor);
 
   this->node->get_parameter("pcd_save.interval", pcd_save_interval);
   this->node->get_parameter("pcd_save.pcd_save_en", pcd_save_en);
@@ -1018,10 +1020,10 @@ void LIVMapper::handleImageFrame(const builtin_interfaces::msg::Time &stamp, con
   if (!img_en) return;
 
   // Hiliti2022 40Hz
-  if (hilti_en)
+  if (image_downclock_en)
   {
     static int frame_counter = 0;
-    if (++frame_counter % 4 != 0) return;
+    if (++frame_counter % image_downclock_factor != 0) return;
   }
   // double msg_header_time =  stamp2Sec(msg->header.stamp);
   double msg_header_time = stamp2Sec(stamp) + img_time_offset;

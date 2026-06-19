@@ -17,10 +17,15 @@
 
       # 2025-03-15 second calibration, LiDAR to camera:
       # P_cam = R_cam_lidar * P_lidar + t_cam_lidar
-      Rcl: [0.71787, -0.69617, -0.00210,
-            -0.02115, -0.01878, -0.99960,
-             0.69585,  0.71763, -0.02821]
-      Pcl: [-0.01710, 0.11155, -0.01546]
+      # Rcl: [0.71787, -0.69617, -0.00210,
+      #       -0.02115, -0.01878, -0.99960,
+      #        0.69585,  0.71763, -0.02821]
+      # Pcl: [-0.01710, 0.11155, -0.01546]
+
+      Rcl: [  0.678112,  -0.708821,  -0.194260,
+       -0.271819,   0.003697,  -0.962341,
+        0.682846,   0.705379,  -0.190164]
+      Pcl: [  0.027055,   0.028278,  -0.041908]
 
     time_offset:
       # Current LIVMapper reads img_time_offset/exposure_time_init. imu_time_offset
@@ -30,6 +35,8 @@
       exposure_time_init: 0.0
 
     preprocess:
+      image_downclock_en: true
+      image_downclock_factor: 2
       point_filter_num: 1
       filter_size_surf: 0.1
       lidar_type: 1
@@ -53,7 +60,7 @@
       # Adapted from the original cam0 virtual-patch values:
       # virtual_width/height and sphere LUT fields are not read by this project;
       # ax/ay=120 maps to the current virtual_focal_length parameter.
-      virtual_fisheye_patch_en: true
+      virtual_fisheye_patch_en: false
       virtual_focal_length: 120.0
       virtual_patch_margin: 8
       virtual_max_search_level: 1
