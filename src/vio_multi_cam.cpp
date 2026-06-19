@@ -4181,14 +4181,17 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     updateFrameState(ctx, *state);
     resetGrid(ctx);
   }
+  const double frame_setup_end = omp_get_wtime();
 
   for (PerCameraData &ctx : cameras_)
   {
     retrieveFromVisualSparseMap(ctx, ctx.new_frame->img_, pg, plane_map);
     generateVisualMapPoints(ctx, ctx.new_frame->img_, pg);
   }
+  const double retrieve_end = omp_get_wtime();
 
   computeJacobianAndUpdateEKF();
+  const double ekf_end = omp_get_wtime();
 
   for (PerCameraData &ctx : cameras_)
   {
@@ -4199,7 +4202,9 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     }
     updateVisualMapPoints(ctx, ctx.new_frame->img_);
   }
+  const double map_update_end = omp_get_wtime();
   commitPendingNewPoints();
+  const double commit_end = omp_get_wtime();
   for (PerCameraData &ctx : cameras_)
   {
     updateReferencePatch(ctx, plane_map);
@@ -4207,9 +4212,30 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     if (plot_flag) projectPatchFromRefToCur(ctx, plane_map);
   }
   if (colmap_output_en && numCameras() == 1) dumpDataForColmap();
+  const double reference_end = omp_get_wtime();
   ++frame_count;
-  const double elapsed = omp_get_wtime() - frame_start;
+  const double elapsed = reference_end - frame_start;
   ave_total = ave_total * (frame_count - 1) / frame_count + elapsed / frame_count;
   printf("[ VIO ] multi-camera frame=%d cameras=%d observations=%zu elapsed=%.6f s\n",
          mf.frame_id, numCameras(), feat_map.size(), elapsed);
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+  printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Camera Count", numCameras());
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Frame Setup", frame_setup_end - frame_start);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Retrieve + Generate", retrieve_end - frame_setup_end);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Joint EKF Update", ekf_end - retrieve_end);
+  printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
+  printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Update Visual Map", map_update_end - ekf_end);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Commit New Points", commit_end - map_update_end);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Reference + Debug", reference_end - commit_end);
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", elapsed);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
 }

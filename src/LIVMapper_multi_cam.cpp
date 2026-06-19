@@ -1511,6 +1511,12 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
 
     std::vector<uint8_t> colored(pcl_wait_pub->size(), 0);
     std::vector<PointTypeRGB> rgb_points(pcl_wait_pub->size());
+    std::vector<size_t> projection_rejects(vio_manager->numCameras(), 0);
+    std::vector<size_t> blind_rejects(vio_manager->numCameras(), 0);
+    std::vector<size_t> color_hits(vio_manager->numCameras(), 0);
+    std::vector<double> sampled_r_sum(vio_manager->numCameras(), 0.0);
+    std::vector<double> sampled_g_sum(vio_manager->numCameras(), 0.0);
+    std::vector<double> sampled_b_sum(vio_manager->numCameras(), 0.0);
     for (int camera_id = 0; camera_id < vio_manager->numCameras(); ++camera_id)
     {
       for (size_t i = 0; i < pcl_wait_pub->size(); ++i)
@@ -1519,9 +1525,16 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
         const PointType &point = pcl_wait_pub->points[i];
         V3F bgr;
         double camera_range = 0.0;
-        if (!vio_manager->getColorFromCamera(camera_id, V3D(point.x, point.y, point.z), bgr, &camera_range) ||
-            camera_range < blind_rgb_points)
+        if (!vio_manager->getColorFromCamera(camera_id, V3D(point.x, point.y, point.z), bgr, &camera_range))
+        {
+          ++projection_rejects[camera_id];
           continue;
+        }
+        if (camera_range < blind_rgb_points)
+        {
+          ++blind_rejects[camera_id];
+          continue;
+        }
         PointTypeRGB output;
         output.x = point.x;
         output.y = point.y;
@@ -1531,12 +1544,31 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
         output.b = static_cast<uint8_t>(std::clamp(bgr[0], 0.0f, 255.0f));
         rgb_points[i] = output;
         colored[i] = 1;
+        ++color_hits[camera_id];
+        sampled_r_sum[camera_id] += output.r;
+        sampled_g_sum[camera_id] += output.g;
+        sampled_b_sum[camera_id] += output.b;
       }
     }
     laserCloudWorldRGB->reserve(pcl_wait_pub->size());
     for (size_t i = 0; i < rgb_points.size(); ++i)
       if (colored[i]) laserCloudWorldRGB->push_back(rgb_points[i]);
-    if (laserCloudWorldRGB->empty()) *intensity_to_publish = *pcl_wait_pub;
+    const bool has_camera_color = !laserCloudWorldRGB->empty();
+    printf("[ VIO Color ] input=%zu colored=%zu retained=%zu output_schema=rgb mode=%s\n",
+           pcl_wait_pub->size(),
+           static_cast<size_t>(std::count(colored.begin(), colored.end(), static_cast<uint8_t>(1))),
+           has_camera_color ? 0UL : pcl_wait_pub->size(),
+           has_camera_color ? "camera_color" : "empty_rgb_retry");
+    for (int camera_id = 0; camera_id < vio_manager->numCameras(); ++camera_id)
+    {
+      const double hit_count = static_cast<double>(color_hits[camera_id]);
+      const double mean_r = hit_count > 0.0 ? sampled_r_sum[camera_id] / hit_count : 0.0;
+      const double mean_g = hit_count > 0.0 ? sampled_g_sum[camera_id] / hit_count : 0.0;
+      const double mean_b = hit_count > 0.0 ? sampled_b_sum[camera_id] / hit_count : 0.0;
+      printf("[ VIO Color ] camera_id=%d hits=%zu projection_rejects=%zu blind_rejects=%zu sampled_rgb_mean=(%.1f,%.1f,%.1f)\n",
+             camera_id, color_hits[camera_id], projection_rejects[camera_id], blind_rejects[camera_id],
+             mean_r, mean_g, mean_b);
+    }
   }
   else
   {
@@ -1544,8 +1576,9 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
   }
 
   sensor_msgs::msg::PointCloud2 laserCloudmsg;
-  const bool published_rgb = !laserCloudWorldRGB->empty();
-  if (published_rgb) pcl::toROSMsg(*laserCloudWorldRGB, laserCloudmsg);
+  const bool has_camera_color = img_en && !laserCloudWorldRGB->empty();
+  // Keep the PointCloud2 field layout stable for RViz's RGB8 transformer on this topic.
+  if (img_en) pcl::toROSMsg(*laserCloudWorldRGB, laserCloudmsg);
   else pcl::toROSMsg(*intensity_to_publish, laserCloudmsg);
   laserCloudmsg.header.stamp = this->node->get_clock()->now();
   laserCloudmsg.header.frame_id = "camera_init";
@@ -1554,8 +1587,14 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
   if (pcd_save_en)
   {
     static int scan_wait_num = 0;
-    if (published_rgb) *pcl_wait_save += *laserCloudWorldRGB;
-    else *pcl_wait_save_intensity += *intensity_to_publish;
+    if (img_en)
+    {
+      if (has_camera_color) *pcl_wait_save += *laserCloudWorldRGB;
+    }
+    else
+    {
+      *pcl_wait_save_intensity += *intensity_to_publish;
+    }
     ++scan_wait_num;
     if ((pcl_wait_save->size() > 0 || pcl_wait_save_intensity->size() > 0) && pcd_save_interval > 0 && scan_wait_num >= pcd_save_interval)
     {
@@ -1575,7 +1614,7 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
       scan_wait_num = 0;
     }
   }
-  PointCloudXYZI().swap(*pcl_wait_pub);
+  if (!img_en || has_camera_color) PointCloudXYZI().swap(*pcl_wait_pub);
   PointCloudXYZI().swap(*pcl_w_wait_pub);
 }
 
