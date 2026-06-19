@@ -914,3 +914,146 @@ callback 只负责构建 PendingImageGroup；真正送入 VIO 的是 sync_packag
 请按以上要求修改代码，保持可编译，并尽量保持 num_cameras=1 时旧行为一致。
 这里的“旧行为一致”只指算法行为和运行结果尽量一致，不指继续兼容旧 common.img_topic / extrin_calib.Rcl/Pcl / camera namespace="camera" 的旧配置格式。
 不要引入多个 VIOManager，不要复制多份视觉地图，不要拼接图像参与算法，不要按空间距离合并新点，不要忽略 virtual patch 的 camera_id。
+
+
+
+
+请只精修 LIVMapper_multi_cam.cpp 中的多相机图像组包 flush 逻辑，不要改 VIOManager、状态、视觉地图、点云着色、Frame/Feature 或其他已经实现的多相机逻辑。
+
+当前问题：
+
+flushCompletedImageGroupsLocked() 只检查 pending_images.begin()。如果最旧 timestamp 的 PendingImageGroup 不完整，就直接 break。这样会导致后面已经完整的多相机帧被旧的不完整 group 阻塞，直到 pending_images.size() 超过 multi_cam_sync_queue_size 后才释放。这会造成不必要的图像延迟和同步抖动。
+
+需要实现的策略：
+
+采用 “later-complete 触发 stale incomplete drop” 策略。
+
+核心要求：
+
+1. pending_images 仍然使用 std::map<uint64_t, PendingImageGroup>，按 stamp_ns 有序保存未 flush 的 group。
+2. multi_cam_frame_buffer 只能包含完整 MultiCameraFrame。
+3. multi_cam_frame_buffer 必须保持 stamp_ns 单调递增，不能把较新完整 group 直接 push 到较旧未处理 group 前面。
+4. flushCompletedImageGroupsLocked() 仍然只能从 pending_images.begin() 开始按时间顺序处理。
+5. 如果 oldest group 已完整：
+
+   * 生成 MultiCameraFrame；
+   * frame.stamp_ns = oldest->second.stamp_ns；
+   * frame.timestamp = oldest->second.timestamp；
+   * frame.frame_id = next_vio_frame_id++；
+   * frame.images = std::move(oldest->second.images)；
+   * push_back 到 multi_cam_frame_buffer；
+   * erase oldest；
+   * continue 继续检查下一个 oldest。
+6. 如果 oldest group 不完整，但 pending_images 中存在更晚 timestamp 的完整 group：
+
+   * 认为 oldest group 已经 stale；
+   * warning 打印该 stamp_ns 以及缺失的 camera_id；
+   * erase oldest；
+   * continue 继续 flush。
+7. 如果 oldest group 不完整，且不存在任何更晚 timestamp 的完整 group：
+
+   * 停止 flush；
+   * break；
+   * 等待后续图像到达。
+8. 保留 pending_images.size() > multi_cam_sync_queue_size 的兜底丢弃逻辑，但它只作为兜底，不应该是解除旧残帧阻塞的唯一机制。
+9. next_vio_frame_id++ 只能在完整 MultiCameraFrame 真正 push 到 multi_cam_frame_buffer 时执行，不能在 PendingImageGroup 刚 complete 时提前执行。
+10. 不要改变 handleImageFrame() 的基本组包逻辑：callback 仍然只负责按 stamp_ns + camera_id 填充 pending_images，并在写入新图像后调用 flushCompletedImageGroupsLocked()。
+
+建议实现辅助函数：
+
+static 或成员函数均可，但不要引入新架构。
+
+可以新增：
+
+bool LIVMapper::hasLaterCompleteImageGroupLocked(uint64_t stamp_ns) const;
+
+语义：
+
+从 pending_images.upper_bound(stamp_ns) 开始遍历，如果发现任意 it->second.isComplete() == true，则返回 true，否则返回 false。
+
+可以新增：
+
+std::string LIVMapper::formatMissingCameraIdsLocked(const PendingImageGroup& group) const;
+
+语义：
+
+遍历 group.arrived，如果 arrived[camera_id] == 0，则把 camera_id 加入字符串，用于 warning。该函数只用于日志，不影响逻辑。
+
+目标 flushCompletedImageGroupsLocked() 逻辑应类似：
+
+void LIVMapper::flushCompletedImageGroupsLocked()
+{
+while (!pending_images.empty())
+{
+auto oldest = pending_images.begin();
+
+```
+if (oldest->second.isComplete())
+{
+  MultiCameraFrame frame;
+  frame.stamp_ns = oldest->second.stamp_ns;
+  frame.timestamp = oldest->second.timestamp;
+  frame.frame_id = next_vio_frame_id++;
+  frame.images = std::move(oldest->second.images);
+
+  multi_cam_frame_buffer.push_back(std::move(frame));
+  pending_images.erase(oldest);
+  continue;
+}
+
+if (hasLaterCompleteImageGroupLocked(oldest->first))
+{
+  RCLCPP_WARN(
+    this->node->get_logger(),
+    "Drop stale incomplete multi-camera group stamp_ns=%llu, missing cameras=%s, because a later complete group exists",
+    static_cast<unsigned long long>(oldest->first),
+    formatMissingCameraIdsLocked(oldest->second).c_str());
+
+  pending_images.erase(oldest);
+  continue;
+}
+
+break;
+```
+
+}
+}
+
+注意：
+
+1. 不允许在 handleImageFrame() 中发现当前 group complete 后直接 push_back 到 multi_cam_frame_buffer，因为这可能造成 multi_cam_frame_buffer 时间乱序。
+2. 不允许遍历 pending_images 找到任意完整 group 就直接 push_back，必须保证输出顺序。
+3. 只有当更早的不完整 group 被判定 stale 并丢弃后，后面的完整 group 才能按顺序 flush。
+4. queue 超限逻辑仍然可以保留：
+
+while (static_cast<int>(pending_images.size()) > multi_cam_sync_queue_size)
+{
+const uint64_t dropped_stamp = pending_images.begin()->first;
+const std::string missing = formatMissingCameraIdsLocked(pending_images.begin()->second);
+pending_images.erase(pending_images.begin());
+
+RCLCPP_WARN(
+this->node->get_logger(),
+"Drop incomplete multi-camera group stamp_ns=%llu due to pending queue overflow, missing cameras=%s",
+static_cast<unsigned long long>(dropped_stamp),
+missing.c_str());
+
+flushCompletedImageGroupsLocked();
+}
+
+5. 该修复只改变 pending_images 到 multi_cam_frame_buffer 的 flush 策略，不改变 sync_packages() 对 multi_cam_frame_buffer.front() 的使用方式。
+6. 修复后应满足：
+
+   * 不完整旧帧不会长期阻塞后续完整帧；
+   * multi_cam_frame_buffer 内的 MultiCameraFrame 仍然按 stamp_ns 单调递增；
+   * frame_id 仍然按真正进入 VIO 的完整帧顺序递增；
+   * 只有完整 MultiCameraFrame 能进入 sync_packages / VIO。
+补充约束：
+
+1. 如果新增 hasLaterCompleteImageGroupLocked()、formatMissingCameraIdsLocked() 作为 LIVMapper 成员函数，必须同时在 LIVMapper_multi_cam.h 中声明；如果只在 cpp 内部作为 lambda 或 static helper，则不需要改 header。优先保证可编译。
+
+2. flushCompletedImageGroupsLocked()、hasLaterCompleteImageGroupLocked()、formatMissingCameraIdsLocked() 都默认在已经持有图像组包 mutex 的情况下调用，不要在这些函数内部重复加锁，避免死锁。
+
+3. formatMissingCameraIdsLocked() 必须在 erase oldest 或 move images 之前调用；不要在 std::move(oldest->second.images) 之后再访问该 group 的图像内容。
+
+4. handleImageFrame() 写入 pending_images[stamp_ns].images[camera_id] 后，只调用 flushCompletedImageGroupsLocked()。即使当前 group 已 complete，也不能在 handleImageFrame() 中直接 push_back 到 multi_cam_frame_buffer，避免时间戳乱序。

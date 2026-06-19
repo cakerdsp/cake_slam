@@ -10,12 +10,12 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
-#ifndef LIV_MAPPER_H
-#define LIV_MAPPER_H
+#ifndef LIV_MAPPER_MULTI_CAM_H
+#define LIV_MAPPER_MULTI_CAM_H
 
-#include "IMU_Processing.h"
-#include "vio_fisheye.h"
-#include "preprocess.h"
+#include "IMU_Processing_multi_cam.h"
+#include "vio_multi_cam.h"
+#include "preprocess_multi_cam.h"
 #ifdef PRE_ROS_IRON
 #include <cv_bridge/cv_bridge.h>
 #else
@@ -27,6 +27,31 @@ which is included as part of this source code package.
 #include <nav_msgs/msg/path.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <vikit/camera_loader.h>
+#include <map>
+
+struct CameraInputConfig
+{
+  std::string img_topic;
+  std::string camera_namespace;
+  std::vector<double> Rcl;
+  std::vector<double> Pcl;
+};
+
+struct PendingImageGroup
+{
+  uint64_t stamp_ns = 0;
+  double timestamp = 0.0;
+  std::vector<cv::Mat> images;
+  std::vector<uint8_t> arrived;
+
+  bool isComplete() const
+  {
+    if (arrived.empty()) return false;
+    for (uint8_t value : arrived)
+      if (!value) return false;
+    return true;
+  }
+};
 
 class LIVMapper
 {
@@ -55,9 +80,9 @@ public:
   void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg_in);
   void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in);
-  void img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in);
-  void compressed_img_cbk(const sensor_msgs::msg::CompressedImage::ConstSharedPtr &msg_in);
-  void publish_img_rgb(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager);
+  void img_cbk(int camera_id, const sensor_msgs::msg::Image::ConstSharedPtr &msg_in);
+  void compressed_img_cbk(int camera_id, const sensor_msgs::msg::CompressedImage::ConstSharedPtr &msg_in);
+  void publish_img_rgb(VIOManagerPtr vio_manager);
   void publish_optical_flow_image(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager);
   void publish_triangulated_points(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubCloud,
                                    const PointCloudXYZI::Ptr &cloud);
@@ -72,7 +97,8 @@ public:
   template <typename T> void pointBodyToWorld(const Eigen::Matrix<T, 3, 1> &pi, Eigen::Matrix<T, 3, 1> &po);
   template <typename T> Eigen::Matrix<T, 3, 1> pointBodyToWorld(const Eigen::Matrix<T, 3, 1> &pi);
   cv::Mat getImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &img_msg);
-  void handleImageFrame(const builtin_interfaces::msg::Time &stamp, const cv::Mat &img_cur);
+  void handleImageFrame(int camera_id, const builtin_interfaces::msg::Time &stamp, const cv::Mat &img_cur);
+  void flushCompletedImageGroupsLocked();
 
   std::mutex mtx_buffer, mtx_buffer_imu_prop;
   std::condition_variable sig_buffer;
@@ -81,7 +107,11 @@ public:
   std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map;
   
   string root_dir;
-  string lid_topic, imu_topic, seq_name, img_topic;
+  string lid_topic, imu_topic, seq_name;
+  int num_cameras = 1;
+  bool require_all_cameras = true;
+  int multi_cam_sync_queue_size = 5;
+  std::vector<CameraInputConfig> camera_configs;
   V3D extT;
   M3D extR;
 
@@ -90,7 +120,9 @@ public:
   double res_mean_last = 0.05;
   double gyr_cov = 0, acc_cov = 0, inv_expo_cov = 0;
   double blind_rgb_points = 0.0;
-  double last_timestamp_lidar = -1.0, last_timestamp_imu = -1.0, last_timestamp_img = -1.0;
+  double last_timestamp_lidar = -1.0, last_timestamp_imu = -1.0;
+  std::vector<double> last_timestamp_img_by_camera;
+  std::vector<int> image_decimation_counters;
   double filter_size_surf_min = 0;
   double filter_size_pcd = 0;
   double _first_lidar_time = 0.0;
@@ -119,6 +151,7 @@ public:
   int img_en = 1, imu_int_frame = 3;
   bool normal_en = true;
   bool exposure_estimate_en = false;
+  double inv_expo_time_init = 1.0;
   double exposure_time_init = 0.0;
   bool inverse_composition_en = false;
   bool raycast_en = false;
@@ -126,6 +159,7 @@ public:
   bool is_first_frame = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;
   bool virtual_fisheye_patch_en = false;
+  bool cross_camera_reference_en = false;
   double virtual_focal_length = 300.0;
   int virtual_patch_margin = 4;
   int virtual_max_search_level = 1;
@@ -152,13 +186,12 @@ public:
   deque<PointCloudXYZI::Ptr> lid_raw_data_buffer;
   deque<double> lid_header_time_buffer;
   deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
-  deque<cv::Mat> img_buffer;
-  deque<double> img_time_buffer;
+  std::map<uint64_t, PendingImageGroup> pending_images;
+  deque<MultiCameraFrame> multi_cam_frame_buffer;
+  int next_vio_frame_id = 0;
   vector<pointWithVar> _pv_list;
   vector<double> extrinT;
   vector<double> extrinR;
-  vector<double> cameraextrinT;
-  vector<double> cameraextrinR;
   int IMG_POINT_COV;
 
   PointCloudXYZI::Ptr visual_sub_map;
@@ -194,8 +227,8 @@ public:
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr voxel_pub;
   std::shared_ptr<rclcpp::SubscriptionBase> sub_pcl;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_img;
-  rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr sub_img_compressed;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> sub_imgs;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr> sub_imgs_compressed;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFullRes;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubNormal;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubSubVisualMap;
@@ -206,7 +239,7 @@ public:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudDyn;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudDynRmed;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudDynDbg;
-  image_transport::Publisher pubImage;
+  std::vector<image_transport::Publisher> pubImages;
   image_transport::Publisher pubOpticalFlowImage;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubTriangulatedPoints;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr mavros_pose_publisher;

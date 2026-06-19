@@ -10,11 +10,11 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
-#ifndef VIO_FISHEYE_H_
-#define VIO_FISHEYE_H_
+#ifndef VIO_MULTI_CAM_H_
+#define VIO_MULTI_CAM_H_
 
-#include "voxel_map.h"
-#include "feature_fisheye.h"
+#include "voxel_map_multi_cam.h"
+#include "feature_multi_cam.h"
 #include <algorithm>
 #include <cmath>
 #include <deque>
@@ -29,6 +29,8 @@ which is included as part of this source code package.
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <unordered_map>
+#include <utility>
 #include <vikit/math_utils.h>
 #include <vikit/robust_cost.h>
 #include <vikit/vision.h>
@@ -149,30 +151,108 @@ struct OpticalFlowTrack
   std::vector<OpticalFlowObservation, Eigen::aligned_allocator<OpticalFlowObservation>> observations;
 };
 
+enum CandidateSourceType
+{
+  SOURCE_PG = 0,
+  SOURCE_RAYCAST_PLANE = 1,
+  SOURCE_UNKNOWN = 2
+};
+
+struct PendingNewPointObservation
+{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+  int camera_id = -1;
+  int source_type = SOURCE_UNKNOWN;
+  int source_index = -1;
+  pointWithVar pt_var;
+  V2D px = V2D::Zero();
+  V3D bearing = V3D::Zero();
+  std::vector<float> patch;
+  cv::Mat img;
+  SE3<double> T_f_w;
+  SE3<double> T_v_w;
+  M3D R_v_from_c = M3D::Identity();
+  M3D R_c_from_v = M3D::Identity();
+  bool virtual_patch_valid = false;
+  int level = 0;
+  double inv_expo_time = 1.0;
+};
+
+struct PerCameraData
+{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+  int camera_id = -1;
+  std::string topic;
+  std::string camera_namespace;
+  vk::AbstractCamera *cam = nullptr;
+  vk::PinholeCamera *pinhole_cam = nullptr;
+
+  M3D Rcl = M3D::Identity();
+  M3D Rci = M3D::Identity();
+  M3D Rcw = M3D::Identity();
+  V3D Pcl = V3D::Zero();
+  V3D Pci = V3D::Zero();
+  V3D Pcw = V3D::Zero();
+  M3D Jdphi_dR = M3D::Identity();
+  M3D Jdp_dR = M3D::Zero();
+  M3D Jdp_dt = M3D::Identity();
+
+  int width = 0;
+  int height = 0;
+  double fx = 0.0;
+  double fy = 0.0;
+  double cx = 0.0;
+  double cy = 0.0;
+  double image_resize_factor = 1.0;
+  int grid_size = 0;
+  int grid_n_width = 0;
+  int grid_n_height = 0;
+  int length = 0;
+  int total_points = 0;
+
+  std::vector<int> grid_num;
+  std::vector<int> map_index;
+  std::vector<int> border_flag;
+  std::vector<int> update_flag;
+  std::vector<float> map_dist;
+  std::vector<float> scan_value;
+  std::vector<VisualPoint *> retrieve_voxel_points;
+  std::vector<pointWithVar> append_voxel_points;
+  std::vector<int> append_voxel_source_type;
+  std::vector<int> append_voxel_source_index;
+  std::vector<std::vector<V3D>> rays_with_sample_points;
+  std::vector<V3F> raw_pixel_to_unit_ray_lut;
+  std::vector<uint8_t> raw_pixel_unit_ray_valid_mask;
+  std::unordered_map<VOXEL_LOCATION, int> sub_feat_map;
+  std::unordered_map<Feature *, Warp *> warp_map;
+  std::vector<PendingNewPointObservation> pending_new_points;
+
+  FramePtr new_frame;
+  SubSparseMap *visual_submap = nullptr;
+  cv::Mat img_cp;
+  cv::Mat img_rgb;
+  cv::Mat img_test;
+  std::vector<std::pair<cv::Point2f, int>> rejected_visual_points_for_draw;
+};
+
 class VIOManager
 {
 public:
   int grid_size;
-  vk::AbstractCamera *cam;
-  vk::PinholeCamera *pinhole_cam;
   StatesGroup *state;
   StatesGroup *state_propagat;
-  M3D Rli, Rci, Rcl, Rcw, Jdphi_dR, Jdp_dt, Jdp_dR;
-  V3D Pli, Pci, Pcl, Pcw;
-  vector<int> grid_num;
-  vector<int> map_index;
-  vector<int> border_flag;
-  vector<int> update_flag;
-  vector<float> map_dist;
-  vector<float> scan_value;
+  M3D Rli;
+  V3D Pli;
+  std::vector<PerCameraData> cameras_;
   vector<float> patch_buffer;
-  bool normal_en, inverse_composition_en, exposure_estimate_en, raycast_en, has_ref_patch_cache;
+  bool normal_en, inverse_composition_en, exposure_estimate_en, raycast_en;
   bool ncc_en = false, colmap_output_en = false;
   bool virtual_fisheye_patch_en = false;
+  bool cross_camera_reference_en = false;
 
-  int width, height, grid_n_width, grid_n_height, length;
-  double image_resize_factor;
-  double fx, fy, cx, cy;
+  int grid_n_width, grid_n_height;
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
   int max_iterations, total_points;
 
@@ -193,8 +273,6 @@ public:
   int virtual_support_size = 0;
   std::vector<V3F> virtual_support_ray_lut_;
   std::vector<V2F> core_patch_offsets_;
-  std::vector<V3F> raw_pixel_to_unit_ray_lut_;
-  std::vector<uint8_t> raw_pixel_unit_ray_valid_mask_;
 
   int rejected_virtual_support_oob_ = 0;
   int rejected_virtual_projection_invalid_ = 0;
@@ -246,11 +324,6 @@ public:
     cv::Point2f px;
     int reason = REJECT_DRAW_RANGE;
   };
-  std::vector<RejectedVisualPointForDraw> rejected_visual_points_for_draw_;
-  
-  SubSparseMap *visual_submap;
-  std::vector<std::vector<V3D>> rays_with_sample_points;
-
   double compute_jacobian_time, update_ekf_time;
   double ave_total = 0;
   // double ave_build_residual_time = 0;
@@ -259,17 +332,10 @@ public:
   int frame_count = 0;
   bool plot_flag;
 
-  Eigen::Matrix<double, DIM_STATE, DIM_STATE> G, H_T_H;
-  Eigen::MatrixXd K, H_sub_inv;
+  Eigen::MatrixXd G, H_T_H;
 
   ofstream fout_camera, fout_colmap;
   unordered_map<VOXEL_LOCATION, VOXEL_POINTS *> feat_map;
-  unordered_map<VOXEL_LOCATION, int> sub_feat_map; 
-  unordered_map<int, Warp *> warp_map;
-  vector<VisualPoint *> retrieve_voxel_points;
-  vector<pointWithVar> append_voxel_points;
-  FramePtr new_frame_;
-  cv::Mat img_cp, img_rgb, img_test;
   cv::Mat optical_flow_debug_img;
 
   int frontend_mode = 0;
@@ -300,52 +366,56 @@ public:
 
   VIOManager();
   ~VIOManager();
-  void updateStateInverse(cv::Mat img, int level);
-  void updateState(cv::Mat img, int level);
+  void configureCameras(int num_cameras);
+  void setCameraCalibration(int camera_id, const std::string &topic, const std::string &camera_namespace,
+                            const std::vector<double> &R, const std::vector<double> &P);
+  int numCameras() const { return static_cast<int>(cameras_.size()); }
+  void processMultiCameraFrame(const MeasureGroup &meas, vector<pointWithVar> &pg,
+                               const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void processFrameOpticalFlow(cv::Mat &img, double img_time);
-  void processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
   void processFrameFake(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
-  bool inOpticalFlowBorder(const cv::Point2f &pt) const;
-  V3D getOpticalFlowBearing(const cv::Point2f &px) const;
-  void setOpticalFlowMask(cv::Mat &mask);
+  bool inOpticalFlowBorder(const PerCameraData &ctx, const cv::Point2f &pt) const;
+  V3D getOpticalFlowBearing(const PerCameraData &ctx, const cv::Point2f &px) const;
+  void setOpticalFlowMask(const PerCameraData &ctx, cv::Mat &mask);
   void addOpticalFlowObservation(OpticalFlowTrack &track, const cv::Point2f &px, double img_time);
   bool triangulateOpticalFlowTrack(OpticalFlowTrack &track);
   void updateOpticalFlowPointClouds();
   void drawOpticalFlowDebugImage(const std::vector<cv::Point2f> &rejected_pts, int prev, int tracked, int flow_back_pass,
                                  int border_pass, int mask_reject, int new_points, int final_points, int triangulated);
-  void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
-  void generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg);
+  void retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
+                                   const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+  void generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg);
   void setImuToLidarExtrinsic(const V3D &transl, const M3D &rot);
-  void setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P);
   void initializeVIO();
-  void getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level);
-  void computeProjectionJacobian(V3D p, MD(2, 3) & J);
+  void getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D pc, float *patch_tmp, int level);
+  void computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J);
   void computeVirtualProjectionJacobian(const V3D &p_v, MD(2, 3) &J) const;
-  void computeJacobianAndUpdateEKF(cv::Mat img);
-  void resetGrid();
-  void updateVisualMapPoints(cv::Mat img);
-  void getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector2d &px_ref, const Vector3d &f_ref, const double depth_ref, const SE3<double> &T_cur_ref,
+  void computeJacobianAndUpdateEKF();
+  void resetGrid(PerCameraData &ctx);
+  void updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img);
+  void getWarpMatrixAffine(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const Vector2d &px_ref,
+                           const Vector3d &f_ref, const double depth_ref, const SE3<double> &T_cur_ref,
                            const int level_ref, 
                            const int pyramid_level, const int halfpatch_size, Matrix2d &A_cur_ref);
-  void getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref,
+  void getWarpMatrixAffineHomography(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const V2D &px_ref,
                                      const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
   void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
   bool buildVirtualFrameRotation(const V3D &point_in_raw_camera, M3D &R_v_from_c, M3D &R_c_from_v) const;
-  bool projectRawFisheyeIfValid(const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const;
-  bool buildVirtualSupportPatchPullExact(const cv::Mat &raw_img, const M3D &R_c_from_v, VirtualPatchImage &output) const;
-  void splatRawPixelToVirtualPatch(const cv::Mat &raw_img, int raw_x, int raw_y, const M3D &R_v_from_c, cv::Mat &value_sum,
+  bool projectRawFisheyeIfValid(const PerCameraData &ctx, const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const;
+  bool buildVirtualSupportPatchPullExact(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v, VirtualPatchImage &output) const;
+  void splatRawPixelToVirtualPatch(const PerCameraData &ctx, const cv::Mat &raw_img, int raw_x, int raw_y, const M3D &R_v_from_c, cv::Mat &value_sum,
                                    cv::Mat &weight_sum) const;
   bool hasFullVirtualCoreCoverage(const cv::Mat &valid_mask) const;
-  bool buildVirtualSupportPatchForwardSplat(const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c,
+  bool buildVirtualSupportPatchForwardSplat(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c,
                                             VirtualPatchImage &output) const;
-  bool buildVirtualSupportPatch(const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c, const M3D &R_c_from_v,
+  bool buildVirtualSupportPatch(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c, const M3D &R_c_from_v,
                                 VirtualPatchImage &output) const;
   bool interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value) const;
   bool interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value) const;
   V2D virtualProject(const V3D &p_v) const;
   V3D virtualCam2World(const V2D &px_v) const;
-  bool createVirtualFeaturePatch(const cv::Mat &raw_img, const SE3<double> &T_c_w, const V3D &point_w, float *core_patch,
+  bool createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img, const SE3<double> &T_c_w, const V3D &point_w, float *core_patch,
                                  cv::Mat &virtual_support_img, SE3<double> &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const;
   bool getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
                                   int halfpatch_size, Matrix2d &A_cur_ref) const;
@@ -357,23 +427,21 @@ public:
   bool sampleVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px, int scale, float &value, V2D &gradient) const;
   bool sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V2D &px, int scale, float &value, V2D &gradient) const;
   SE3<double> composeVirtualPose(const M3D &R_v_from_c, const SE3<double> &T_c_w) const;
-  void retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWithVar> &pg,
+  void retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
                                           const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
-  void generateVisualMapPointsVirtual(cv::Mat img, vector<pointWithVar> &pg);
-  void updateVisualMapPointsVirtual(cv::Mat img);
-  void precomputeReferencePatchesVirtual(int level);
-  void updateStateVirtual(cv::Mat img, int level);
-  void updateStateInverseVirtual(cv::Mat img, int level);
+  void generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg);
+  void updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img);
   void insertPointIntoVoxelMap(VisualPoint *pt_new);
-  void plotTrackedPoints();
-  void updateFrameState(StatesGroup state);
-  void projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
-  void updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
-  void precomputeReferencePatches(int level);
+  void commitPendingNewPoints();
+  void plotTrackedPoints(PerCameraData &ctx);
+  void updateFrameState(PerCameraData &ctx, const StatesGroup &state_value);
+  void projectPatchFromRefToCur(PerCameraData &ctx, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+  void updateReferencePatch(PerCameraData &ctx, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void dumpDataForColmap();
   double calculateNCC(float *ref_patch, float *cur_patch, int patch_size);
   int getBestSearchLevel(const Matrix2d &A_cur_ref, const int max_level);
-  V3F getInterpolatedPixel(cv::Mat img, V2D pc);
+  V3F getInterpolatedPixel(const cv::Mat &img, V2D pc) const;
+  bool getColorFromCamera(int camera_id, const V3D &p_w, V3F &bgr, double *cam_range = nullptr) const;
   
   // void resetRvizDisplay();
   // deque<VisualPoint *> map_cur_frame;

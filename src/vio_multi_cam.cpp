@@ -10,7 +10,7 @@ This file is subject to the terms and conditions outlined in the 'LICENSE' file,
 which is included as part of this source code package.
 */
 
-#include "vio_fisheye.h"
+#include "vio_multi_cam.h"
 
 using namespace Eigen;
 
@@ -75,19 +75,42 @@ void prepareVirtualPatchWorkspace(VirtualPatchWorkspace &workspace, int support_
 
 VIOManager::VIOManager()
 {
-  // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
-  visual_submap = nullptr;
-  pinhole_cam = nullptr;
+  Rli = M3D::Identity();
+  Pli = V3D::Zero();
   optical_flow_triangulated_points.reset(new PointCloudXYZI());
 }
 
 VIOManager::~VIOManager()
 {
-  delete visual_submap;
-  for (auto& pair : warp_map) delete pair.second;
-  warp_map.clear();
+  for (PerCameraData &ctx : cameras_)
+  {
+    delete ctx.visual_submap;
+    ctx.visual_submap = nullptr;
+    for (auto &pair : ctx.warp_map) delete pair.second;
+    ctx.warp_map.clear();
+  }
   for (auto& pair : feat_map) delete pair.second;
   feat_map.clear();
+}
+
+void VIOManager::configureCameras(int num_cameras)
+{
+  if (num_cameras < 1) throw std::invalid_argument("VIOManager requires at least one camera");
+  cameras_.clear();
+  cameras_.resize(num_cameras);
+  for (int camera_id = 0; camera_id < num_cameras; ++camera_id) cameras_[camera_id].camera_id = camera_id;
+}
+
+void VIOManager::setCameraCalibration(int camera_id, const std::string &topic, const std::string &camera_namespace,
+                                      const std::vector<double> &R, const std::vector<double> &P)
+{
+  if (camera_id < 0 || camera_id >= numCameras()) throw std::out_of_range("invalid camera_id");
+  if (R.size() != 9 || P.size() != 3) throw std::invalid_argument("camera Rcl/Pcl dimensions must be 9/3");
+  PerCameraData &ctx = cameras_[camera_id];
+  ctx.topic = topic;
+  ctx.camera_namespace = camera_namespace;
+  ctx.Rcl << MAT_FROM_ARRAY(R);
+  ctx.Pcl << VEC_FROM_ARRAY(P);
 }
 
 void VIOManager::setImuToLidarExtrinsic(const V3D &transl, const M3D &rot)
@@ -96,136 +119,9 @@ void VIOManager::setImuToLidarExtrinsic(const V3D &transl, const M3D &rot)
   Rli = rot.transpose();
 }
 
-void VIOManager::setLidarToCameraExtrinsic(vector<double> &R, vector<double> &P)
-{
-  Rcl << MAT_FROM_ARRAY(R);
-  Pcl << VEC_FROM_ARRAY(P);
-}
-
 void VIOManager::initializeVIO()
 {
-  visual_submap = new SubSparseMap;
-
-  fx = cam->fx();
-  fy = cam->fy();
-  cx = cam->cx();
-  cy = cam->cy();
-  image_resize_factor = cam->scale();
-
-  printf("intrinsic: %.6lf, %.6lf, %.6lf, %.6lf\n", fx, fy, cx, cy);
-
-  width = cam->width();
-  height = cam->height();
-
-  printf("width: %d, height: %d, scale: %f\n", width, height, image_resize_factor);
-  Rci = Rcl * Rli;
-  Pci = Rcl * Pli + Pcl;
-
-  V3D Pic;
-  M3D tmp;
-  Jdphi_dR = Rci;
-  Pic = -Rci.transpose() * Pci;
-  tmp << SKEW_SYM_MATRX(Pic);
-  Jdp_dR = -Rci * tmp;
-
-  if (grid_size > 10)
-  {
-    grid_n_width = ceil(static_cast<double>(width / grid_size));
-    grid_n_height = ceil(static_cast<double>(height / grid_size));
-  }
-  else
-  {
-    grid_size = static_cast<int>(height / grid_n_height);
-    grid_n_height = ceil(static_cast<double>(height / grid_size));
-    grid_n_width = ceil(static_cast<double>(width / grid_size));
-  }
-  length = grid_n_width * grid_n_height;
-
-  if(raycast_en)
-  {
-    // cv::Mat img_test = cv::Mat::zeros(height, width, CV_8UC1);
-    // uchar* it = (uchar*)img_test.data;
-
-    border_flag.resize(length, 0);
-
-    std::vector<std::vector<V3D>>().swap(rays_with_sample_points);
-    rays_with_sample_points.reserve(length);
-    printf("grid_size: %d, grid_n_height: %d, grid_n_width: %d, length: %d\n", grid_size, grid_n_height, grid_n_width, length);
-
-    float range_min = 0.1;
-    float range_max = 3.0;
-    float range_step = 0.2;
-    for (int grid_row = 1; grid_row <= grid_n_height; grid_row++)
-    {
-      for (int grid_col = 1; grid_col <= grid_n_width; grid_col++)
-      {
-        std::vector<V3D> SamplePointsEachGrid;
-        int index = (grid_row - 1) * grid_n_width + grid_col - 1;
-
-        if (grid_row == 1 || grid_col == 1 || grid_row == grid_n_height || grid_col == grid_n_width) border_flag[index] = 1;
-
-        int u = grid_size / 2 + (grid_col - 1) * grid_size;
-        int v = grid_size / 2 + (grid_row - 1) * grid_size;
-        // it[ u + v * width ] = 255;
-        for (float range_temp = range_min; range_temp <= range_max; range_temp += range_step)
-        {
-          V3D xyz = cam->cam2world(u, v);
-          if (virtual_fisheye_patch_en)
-          {
-            if (xyz.norm() <= virtual_min_z) continue;
-            xyz.normalize();
-            xyz *= range_temp;
-          }
-          else
-          {
-            if (std::fabs(xyz[2]) <= virtual_min_z) continue;
-            xyz *= range_temp / xyz[2];
-          }
-          SamplePointsEachGrid.push_back(xyz);
-        }
-        rays_with_sample_points.push_back(SamplePointsEachGrid);
-      }
-    }
-    // printf("rays_with_sample_points: %d, RaysWithSamplePointsCapacity: %d,
-    // rays_with_sample_points[0].capacity(): %d, rays_with_sample_points[0]: %d\n",
-    // rays_with_sample_points.size(), rays_with_sample_points.capacity(),
-    // rays_with_sample_points[0].capacity(), rays_with_sample_points[0].size()); for
-    // (const auto & it : rays_with_sample_points[0]) cout << it.transpose() << endl;
-    // cv::imshow("img_test", img_test);
-    // cv::waitKey(1);
-  }
-
-  if(colmap_output_en)
-  {
-    pinhole_cam = dynamic_cast<vk::PinholeCamera*>(cam);
-    if (pinhole_cam == nullptr)
-    {
-      printf("[ VIO ] COLMAP output disabled: the active camera model is not pinhole.\n");
-      colmap_output_en = false;
-    }
-  }
-
-  if(colmap_output_en)
-  {
-    fout_colmap.open(DEBUG_FILE_DIR("Colmap/sparse/0/images.txt"), ios::out);
-    fout_colmap << "# Image list with two lines of data per image:\n";
-    fout_colmap << "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n";
-    fout_colmap << "#   POINTS2D[] as (X, Y, POINT3D_ID)\n";
-    fout_camera.open(DEBUG_FILE_DIR("Colmap/sparse/0/cameras.txt"), ios::out);
-    fout_camera << "# Camera list with one line of data per camera:\n";
-    fout_camera << "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n";
-    fout_camera << "1 PINHOLE " << width << " " << height << " "
-        << std::fixed << std::setprecision(6)  // 控制浮点数精度为10位
-        << fx << " " << fy << " "
-        << cx << " " << cy << std::endl;
-    fout_camera.close();
-  }
-  grid_num.resize(length);
-  map_index.resize(length);
-  map_dist.resize(length);
-  update_flag.resize(length);
-  scan_value.resize(length);
-
+  if (cameras_.empty()) throw std::runtime_error("VIOManager cameras were not configured");
   patch_size_total = patch_size * patch_size;
   patch_size_half = static_cast<int>(patch_size / 2);
   patch_buffer.resize(patch_size_total);
@@ -274,52 +170,158 @@ void VIOManager::initializeVIO()
       }
     }
 
-    raw_pixel_to_unit_ray_lut_.resize(width * height);
-    raw_pixel_unit_ray_valid_mask_.assign(width * height, 0);
-    int valid_raw_rays = 0;
-    for (int raw_y = 0; raw_y < height; ++raw_y)
+  }
+
+  if (colmap_output_en && numCameras() > 1)
+  {
+    printf("[ VIO ] COLMAP output disabled: multi-camera COLMAP is not implemented.\n");
+    colmap_output_en = false;
+  }
+
+  for (PerCameraData &ctx : cameras_)
+  {
+    if (ctx.cam == nullptr)
+      throw std::runtime_error("camera model is null for camera_id=" + std::to_string(ctx.camera_id));
+    ctx.visual_submap = new SubSparseMap;
+    ctx.fx = ctx.cam->fx();
+    ctx.fy = ctx.cam->fy();
+    ctx.cx = ctx.cam->cx();
+    ctx.cy = ctx.cam->cy();
+    ctx.image_resize_factor = ctx.cam->scale();
+    ctx.width = ctx.cam->width();
+    ctx.height = ctx.cam->height();
+    ctx.Rci = ctx.Rcl * Rli;
+    ctx.Pci = ctx.Rcl * Pli + ctx.Pcl;
+    ctx.Jdphi_dR = ctx.Rci;
+    const V3D Pic = -ctx.Rci.transpose() * ctx.Pci;
+    M3D pic_hat;
+    pic_hat << SKEW_SYM_MATRX(Pic);
+    ctx.Jdp_dR = -ctx.Rci * pic_hat;
+
+    ctx.grid_size = grid_size;
+    if (ctx.grid_size > 10)
     {
-      for (int raw_x = 0; raw_x < width; ++raw_x)
+      ctx.grid_n_width = static_cast<int>(std::ceil(static_cast<double>(ctx.width) / ctx.grid_size));
+      ctx.grid_n_height = static_cast<int>(std::ceil(static_cast<double>(ctx.height) / ctx.grid_size));
+    }
+    else
+    {
+      ctx.grid_size = std::max(1, static_cast<int>(ctx.height / grid_n_height));
+      ctx.grid_n_height = static_cast<int>(std::ceil(static_cast<double>(ctx.height) / ctx.grid_size));
+      ctx.grid_n_width = static_cast<int>(std::ceil(static_cast<double>(ctx.width) / ctx.grid_size));
+    }
+    ctx.length = ctx.grid_n_width * ctx.grid_n_height;
+    ctx.grid_num.resize(ctx.length);
+    ctx.map_index.resize(ctx.length);
+    ctx.map_dist.resize(ctx.length);
+    ctx.update_flag.resize(ctx.length);
+    ctx.scan_value.resize(ctx.length);
+    ctx.border_flag.assign(ctx.length, 0);
+    ctx.retrieve_voxel_points.reserve(ctx.length);
+    ctx.append_voxel_points.reserve(ctx.length);
+    ctx.append_voxel_source_type.reserve(ctx.length);
+    ctx.append_voxel_source_index.reserve(ctx.length);
+
+    if (raycast_en)
+    {
+      ctx.rays_with_sample_points.reserve(ctx.length);
+      for (int grid_row = 1; grid_row <= ctx.grid_n_height; ++grid_row)
       {
-        const int raw_idx = raw_y * width + raw_x;
-        if (!cam->isInFrame(V2D(raw_x, raw_y).cast<int>(), 0)) continue;
-        V3D ray_c = cam->cam2world(raw_x, raw_y);
-        if (!ray_c.array().isFinite().all()) continue;
-        const double ray_norm = ray_c.norm();
-        if (!std::isfinite(ray_norm) || ray_norm <= virtual_min_z) continue;
-        ray_c /= ray_norm;
-        raw_pixel_to_unit_ray_lut_[raw_idx] = ray_c.cast<float>();
-        raw_pixel_unit_ray_valid_mask_[raw_idx] = 1;
-        ++valid_raw_rays;
+        for (int grid_col = 1; grid_col <= ctx.grid_n_width; ++grid_col)
+        {
+          const int index = (grid_row - 1) * ctx.grid_n_width + grid_col - 1;
+          if (grid_row == 1 || grid_col == 1 || grid_row == ctx.grid_n_height || grid_col == ctx.grid_n_width)
+            ctx.border_flag[index] = 1;
+          const int u = ctx.grid_size / 2 + (grid_col - 1) * ctx.grid_size;
+          const int v = ctx.grid_size / 2 + (grid_row - 1) * ctx.grid_size;
+          std::vector<V3D> samples;
+          for (float range = 0.1f; range <= 3.0f; range += 0.2f)
+          {
+            V3D xyz = ctx.cam->cam2world(u, v);
+            if (virtual_fisheye_patch_en)
+            {
+              if (xyz.norm() <= virtual_min_z) continue;
+              xyz.normalize();
+              xyz *= range;
+            }
+            else
+            {
+              if (std::fabs(xyz[2]) <= virtual_min_z) continue;
+              xyz *= range / xyz[2];
+            }
+            samples.push_back(xyz);
+          }
+          ctx.rays_with_sample_points.push_back(std::move(samples));
+        }
       }
     }
 
-    printf("[ VIO ] Virtual fisheye patches enabled: focal=%.3f support=%dx%d max_search_level=%d resampling=%s raw_window_half=%d raw_lut=%d/%d\n",
-           virtual_focal_length, virtual_support_size, virtual_support_size, virtual_max_search_level,
-           virtual_patch_resampling_mode.c_str(), virtual_raw_window_half_size, valid_raw_rays, width * height);
+    if (virtual_fisheye_patch_en)
+    {
+      ctx.raw_pixel_to_unit_ray_lut.resize(ctx.width * ctx.height);
+      ctx.raw_pixel_unit_ray_valid_mask.assign(ctx.width * ctx.height, 0);
+      for (int raw_y = 0; raw_y < ctx.height; ++raw_y)
+      {
+        for (int raw_x = 0; raw_x < ctx.width; ++raw_x)
+        {
+          const int raw_idx = raw_y * ctx.width + raw_x;
+          if (!ctx.cam->isInFrame(V2D(raw_x, raw_y).cast<int>(), 0)) continue;
+          V3D ray_c = ctx.cam->cam2world(raw_x, raw_y);
+          const double ray_norm = ray_c.norm();
+          if (!ray_c.array().isFinite().all() || !std::isfinite(ray_norm) || ray_norm <= virtual_min_z) continue;
+          ctx.raw_pixel_to_unit_ray_lut[raw_idx] = (ray_c / ray_norm).cast<float>();
+          ctx.raw_pixel_unit_ray_valid_mask[raw_idx] = 1;
+        }
+      }
+    }
+
+    ctx.pinhole_cam = dynamic_cast<vk::PinholeCamera *>(ctx.cam);
+    printf("[ VIO ] camera_id=%d ns=%s intrinsic=%.6f %.6f %.6f %.6f size=%dx%d scale=%.3f\n",
+           ctx.camera_id, ctx.camera_namespace.c_str(), ctx.fx, ctx.fy, ctx.cx, ctx.cy, ctx.width, ctx.height,
+           ctx.image_resize_factor);
+    resetGrid(ctx);
   }
 
-  retrieve_voxel_points.reserve(length);
-  append_voxel_points.reserve(length);
-
-  sub_feat_map.clear();
+  if (colmap_output_en)
+  {
+    PerCameraData &ctx = cameras_.front();
+    if (ctx.pinhole_cam == nullptr)
+    {
+      printf("[ VIO ] COLMAP output disabled: camera0 is not pinhole.\n");
+      colmap_output_en = false;
+    }
+    else
+    {
+      fout_colmap.open(DEBUG_FILE_DIR("Colmap/sparse/0/images.txt"), ios::out);
+      fout_camera.open(DEBUG_FILE_DIR("Colmap/sparse/0/cameras.txt"), ios::out);
+      fout_camera << "1 PINHOLE " << ctx.width << " " << ctx.height << " " << std::fixed << std::setprecision(6)
+                  << ctx.fx << " " << ctx.fy << " " << ctx.cx << " " << ctx.cy << std::endl;
+      fout_camera.close();
+    }
+  }
+  const int state_dim = state != nullptr ? state->stateDim() : BASE_STATE_DIM + numCameras();
+  G = Eigen::MatrixXd::Zero(state_dim, state_dim);
+  H_T_H = Eigen::MatrixXd::Zero(state_dim, state_dim);
 }
 
-void VIOManager::resetGrid()
+void VIOManager::resetGrid(PerCameraData &ctx)
 {
-  fill(grid_num.begin(), grid_num.end(), TYPE_UNKNOWN);
-  fill(map_index.begin(), map_index.end(), 0);
-  fill(map_dist.begin(), map_dist.end(), 10000.0f);
-  fill(update_flag.begin(), update_flag.end(), 0);
-  fill(scan_value.begin(), scan_value.end(), 0.0f);
-
-  retrieve_voxel_points.clear();
-  retrieve_voxel_points.resize(length);
-
-  append_voxel_points.clear();
-  append_voxel_points.resize(length);
-
-  total_points = 0;
+  fill(ctx.grid_num.begin(), ctx.grid_num.end(), TYPE_UNKNOWN);
+  fill(ctx.map_index.begin(), ctx.map_index.end(), 0);
+  fill(ctx.map_dist.begin(), ctx.map_dist.end(), 10000.0f);
+  fill(ctx.update_flag.begin(), ctx.update_flag.end(), 0);
+  fill(ctx.scan_value.begin(), ctx.scan_value.end(), 0.0f);
+  ctx.retrieve_voxel_points.assign(ctx.length, nullptr);
+  ctx.append_voxel_points.assign(ctx.length, pointWithVar());
+  ctx.append_voxel_source_type.assign(ctx.length, SOURCE_UNKNOWN);
+  ctx.append_voxel_source_index.assign(ctx.length, -1);
+  ctx.pending_new_points.clear();
+  ctx.rejected_visual_points_for_draw.clear();
+  ctx.sub_feat_map.clear();
+  for (auto &pair : ctx.warp_map) delete pair.second;
+  ctx.warp_map.clear();
+  ctx.total_points = 0;
+  if (ctx.visual_submap != nullptr) ctx.visual_submap->reset();
 }
 
 // void VIOManager::resetRvizDisplay()
@@ -332,21 +334,21 @@ void VIOManager::resetGrid()
   // sample_points.clear();
 // }
 
-void VIOManager::computeProjectionJacobian(V3D p, MD(2, 3) & J)
+void VIOManager::computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J)
 {
   const double x = p[0];
   const double y = p[1];
   const double z_inv = 1. / p[2];
   const double z_inv_2 = z_inv * z_inv;
-  J(0, 0) = fx * z_inv;
+  J(0, 0) = ctx.fx * z_inv;
   J(0, 1) = 0.0;
-  J(0, 2) = -fx * x * z_inv_2;
+  J(0, 2) = -ctx.fx * x * z_inv_2;
   J(1, 0) = 0.0;
-  J(1, 1) = fy * z_inv;
-  J(1, 2) = -fy * y * z_inv_2;
+  J(1, 1) = ctx.fy * z_inv;
+  J(1, 2) = -ctx.fy * y * z_inv_2;
 }
 
-void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
+void VIOManager::getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D pc, float *patch_tmp, int level)
 {
   const float u_ref = pc[0];
   const float v_ref = pc[1];
@@ -361,11 +363,11 @@ void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
   const float w_ref_br = subpix_u_ref * subpix_v_ref;
   for (int x = 0; x < patch_size; x++)
   {
-    uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i - patch_size_half * scale + x * scale) * width + (u_ref_i - patch_size_half * scale);
+    const uint8_t *img_ptr = img.data + (v_ref_i - patch_size_half * scale + x * scale) * ctx.width + (u_ref_i - patch_size_half * scale);
     for (int y = 0; y < patch_size; y++, img_ptr += scale)
     {
       patch_tmp[patch_size_total * level + x * patch_size + y] =
-          w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * width] + w_ref_br * img_ptr[scale * width + scale];
+          w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * ctx.width] + w_ref_br * img_ptr[scale * ctx.width + scale];
     }
   }
 }
@@ -402,18 +404,19 @@ bool VIOManager::buildVirtualFrameRotation(const V3D &point_in_raw_camera, M3D &
   return R_v_from_c.array().isFinite().all() && std::fabs(R_v_from_c.determinant() - 1.0) < 1e-6;
 }
 
-bool VIOManager::projectRawFisheyeIfValid(const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const
+bool VIOManager::projectRawFisheyeIfValid(const PerCameraData &ctx, const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const
 {
   if (!ray_or_point_in_raw_camera.array().isFinite().all() || ray_or_point_in_raw_camera.norm() <= virtual_min_z) return false;
-  raw_px = cam->world2cam(ray_or_point_in_raw_camera);
+  raw_px = ctx.cam->world2cam(ray_or_point_in_raw_camera);
   if (!raw_px.array().isFinite().all()) return false;
-  if (raw_px[0] < required_border || raw_px[1] < required_border || raw_px[0] >= width - required_border - 1 ||
-      raw_px[1] >= height - required_border - 1)
+  if (raw_px[0] < required_border || raw_px[1] < required_border || raw_px[0] >= ctx.width - required_border - 1 ||
+      raw_px[1] >= ctx.height - required_border - 1)
     return false;
-  return cam->isInFrame(raw_px.cast<int>(), required_border);
+  return ctx.cam->isInFrame(raw_px.cast<int>(), required_border);
 }
 
-bool VIOManager::buildVirtualSupportPatchPullExact(const cv::Mat &raw_img, const M3D &R_c_from_v, VirtualPatchImage &output) const
+bool VIOManager::buildVirtualSupportPatchPullExact(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v,
+                                                   VirtualPatchImage &output) const
 {
   if (!virtual_fisheye_patch_en || raw_img.empty() || raw_img.type() != CV_8UC1 || virtual_support_size <= 0) return false;
 
@@ -433,7 +436,7 @@ bool VIOManager::buildVirtualSupportPatchPullExact(const cv::Mat &raw_img, const
       const V3D ray_v = virtual_support_ray_lut_[y * virtual_support_size + x].cast<double>();
       const V3D ray_c = R_c_from_v * ray_v;
       V2D raw_px;
-      if (!projectRawFisheyeIfValid(ray_c, 1, raw_px)) continue;
+      if (!projectRawFisheyeIfValid(ctx, ray_c, 1, raw_px)) continue;
       values[x] = static_cast<float>(vk::interpolateMat_8u(raw_img, raw_px[0], raw_px[1]));
       mask[x] = 255;
     }
@@ -443,13 +446,14 @@ bool VIOManager::buildVirtualSupportPatchPullExact(const cv::Mat &raw_img, const
   return true;
 }
 
-void VIOManager::splatRawPixelToVirtualPatch(const cv::Mat &raw_img, int raw_x, int raw_y, const M3D &R_v_from_c, cv::Mat &value_sum,
+void VIOManager::splatRawPixelToVirtualPatch(const PerCameraData &ctx, const cv::Mat &raw_img, int raw_x, int raw_y,
+                                             const M3D &R_v_from_c, cv::Mat &value_sum,
                                              cv::Mat &weight_sum) const
 {
-  const int raw_idx = raw_y * width + raw_x;
-  if (raw_idx < 0 || raw_idx >= static_cast<int>(raw_pixel_unit_ray_valid_mask_.size()) || !raw_pixel_unit_ray_valid_mask_[raw_idx]) return;
+  const int raw_idx = raw_y * ctx.width + raw_x;
+  if (raw_idx < 0 || raw_idx >= static_cast<int>(ctx.raw_pixel_unit_ray_valid_mask.size()) || !ctx.raw_pixel_unit_ray_valid_mask[raw_idx]) return;
 
-  const V3D ray_c = raw_pixel_to_unit_ray_lut_[raw_idx].cast<double>();
+  const V3D ray_c = ctx.raw_pixel_to_unit_ray_lut[raw_idx].cast<double>();
   const V3D ray_v = R_v_from_c * ray_c;
   if (!ray_v.array().isFinite().all() || ray_v[2] <= virtual_min_z) return;
 
@@ -499,12 +503,13 @@ bool VIOManager::hasFullVirtualCoreCoverage(const cv::Mat &valid_mask) const
   return true;
 }
 
-bool VIOManager::buildVirtualSupportPatchForwardSplat(const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c,
+bool VIOManager::buildVirtualSupportPatchForwardSplat(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px,
+                                                      const M3D &R_v_from_c,
                                                       VirtualPatchImage &output) const
 {
   if (!virtual_fisheye_patch_en || raw_img.empty() || raw_img.type() != CV_8UC1 || virtual_support_size <= 0) return false;
-  if (raw_pixel_to_unit_ray_lut_.size() != static_cast<size_t>(width * height) ||
-      raw_pixel_unit_ray_valid_mask_.size() != static_cast<size_t>(width * height))
+  if (ctx.raw_pixel_to_unit_ray_lut.size() != static_cast<size_t>(ctx.width * ctx.height) ||
+      ctx.raw_pixel_unit_ray_valid_mask.size() != static_cast<size_t>(ctx.width * ctx.height))
     return false;
 
   VirtualPatchWorkspace &patch_workspace = workspace;
@@ -538,15 +543,15 @@ bool VIOManager::buildVirtualSupportPatchForwardSplat(const cv::Mat &raw_img, co
   const int raw_center_y = static_cast<int>(std::lround(raw_center_px[1]));
   for (int raw_y = raw_center_y - virtual_raw_window_half_size; raw_y <= raw_center_y + virtual_raw_window_half_size; ++raw_y)
   {
-    if (raw_y < 0 || raw_y >= height) continue;
+    if (raw_y < 0 || raw_y >= ctx.height) continue;
     const uint8_t *raw_row = raw_img.ptr<uint8_t>(raw_y);
     for (int raw_x = raw_center_x - virtual_raw_window_half_size; raw_x <= raw_center_x + virtual_raw_window_half_size; ++raw_x)
     {
-      if (raw_x < 0 || raw_x >= width) continue;
-      const int raw_idx = raw_y * width + raw_x;
-      if (!raw_pixel_unit_ray_valid_mask_[raw_idx]) continue;
+      if (raw_x < 0 || raw_x >= ctx.width) continue;
+      const int raw_idx = raw_y * ctx.width + raw_x;
+      if (!ctx.raw_pixel_unit_ray_valid_mask[raw_idx]) continue;
 
-      const V3D ray_c = raw_pixel_to_unit_ray_lut_[raw_idx].cast<double>();
+      const V3D ray_c = ctx.raw_pixel_to_unit_ray_lut[raw_idx].cast<double>();
       const V3D ray_v = R_v_from_c * ray_c;
       if (!ray_v.array().isFinite().all() || ray_v[2] <= virtual_min_z) continue;
 
@@ -594,21 +599,22 @@ bool VIOManager::buildVirtualSupportPatchForwardSplat(const cv::Mat &raw_img, co
   return true;
 }
 
-bool VIOManager::buildVirtualSupportPatch(const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c, const M3D &R_c_from_v,
+bool VIOManager::buildVirtualSupportPatch(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px,
+                                          const M3D &R_v_from_c, const M3D &R_c_from_v,
                                           VirtualPatchImage &output) const
 {
   if (virtual_patch_resampling_mode_enum == VirtualPatchResamplingMode::PULL_EXACT)
-    return buildVirtualSupportPatchPullExact(raw_img, R_c_from_v, output);
+    return buildVirtualSupportPatchPullExact(ctx, raw_img, R_c_from_v, output);
 
   const double splat_start = omp_get_wtime();
-  const bool splat_valid = buildVirtualSupportPatchForwardSplat(raw_img, raw_center_px, R_v_from_c, output);
+  const bool splat_valid = buildVirtualSupportPatchForwardSplat(ctx, raw_img, raw_center_px, R_v_from_c, output);
   const double splat_time = omp_get_wtime() - splat_start;
 
   if (virtual_splat_debug_compare_pull_exact)
   {
     VirtualPatchImage pull_exact_patch;
     const double pull_start = omp_get_wtime();
-    const bool pull_valid = buildVirtualSupportPatchPullExact(raw_img, R_c_from_v, pull_exact_patch);
+    const bool pull_valid = buildVirtualSupportPatchPullExact(ctx, raw_img, R_c_from_v, pull_exact_patch);
     const double pull_time = omp_get_wtime() - pull_start;
 
     std::vector<float> absolute_errors;
@@ -751,17 +757,18 @@ bool VIOManager::sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V
   return true;
 }
 
-bool VIOManager::createVirtualFeaturePatch(const cv::Mat &raw_img, const SE3<double> &T_c_w, const V3D &point_w, float *core_patch,
+bool VIOManager::createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img, const SE3<double> &T_c_w,
+                                           const V3D &point_w, float *core_patch,
                                            cv::Mat &virtual_support_img, SE3<double> &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const
 {
   const V3D point_c = T_c_w * point_w;
   V2D raw_center_px;
-  if (!projectRawFisheyeIfValid(point_c, 1, raw_center_px)) return false;
+  if (!projectRawFisheyeIfValid(ctx, point_c, 1, raw_center_px)) return false;
   if (!buildVirtualFrameRotation(point_c, R_v_from_c, R_c_from_v)) return false;
   T_v_w = composeVirtualPose(R_v_from_c, T_c_w);
   VirtualPatchImage support;
   support.T_v_w_seed = T_v_w;
-  if (!buildVirtualSupportPatch(raw_img, raw_center_px, R_v_from_c, R_c_from_v, support)) return false;
+  if (!buildVirtualSupportPatch(ctx, raw_img, raw_center_px, R_v_from_c, R_c_from_v, support)) return false;
   const V2D center(virtual_support_radius, virtual_support_radius);
   if (!sampleVirtualCorePatch(support, center, 1, core_patch)) return false;
 
@@ -865,8 +872,9 @@ void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
   }
 }
 
-void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref, const V3D &xyz_ref, const V3D &normal_ref,
-                                                  const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref)
+void VIOManager::getWarpMatrixAffineHomography(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const V2D &px_ref,
+                                               const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_cur_ref,
+                                               const int level_ref, Matrix2d &A_cur_ref)
 {
   // create homography matrix
   const V3D t = T_cur_ref.inverse().translation();
@@ -874,33 +882,36 @@ void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, co
       T_cur_ref.rotationMatrix() * (normal_ref.dot(xyz_ref) * Eigen::Matrix3d::Identity() - t * normal_ref.transpose());
   // Compute affine warp matrix A_ref_cur using homography projection
   const int kHalfPatchSize = 4;
-  V3D f_du_ref(cam.cam2world(px_ref + Eigen::Vector2d(kHalfPatchSize, 0) * (1 << level_ref)));
-  V3D f_dv_ref(cam.cam2world(px_ref + Eigen::Vector2d(0, kHalfPatchSize) * (1 << level_ref)));
+  V3D f_du_ref(ref_ctx.cam->cam2world(px_ref + Eigen::Vector2d(kHalfPatchSize, 0) * (1 << level_ref)));
+  V3D f_dv_ref(ref_ctx.cam->cam2world(px_ref + Eigen::Vector2d(0, kHalfPatchSize) * (1 << level_ref)));
   //   f_du_ref = f_du_ref/f_du_ref[2];
   //   f_dv_ref = f_dv_ref/f_dv_ref[2];
   const V3D f_cur(H_cur_ref * xyz_ref);
   const V3D f_du_cur = H_cur_ref * f_du_ref;
   const V3D f_dv_cur = H_cur_ref * f_dv_ref;
-  V2D px_cur(cam.world2cam(f_cur));
-  V2D px_du_cur(cam.world2cam(f_du_cur));
-  V2D px_dv_cur(cam.world2cam(f_dv_cur));
+  V2D px_cur(cur_ctx.cam->world2cam(f_cur));
+  V2D px_du_cur(cur_ctx.cam->world2cam(f_du_cur));
+  V2D px_dv_cur(cur_ctx.cam->world2cam(f_dv_cur));
   A_cur_ref.col(0) = (px_du_cur - px_cur) / kHalfPatchSize;
   A_cur_ref.col(1) = (px_dv_cur - px_cur) / kHalfPatchSize;
 }
 
-void VIOManager::getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector2d &px_ref, const Vector3d &f_ref, const double depth_ref,
-                                        const SE3<double> &T_cur_ref, const int level_ref, const int pyramid_level, const int halfpatch_size,
-                                        Matrix2d &A_cur_ref)
+void VIOManager::getWarpMatrixAffine(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const Vector2d &px_ref,
+                                     const Vector3d &f_ref, const double depth_ref, const SE3<double> &T_cur_ref,
+                                     const int level_ref, const int pyramid_level, const int halfpatch_size, Matrix2d &A_cur_ref)
 {
   // Compute affine warp matrix A_ref_cur
   const Vector3d xyz_ref(f_ref * depth_ref);
-  Vector3d xyz_du_ref(cam.cam2world(px_ref + Vector2d(halfpatch_size, 0) * (1 << level_ref) * (1 << pyramid_level)));
-  Vector3d xyz_dv_ref(cam.cam2world(px_ref + Vector2d(0, halfpatch_size) * (1 << level_ref) * (1 << pyramid_level)));
-  xyz_du_ref *= xyz_ref[2] / xyz_du_ref[2];
-  xyz_dv_ref *= xyz_ref[2] / xyz_dv_ref[2];
-  const Vector2d px_cur(cam.world2cam(T_cur_ref * (xyz_ref)));
-  const Vector2d px_du(cam.world2cam(T_cur_ref * (xyz_du_ref)));
-  const Vector2d px_dv(cam.world2cam(T_cur_ref * (xyz_dv_ref)));
+  Vector3d xyz_du_ref(ref_ctx.cam->cam2world(px_ref + Vector2d(halfpatch_size, 0) * (1 << level_ref) * (1 << pyramid_level)));
+  Vector3d xyz_dv_ref(ref_ctx.cam->cam2world(px_ref + Vector2d(0, halfpatch_size) * (1 << level_ref) * (1 << pyramid_level)));
+  const double ref_range = xyz_ref.norm();
+  xyz_du_ref.normalize();
+  xyz_dv_ref.normalize();
+  xyz_du_ref *= ref_range;
+  xyz_dv_ref *= ref_range;
+  const Vector2d px_cur(cur_ctx.cam->world2cam(T_cur_ref * xyz_ref));
+  const Vector2d px_du(cur_ctx.cam->world2cam(T_cur_ref * xyz_du_ref));
+  const Vector2d px_dv(cur_ctx.cam->world2cam(T_cur_ref * xyz_dv_ref));
   A_cur_ref.col(0) = (px_du - px_cur) / halfpatch_size;
   A_cur_ref.col(1) = (px_dv - px_cur) / halfpatch_size;
 }
@@ -965,11 +976,11 @@ double VIOManager::calculateNCC(float *ref_patch, float *cur_patch, int patch_si
   return numerator / sqrt(demoniator1 * demoniator2 + 1e-10);
 }
 
-void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWithVar> &pg,
+void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
                                                     const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
-  visual_submap->reset();
-  total_points = 0;
+  ctx.visual_submap->reset();
+  ctx.total_points = 0;
   rejected_virtual_support_oob_ = 0;
   rejected_virtual_projection_invalid_ = 0;
   rejected_virtual_z_ = 0;
@@ -1001,27 +1012,27 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   virtual_track_photometric_reject_count_ = 0;
   if (draw_rejected_points_en && virtual_fisheye_patch_en)
   {
-    rejected_visual_points_for_draw_.clear();
-    rejected_visual_points_for_draw_.reserve(length);
+    ctx.rejected_visual_points_for_draw.clear();
+    ctx.rejected_visual_points_for_draw.reserve(ctx.length);
   }
   if (feat_map.empty()) return;
 
   const double candidate_select_start = omp_get_wtime();
-  sub_feat_map.clear();
+  ctx.sub_feat_map.clear();
 
   const float voxel_size = 0.5f;
-  cv::Mat range_img = cv::Mat::zeros(height, width, CV_32FC1);
+  cv::Mat range_img = cv::Mat::zeros(ctx.height, ctx.width, CV_32FC1);
   int loc_xyz[3];
 
   for (const auto &point : pg)
   {
     const V3D &pt_w = point.point_w;
     for (int j = 0; j < 3; ++j) loc_xyz[j] = static_cast<int>(std::floor(pt_w[j] / voxel_size));
-    sub_feat_map[VOXEL_LOCATION(loc_xyz[0], loc_xyz[1], loc_xyz[2])] = 0;
+    ctx.sub_feat_map[VOXEL_LOCATION(loc_xyz[0], loc_xyz[1], loc_xyz[2])] = 0;
 
-    const V3D pt_c = new_frame_->w2f(pt_w);
+    const V3D pt_c = ctx.new_frame->w2f(pt_w);
     V2D px;
-    if (!projectRawFisheyeIfValid(pt_c, 1, px)) continue;
+    if (!projectRawFisheyeIfValid(ctx, pt_c, 1, px)) continue;
     const int col = static_cast<int>(px[0]);
     const int row = static_cast<int>(px[1]);
     float &stored_range = range_img.at<float>(row, col);
@@ -1030,7 +1041,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   }
 
   vector<VOXEL_LOCATION> delete_keys;
-  for (auto &sub_voxel : sub_feat_map)
+  for (auto &sub_voxel : ctx.sub_feat_map)
   {
     auto map_voxel = feat_map.find(sub_voxel.first);
     if (map_voxel == feat_map.end()) continue;
@@ -1040,18 +1051,18 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     {
       if (pt == nullptr || pt->obs_.empty()) continue;
       V2D raw_px;
-      if (!projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, raw_px)) continue;
-      const int grid_col = static_cast<int>(raw_px[0] / grid_size);
-      const int grid_row = static_cast<int>(raw_px[1] / grid_size);
-      if (grid_col < 0 || grid_col >= grid_n_width || grid_row < 0 || grid_row >= grid_n_height) continue;
-      const int index = grid_row * grid_n_width + grid_col;
+      if (!projectRawFisheyeIfValid(ctx, ctx.new_frame->w2f(pt->pos_), 1, raw_px)) continue;
+      const int grid_col = static_cast<int>(raw_px[0] / ctx.grid_size);
+      const int grid_row = static_cast<int>(raw_px[1] / ctx.grid_size);
+      if (grid_col < 0 || grid_col >= ctx.grid_n_width || grid_row < 0 || grid_row >= ctx.grid_n_height) continue;
+      const int index = grid_row * ctx.grid_n_width + grid_col;
       voxel_in_fov = true;
-      grid_num[index] = TYPE_MAP;
-      const float cur_dist = static_cast<float>((new_frame_->pos() - pt->pos_).norm());
-      if (cur_dist <= map_dist[index])
+      ctx.grid_num[index] = TYPE_MAP;
+      const float cur_dist = static_cast<float>((ctx.new_frame->pos() - pt->pos_).norm());
+      if (cur_dist <= ctx.map_dist[index])
       {
-        map_dist[index] = cur_dist;
-        retrieve_voxel_points[index] = pt;
+        ctx.map_dist[index] = cur_dist;
+        ctx.retrieve_voxel_points[index] = pt;
       }
     }
     if (!voxel_in_fov) delete_keys.push_back(sub_voxel.first);
@@ -1059,15 +1070,15 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
 
   if (raycast_en)
   {
-    for (int i = 0; i < length; ++i)
+    for (int i = 0; i < ctx.length; ++i)
     {
-      if (grid_num[i] == TYPE_MAP || border_flag[i] == 1) continue;
-      for (const V3D &sample_c : rays_with_sample_points[i])
+      if (ctx.grid_num[i] == TYPE_MAP || ctx.border_flag[i] == 1) continue;
+      for (const V3D &sample_c : ctx.rays_with_sample_points[i])
       {
-        const V3D sample_w = new_frame_->f2w(sample_c);
+        const V3D sample_w = ctx.new_frame->f2w(sample_c);
         for (int j = 0; j < 3; ++j) loc_xyz[j] = static_cast<int>(std::floor(sample_w[j] / voxel_size));
         const VOXEL_LOCATION sample_pos(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
-        if (sub_feat_map.find(sample_pos) != sub_feat_map.end()) break;
+        if (ctx.sub_feat_map.find(sample_pos) != ctx.sub_feat_map.end()) break;
 
         auto visual_voxel = feat_map.find(sample_pos);
         if (visual_voxel != feat_map.end())
@@ -1077,21 +1088,21 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
           {
             if (pt == nullptr || pt->obs_.empty()) continue;
             V2D raw_px;
-            if (!projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, raw_px)) continue;
-            const int grid_col = static_cast<int>(raw_px[0] / grid_size);
-            const int grid_row = static_cast<int>(raw_px[1] / grid_size);
-            if (grid_col < 0 || grid_col >= grid_n_width || grid_row < 0 || grid_row >= grid_n_height) continue;
-            const int index = grid_row * grid_n_width + grid_col;
-            grid_num[index] = TYPE_MAP;
-            const float cur_dist = static_cast<float>((new_frame_->pos() - pt->pos_).norm());
-            if (cur_dist <= map_dist[index])
+            if (!projectRawFisheyeIfValid(ctx, ctx.new_frame->w2f(pt->pos_), 1, raw_px)) continue;
+            const int grid_col = static_cast<int>(raw_px[0] / ctx.grid_size);
+            const int grid_row = static_cast<int>(raw_px[1] / ctx.grid_size);
+            if (grid_col < 0 || grid_col >= ctx.grid_n_width || grid_row < 0 || grid_row >= ctx.grid_n_height) continue;
+            const int index = grid_row * ctx.grid_n_width + grid_col;
+            ctx.grid_num[index] = TYPE_MAP;
+            const float cur_dist = static_cast<float>((ctx.new_frame->pos() - pt->pos_).norm());
+            if (cur_dist <= ctx.map_dist[index])
             {
-              map_dist[index] = cur_dist;
-              retrieve_voxel_points[index] = pt;
+              ctx.map_dist[index] = cur_dist;
+              ctx.retrieve_voxel_points[index] = pt;
             }
             found = true;
           }
-          if (found) sub_feat_map[sample_pos] = 0;
+          if (found) ctx.sub_feat_map[sample_pos] = 0;
           break;
         }
 
@@ -1104,14 +1115,14 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
             pointWithVar plane_center;
             plane_center.point_w = octo->plane_ptr_->center_;
             plane_center.normal = octo->plane_ptr_->normal_;
-            visual_submap->add_from_voxel_map.push_back(plane_center);
+            ctx.visual_submap->add_from_voxel_map.push_back(plane_center);
             break;
           }
         }
       }
     }
   }
-  for (const auto &key : delete_keys) sub_feat_map.erase(key);
+  for (const auto &key : delete_keys) ctx.sub_feat_map.erase(key);
 
   struct VirtualCandidate
   {
@@ -1152,10 +1163,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   auto recordRejectedPoint = [&](const V2D &raw_px, int reason) {
     if (draw_rejected_points_en)
     {
-      VIOManager::RejectedVisualPointForDraw rejected_point;
-      rejected_point.px = cv::Point2f(static_cast<float>(raw_px[0]), static_cast<float>(raw_px[1]));
-      rejected_point.reason = reason;
-      rejected_visual_points_for_draw_.push_back(rejected_point);
+      ctx.rejected_visual_points_for_draw.emplace_back(
+          cv::Point2f(static_cast<float>(raw_px[0]), static_cast<float>(raw_px[1])), reason);
     }
   };
   auto drawReasonFromVirtualReject = [](int rejection) {
@@ -1183,12 +1192,12 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   };
 
   vector<VirtualCandidate> candidates;
-  candidates.reserve(length);
-  for (int i = 0; i < length; ++i)
+  candidates.reserve(ctx.length);
+  for (int i = 0; i < ctx.length; ++i)
   {
-    if (grid_num[i] != TYPE_MAP) continue;
+    if (ctx.grid_num[i] != TYPE_MAP) continue;
     ++virtual_map_grid_count_;
-    VisualPoint *pt = retrieve_voxel_points[i];
+    VisualPoint *pt = ctx.retrieve_voxel_points[i];
     if (pt == nullptr)
     {
       ++virtual_candidate_null_count_;
@@ -1200,15 +1209,15 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
       if (draw_rejected_points_en)
       {
         V2D raw_px;
-        if (projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, raw_px))
+        if (projectRawFisheyeIfValid(ctx, ctx.new_frame->w2f(pt->pos_), 1, raw_px))
           recordRejectedPoint(raw_px, REJECT_DRAW_NORMAL_UNINIT);
       }
       continue;
     }
 
     V2D raw_px;
-    const V3D pt_c_seed = new_frame_->w2f(pt->pos_);
-    if (!projectRawFisheyeIfValid(pt_c_seed, 1, raw_px))
+    const V3D pt_c_seed = ctx.new_frame->w2f(pt->pos_);
+    if (!projectRawFisheyeIfValid(ctx, pt_c_seed, 1, raw_px))
     {
       ++virtual_candidate_projection_fail_count_;
       continue;
@@ -1225,7 +1234,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
         if (du == 0 && dv == 0) continue;
         const int col = center_col + du;
         const int row = center_row + dv;
-        if (col < 0 || col >= width || row < 0 || row >= height) continue;
+        if (col < 0 || col >= ctx.width || row < 0 || row >= ctx.height) continue;
         const float range = range_img.at<float>(row, col);
         if (range > 0.0f && std::fabs(point_range - range) > 0.5)
         {
@@ -1244,9 +1253,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     Feature *ref_ftr = nullptr;
     if (normal_en)
     {
-      if (pt->has_ref_patch_ && pt->ref_patch != nullptr && pt->ref_patch->virtual_patch_valid_)
+      pt->ensureCameraCount(numCameras());
+      Feature *cached_ref = pt->referencePatch(ctx.camera_id, cross_camera_reference_en);
+      if (cached_ref != nullptr && cached_ref->virtual_patch_valid_)
       {
-        ref_ftr = pt->ref_patch;
+        ref_ftr = cached_ref;
       }
       else
       {
@@ -1254,11 +1265,13 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
         for (Feature *candidate_ref : pt->obs_)
         {
           if (candidate_ref == nullptr || !candidate_ref->virtual_patch_valid_) continue;
+          if (!cross_camera_reference_en && candidate_ref->camera_id_ != ctx.camera_id) continue;
           float error = 0.0f;
           int comparisons = 0;
           for (Feature *other : pt->obs_)
           {
             if (other == nullptr || other == candidate_ref || !other->virtual_patch_valid_) continue;
+            if (!cross_camera_reference_en && other->camera_id_ != ctx.camera_id) continue;
             for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
             {
               const float residual = candidate_ref->patch_[patch_index] - other->patch_[patch_index];
@@ -1275,12 +1288,21 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
         }
         if (ref_ftr != nullptr)
         {
-          pt->ref_patch = ref_ftr;
-          pt->has_ref_patch_ = true;
+          if (cross_camera_reference_en)
+          {
+            pt->ref_patch = ref_ftr;
+            pt->has_ref_patch_ = true;
+          }
+          else
+          {
+            pt->ref_patch_by_camera_[ctx.camera_id] = ref_ftr;
+            pt->has_ref_patch_by_camera_[ctx.camera_id] = 1;
+          }
         }
       }
     }
-    else if (!pt->getCloseViewObs(new_frame_->pos(), ref_ftr, raw_px))
+    else if (!pt->getCloseViewObs(ctx.new_frame->pos(), ref_ftr, raw_px,
+                                  cross_camera_reference_en ? -1 : ctx.camera_id))
     {
       ++virtual_candidate_close_view_fail_count_;
       recordRejectedPoint(raw_px, REJECT_DRAW_CLOSE_VIEW);
@@ -1327,11 +1349,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
       result.rejection = VIRTUAL_REJECT_ROTATION;
       continue;
     }
-    result.track.T_vcur_w_seed = composeVirtualPose(result.track.R_vcur_from_ccur_seed, new_frame_->T_f_w_);
+    result.track.T_vcur_w_seed = composeVirtualPose(result.track.R_vcur_from_ccur_seed, ctx.new_frame->T_f_w_);
     result.track.cur_support.T_v_w_seed = result.track.T_vcur_w_seed;
 
     const double build_start = omp_get_wtime();
-    const bool supports_ok = buildVirtualSupportPatch(img, candidate.current_raw_center_px, result.track.R_vcur_from_ccur_seed,
+    const bool supports_ok = buildVirtualSupportPatch(ctx, img, candidate.current_raw_center_px, result.track.R_vcur_from_ccur_seed,
                                                       result.track.R_ccur_from_vcur_seed, result.track.cur_support);
     result.build_time = omp_get_wtime() - build_start;
     if (!supports_ok)
@@ -1396,7 +1418,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
 
     for (int k = 0; k < patch_size_total; ++k)
     {
-      const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[k] - state->inv_expo_time * current_core[k];
+      const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[k] -
+                              state->inv_expo_time[ctx.camera_id] * current_core[k];
       result.error += residual * residual;
     }
     if (ncc_en && calculateNCC(result.warped_reference.data(), current_core.data(), patch_size_total) < ncc_thre)
@@ -1474,17 +1497,17 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     }
 
     ++virtual_valid_track_count_;
-    visual_submap->voxel_points.push_back(candidates[candidate_index].point);
-    visual_submap->propa_errors.push_back(result.error);
-    visual_submap->search_levels.push_back(result.track.search_level);
-    visual_submap->errors.push_back(result.error);
-    visual_submap->warp_patch.push_back(std::move(result.warped_reference));
-    visual_submap->inv_expo_list.push_back(result.inverse_reference_exposure);
-    visual_submap->virtual_track_patches.push_back(std::move(result.track));
+    ctx.visual_submap->voxel_points.push_back(candidates[candidate_index].point);
+    ctx.visual_submap->propa_errors.push_back(result.error);
+    ctx.visual_submap->search_levels.push_back(result.track.search_level);
+    ctx.visual_submap->errors.push_back(result.error);
+    ctx.visual_submap->warp_patch.push_back(std::move(result.warped_reference));
+    ctx.visual_submap->inv_expo_list.push_back(result.inverse_reference_exposure);
+    ctx.visual_submap->virtual_track_patches.push_back(std::move(result.track));
   }
   virtual_result_collect_time_ = omp_get_wtime() - result_collect_start;
 
-  total_points = static_cast<int>(visual_submap->voxel_points.size());
+  ctx.total_points = static_cast<int>(ctx.visual_submap->voxel_points.size());
   rejected_virtual_support_oob_ = virtual_track_support_fail_count_ + virtual_track_current_core_fail_count_;
   rejected_virtual_projection_invalid_ = virtual_candidate_projection_fail_count_;
   rejected_virtual_z_ = virtual_track_rotation_fail_count_ + virtual_track_current_z_fail_count_;
@@ -1504,7 +1527,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   const std::string warp_fail_pyramid_text = formatCountVector(virtual_warp_fail_pyramid_level_count);
 
   printf("[ VIO Virtual ] Retrieve %d/%d tracked from map_grid=%d candidates=%d\n",
-         total_points, virtual_candidate_count_, virtual_map_grid_count_, virtual_candidate_count_);
+         ctx.total_points, virtual_candidate_count_, virtual_map_grid_count_, virtual_candidate_count_);
   printf("[ VIO Virtual Candidate ] null=%d normal_uninit=%d proj_fail=%d range_reject=%d close_view_fail=%d ref_missing=%d ref_invalid=%d select_wall=%.6f s\n",
          virtual_candidate_null_count_, virtual_candidate_normal_uninit_count_, virtual_candidate_projection_fail_count_,
          virtual_candidate_range_reject_count_, virtual_candidate_close_view_fail_count_, virtual_candidate_ref_missing_count_,
@@ -1522,11 +1545,12 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
   printf("[ VIO Virtual Timing Note ] *_sum accumulates per-candidate time across OpenMP workers; wall fields are real elapsed time.\n");
 }
 
-void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
+void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
+                                             const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
   if (virtual_fisheye_patch_en)
   {
-    retrieveFromVisualSparseMapVirtual(img, pg, plane_map);
+    retrieveFromVisualSparseMapVirtual(ctx, img, pg, plane_map);
     return;
   }
   if (feat_map.size() <= 0) return;
@@ -1537,16 +1561,20 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   // downSizeFilter.filter(*pg_down);
 
   // resetRvizDisplay();
-  visual_submap->reset();
+  ctx.visual_submap->reset();
 
   // Controls whether to include the visual submap from the previous frame.
-  sub_feat_map.clear();
+  ctx.sub_feat_map.clear();
 
   float voxel_size = 0.5;
 
-  if (!normal_en) warp_map.clear();
+  if (!normal_en)
+  {
+    for (auto &pair : ctx.warp_map) delete pair.second;
+    ctx.warp_map.clear();
+  }
 
-  cv::Mat depth_img = cv::Mat::zeros(height, width, CV_32FC1);
+  cv::Mat depth_img = cv::Mat::zeros(ctx.height, ctx.width, CV_32FC1);
   float *it = (float *)depth_img.data;
 
   // float it[height * width] = {0.0};
@@ -1577,29 +1605,29 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
     // t_position += omp_get_wtime()-t0;
     // double t1 = omp_get_wtime();
 
-    auto iter = sub_feat_map.find(position);
-    if (iter == sub_feat_map.end()) { sub_feat_map[position] = 0; }
+    auto iter = ctx.sub_feat_map.find(position);
+    if (iter == ctx.sub_feat_map.end()) { ctx.sub_feat_map[position] = 0; }
     else { iter->second = 0; }
 
     // t_insert += omp_get_wtime()-t1;
     // double t2 = omp_get_wtime();
 
-    V3D pt_c(new_frame_->w2f(pt_w));
+    V3D pt_c(ctx.new_frame->w2f(pt_w));
 
     if (pt_c[2] > 0)
     {
       V2D px;
       // px[0] = fx * pt_c[0]/pt_c[2] + cx;
       // px[1] = fy * pt_c[1]/pt_c[2]+ cy;
-      px = new_frame_->cam_->world2cam(pt_c);
+      px = ctx.cam->world2cam(pt_c);
 
-      if (new_frame_->cam_->isInFrame(px.cast<int>(), border))
+      if (ctx.cam->isInFrame(px.cast<int>(), border))
       {
         // cv::circle(img_cp, cv::Point2f(px[0], px[1]), 3, cv::Scalar(0, 0, 255), -1, 8);
         float depth = pt_c[2];
         int col = int(px[0]);
         int row = int(px[1]);
-        it[width * row + col] = depth;
+        it[ctx.width * row + col] = depth;
       }
     }
     // t_depth += omp_get_wtime()-t2;
@@ -1615,7 +1643,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   // double t1 = omp_get_wtime();
   vector<VOXEL_LOCATION> DeleteKeyList;
 
-  for (auto &iter : sub_feat_map)
+  for (auto &iter : ctx.sub_feat_map)
   {
     VOXEL_LOCATION position = iter.first;
 
@@ -1635,25 +1663,25 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         if (pt == nullptr) continue;
         if (pt->obs_.size() == 0) continue;
 
-        V3D norm_vec(new_frame_->T_f_w_.rotationMatrix() * pt->normal_);
-        V3D dir(new_frame_->T_f_w_ * pt->pos_);
+        V3D norm_vec(ctx.new_frame->T_f_w_.rotationMatrix() * pt->normal_);
+        V3D dir(ctx.new_frame->T_f_w_ * pt->pos_);
         if (dir[2] < 0) continue;
         // dir.normalize();
         // if (dir.dot(norm_vec) <= 0.17) continue; // 0.34 70 degree  0.17 80 degree 0.08 85 degree
 
-        V2D pc(new_frame_->w2c(pt->pos_));
-        if (new_frame_->cam_->isInFrame(pc.cast<int>(), border))
+        V2D pc(ctx.new_frame->w2c(pt->pos_));
+        if (ctx.cam->isInFrame(pc.cast<int>(), border))
         {
           // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(0, 255, 255), -1, 8);
           voxel_in_fov = true;
-          int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
-          grid_num[index] = TYPE_MAP;
-          Vector3d obs_vec(new_frame_->pos() - pt->pos_);
+          int index = static_cast<int>(pc[1] / ctx.grid_size) * ctx.grid_n_width + static_cast<int>(pc[0] / ctx.grid_size);
+          ctx.grid_num[index] = TYPE_MAP;
+          Vector3d obs_vec(ctx.new_frame->pos() - pt->pos_);
           float cur_dist = obs_vec.norm();
-          if (cur_dist <= map_dist[index])
+          if (cur_dist <= ctx.map_dist[index])
           {
-            map_dist[index] = cur_dist;
-            retrieve_voxel_points[index] = pt;
+            ctx.map_dist[index] = cur_dist;
+            ctx.retrieve_voxel_points[index] = pt;
           }
         }
       }
@@ -1664,9 +1692,9 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   // RayCasting Module
   if (raycast_en)
   {
-    for (int i = 0; i < length; i++)
+    for (int i = 0; i < ctx.length; i++)
     {
-      if (grid_num[i] == TYPE_MAP || border_flag[i] == 1) continue;
+      if (ctx.grid_num[i] == TYPE_MAP || ctx.border_flag[i] == 1) continue;
 
       // int row = static_cast<int>(i / grid_n_width) * grid_size + grid_size /
       // 2; int col = (i - static_cast<int>(i / grid_n_width) * grid_n_width) *
@@ -1678,9 +1706,9 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       // vector<V3D> sample_points_temp;
       // bool add_sample = false;
 
-      for (const auto &it : rays_with_sample_points[i])
+      for (const auto &it : ctx.rays_with_sample_points[i])
       {
-        V3D sample_point_w = new_frame_->f2w(it);
+        V3D sample_point_w = ctx.new_frame->f2w(it);
         // sample_points_temp.push_back(sample_point_w);
 
         for (int j = 0; j < 3; j++)
@@ -1691,8 +1719,8 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
         VOXEL_LOCATION sample_pos(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
 
-        auto corre_sub_feat_map = sub_feat_map.find(sample_pos);
-        if (corre_sub_feat_map != sub_feat_map.end()) break;
+        auto corre_sub_feat_map = ctx.sub_feat_map.find(sample_pos);
+        if (corre_sub_feat_map != ctx.sub_feat_map.end()) break;
 
         auto corre_feat_map = feat_map.find(sample_pos);
         if (corre_feat_map != feat_map.end())
@@ -1713,35 +1741,35 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
             // sub_map_ray.push_back(pt); // cloud_visual_sub_map
             // add_sample = true;
 
-            V3D norm_vec(new_frame_->T_f_w_.rotationMatrix() * pt->normal_);
-            V3D dir(new_frame_->T_f_w_ * pt->pos_);
+            V3D norm_vec(ctx.new_frame->T_f_w_.rotationMatrix() * pt->normal_);
+            V3D dir(ctx.new_frame->T_f_w_ * pt->pos_);
             if (dir[2] < 0) continue;
             dir.normalize();
             // if (dir.dot(norm_vec) <= 0.17) continue; // 0.34 70 degree 0.17 80 degree 0.08 85 degree
 
-            V2D pc(new_frame_->w2c(pt->pos_));
+            V2D pc(ctx.new_frame->w2c(pt->pos_));
 
-            if (new_frame_->cam_->isInFrame(pc.cast<int>(), border))
+            if (ctx.cam->isInFrame(pc.cast<int>(), border))
             {
               // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(255, 255, 0), -1, 8); 
               // sub_map_ray_fov.push_back(pt);
 
               voxel_in_fov = true;
-              int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
-              grid_num[index] = TYPE_MAP;
-              Vector3d obs_vec(new_frame_->pos() - pt->pos_);
+              int index = static_cast<int>(pc[1] / ctx.grid_size) * ctx.grid_n_width + static_cast<int>(pc[0] / ctx.grid_size);
+              ctx.grid_num[index] = TYPE_MAP;
+              Vector3d obs_vec(ctx.new_frame->pos() - pt->pos_);
 
               float cur_dist = obs_vec.norm();
 
-              if (cur_dist <= map_dist[index])
+              if (cur_dist <= ctx.map_dist[index])
               {
-                map_dist[index] = cur_dist;
-                retrieve_voxel_points[index] = pt;
+                ctx.map_dist[index] = cur_dist;
+                ctx.retrieve_voxel_points[index] = pt;
               }
             }
           }
 
-          if (voxel_in_fov) sub_feat_map[sample_pos] = 0;
+          if (voxel_in_fov) ctx.sub_feat_map[sample_pos] = 0;
           break;
         }
         else
@@ -1758,7 +1786,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
               VoxelPlane &plane = *current_octo->plane_ptr_;
               plane_center.point_w = plane.center_;
               plane_center.normal = plane.normal_;
-              visual_submap->add_from_voxel_map.push_back(plane_center);
+              ctx.visual_submap->add_from_voxel_map.push_back(plane_center);
               break;
             }
           }
@@ -1770,7 +1798,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
   for (auto &key : DeleteKeyList)
   {
-    sub_feat_map.erase(key);
+    ctx.sub_feat_map.erase(key);
   }
 
   // double t2 = omp_get_wtime();
@@ -1780,20 +1808,20 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   // double t_2, t_3, t_4, t_5;
   // t_2=t_3=t_4=t_5=0;
 
-  for (int i = 0; i < length; i++)
+  for (int i = 0; i < ctx.length; i++)
   {
-    if (grid_num[i] == TYPE_MAP)
+    if (ctx.grid_num[i] == TYPE_MAP)
     {
       // double t_1 = omp_get_wtime();
 
-      VisualPoint *pt = retrieve_voxel_points[i];
+      VisualPoint *pt = ctx.retrieve_voxel_points[i];
       // visual_sub_map_cur.push_back(pt); // before
 
-      V2D pc(new_frame_->w2c(pt->pos_));
+      V2D pc(ctx.new_frame->w2c(pt->pos_));
 
       // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(0, 0, 255), -1, 8); // Green Sparse Align tracked
 
-      V3D pt_cam(new_frame_->w2f(pt->pos_));
+      V3D pt_cam(ctx.new_frame->w2f(pt->pos_));
       bool depth_continous = false;
       for (int u = -patch_size_half; u <= patch_size_half; u++)
       {
@@ -1801,7 +1829,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         {
           if (u == 0 && v == 0) continue;
 
-          float depth = it[width * (v + int(pc[1])) + u + int(pc[0])];
+          float depth = it[ctx.width * (v + int(pc[1])) + u + int(pc[0])];
 
           if (depth == 0.) continue;
 
@@ -1830,25 +1858,23 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
       if (normal_en)
       {
+        pt->ensureCameraCount(numCameras());
         float phtometric_errors_min = std::numeric_limits<float>::max();
-
-        if (pt->obs_.size() == 1)
-        {
-          ref_ftr = *pt->obs_.begin();
-          pt->ref_patch = ref_ftr;
-          pt->has_ref_patch_ = true;
-        }
-        else if (!pt->has_ref_patch_)
+        ref_ftr = pt->referencePatch(ctx.camera_id, cross_camera_reference_en);
+        if (ref_ftr == nullptr)
         {
           for (auto it = pt->obs_.begin(), ite = pt->obs_.end(); it != ite; ++it)
           {
             Feature *ref_patch_temp = *it;
+            if (ref_patch_temp == nullptr) continue;
+            if (!cross_camera_reference_en && ref_patch_temp->camera_id_ != ctx.camera_id) continue;
             float *patch_temp = ref_patch_temp->patch_;
             float phtometric_errors = 0.0;
             int count = 0;
             for (auto itm = pt->obs_.begin(), itme = pt->obs_.end(); itm != itme; ++itm)
             {
-              if ((*itm)->id_ == ref_patch_temp->id_) continue;
+              if (*itm == nullptr || *itm == ref_patch_temp) continue;
+              if (!cross_camera_reference_en && (*itm)->camera_id_ != ctx.camera_id) continue;
               float *patch_cache = (*itm)->patch_;
 
               for (int ind = 0; ind < patch_size_total; ind++)
@@ -1857,22 +1883,35 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
               }
               count++;
             }
-            phtometric_errors = phtometric_errors / count;
+            if (count > 0) phtometric_errors /= count;
             if (phtometric_errors < phtometric_errors_min)
             {
               phtometric_errors_min = phtometric_errors;
               ref_ftr = ref_patch_temp;
             }
           }
-          pt->ref_patch = ref_ftr;
-          pt->has_ref_patch_ = true;
+          if (ref_ftr != nullptr)
+          {
+            if (cross_camera_reference_en)
+            {
+              pt->ref_patch = ref_ftr;
+              pt->has_ref_patch_ = true;
+            }
+            else
+            {
+              pt->ref_patch_by_camera_[ctx.camera_id] = ref_ftr;
+              pt->has_ref_patch_by_camera_[ctx.camera_id] = 1;
+            }
+          }
         }
-        else { ref_ftr = pt->ref_patch; }
       }
       else
       {
-        if (!pt->getCloseViewObs(new_frame_->pos(), ref_ftr, pc)) continue;
+        if (!pt->getCloseViewObs(ctx.new_frame->pos(), ref_ftr, pc,
+                                 cross_camera_reference_en ? -1 : ctx.camera_id)) continue;
       }
+      if (ref_ftr == nullptr || ref_ftr->camera_id_ < 0 || ref_ftr->camera_id_ >= numCameras()) continue;
+      const PerCameraData &ref_ctx = cameras_[ref_ftr->camera_id_];
 
       if (normal_en)
       {
@@ -1885,29 +1924,30 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         // if(cos_theta < 0) norm_vec = -norm_vec;
         // if (abs(cos_theta) < 0.08) continue; // 0.5 60 degree 0.34 70 degree 0.17 80 degree 0.08 85 degree
 
-        SE3 T_cur_ref = new_frame_->T_f_w_ * ref_ftr->T_f_w_.inverse();
+        SE3 T_cur_ref = ctx.new_frame->T_f_w_ * ref_ftr->T_f_w_.inverse();
 
-        getWarpMatrixAffineHomography(*cam, ref_ftr->px_, pf, norm_vec, T_cur_ref, 0, A_cur_ref_zero);
+        getWarpMatrixAffineHomography(ref_ctx, ctx, ref_ftr->px_, pf, norm_vec, T_cur_ref, 0, A_cur_ref_zero);
 
         search_level = getBestSearchLevel(A_cur_ref_zero, 2);
       }
       else
       {
-        auto iter_warp = warp_map.find(ref_ftr->id_);
-        if (iter_warp != warp_map.end())
+        auto iter_warp = ctx.warp_map.find(ref_ftr);
+        if (iter_warp != ctx.warp_map.end())
         {
           search_level = iter_warp->second->search_level;
           A_cur_ref_zero = iter_warp->second->A_cur_ref;
         }
         else
         {
-          getWarpMatrixAffine(*cam, ref_ftr->px_, ref_ftr->f_, (ref_ftr->pos() - pt->pos_).norm(), new_frame_->T_f_w_ * ref_ftr->T_f_w_.inverse(),
+          getWarpMatrixAffine(ref_ctx, ctx, ref_ftr->px_, ref_ftr->f_, (ref_ftr->pos() - pt->pos_).norm(),
+                              ctx.new_frame->T_f_w_ * ref_ftr->T_f_w_.inverse(),
                               ref_ftr->level_, 0, patch_size_half, A_cur_ref_zero);
 
           search_level = getBestSearchLevel(A_cur_ref_zero, 2);
 
           Warp *ot = new Warp(search_level, A_cur_ref_zero);
-          warp_map[ref_ftr->id_] = ot;
+          ctx.warp_map[ref_ftr] = ot;
         }
       }
       // t_4 += omp_get_wtime() - t_1;
@@ -1919,13 +1959,13 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         warpAffine(A_cur_ref_zero, ref_ftr->img_, ref_ftr->px_, ref_ftr->level_, search_level, pyramid_level, patch_size_half, patch_wrap.data());
       }
 
-      getImagePatch(img, pc, patch_buffer.data(), 0);
+      getImagePatch(ctx, img, pc, patch_buffer.data(), 0);
 
       float error = 0.0;
       for (int ind = 0; ind < patch_size_total; ind++)
       {
-        error += (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * patch_buffer[ind]) *
-                 (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * patch_buffer[ind]);
+        error += (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time[ctx.camera_id] * patch_buffer[ind]) *
+                 (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time[ctx.camera_id] * patch_buffer[ind]);
       }
 
       if (ncc_en)
@@ -1940,120 +1980,268 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
       if (error > outlier_threshold * patch_size_total) continue;
 
-      visual_submap->voxel_points.push_back(pt);
-      visual_submap->propa_errors.push_back(error);
-      visual_submap->search_levels.push_back(search_level);
-      visual_submap->errors.push_back(error);
-      visual_submap->warp_patch.push_back(patch_wrap);
-      visual_submap->inv_expo_list.push_back(ref_ftr->inv_expo_time_);
+      ctx.visual_submap->voxel_points.push_back(pt);
+      ctx.visual_submap->propa_errors.push_back(error);
+      ctx.visual_submap->search_levels.push_back(search_level);
+      ctx.visual_submap->errors.push_back(error);
+      ctx.visual_submap->warp_patch.push_back(patch_wrap);
+      ctx.visual_submap->inv_expo_list.push_back(ref_ftr->inv_expo_time_);
 
       // t_5 += omp_get_wtime() - t_1;
     }
   }
-  total_points = visual_submap->voxel_points.size();
+  ctx.total_points = ctx.visual_submap->voxel_points.size();
 
   // double t3 = omp_get_wtime();
   // cout<<"C. addSubSparseMap: "<<t3-t2<<endl;
   // cout<<"depthcontinuous: C1 "<<t_2<<" C2 "<<t_3<<" C3 "<<t_4<<" C4
   // "<<t_5<<endl;
-  printf("[ VIO ] Retrieve %d points from visual sparse map\n", total_points);
+  printf("[ VIO ] camera_id=%d retrieve %d points from visual sparse map\n", ctx.camera_id, ctx.total_points);
 }
 
-void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
+void VIOManager::computeJacobianAndUpdateEKF()
 {
   compute_jacobian_time = update_ekf_time = 0.0;
-  if (total_points == 0) return;
+  int total_observations = 0;
+  for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
+  if (total_observations == 0) return;
+  G = Eigen::MatrixXd::Zero(state->stateDim(), state->stateDim());
 
-  for (int level = patch_pyrimid_level - 1; level >= 0; level--)
+  for (int level = patch_pyrimid_level - 1; level >= 0; --level)
   {
-    if (inverse_composition_en)
+    StatesGroup old_state = *state;
+    double last_error = std::numeric_limits<double>::max();
+    for (int iteration = 0; iteration < max_iterations; ++iteration)
     {
-      has_ref_patch_cache = false;
-      updateStateInverse(img, level);
+      const double linearize_start = omp_get_wtime();
+      const int state_dim = state->stateDim();
+      Eigen::MatrixXd hessian = Eigen::MatrixXd::Zero(state_dim, state_dim);
+      Eigen::VectorXd gradient = Eigen::VectorXd::Zero(state_dim);
+      double error = 0.0;
+      int measurement_count = 0;
+
+      for (PerCameraData &ctx : cameras_)
+      {
+        if (ctx.total_points == 0 || ctx.visual_submap == nullptr || ctx.new_frame == nullptr) continue;
+        const cv::Mat &img = ctx.new_frame->img_;
+        const M3D Rwi = state->rot_end;
+        const V3D Pwi = state->pos_end;
+        ctx.Rcw = ctx.Rci * Rwi.transpose();
+        ctx.Pcw = -ctx.Rci * Rwi.transpose() * Pwi + ctx.Pci;
+        ctx.Jdp_dt = ctx.Rci * Rwi.transpose();
+        const double current_exposure = state->inv_expo_time[ctx.camera_id];
+
+        for (int point_index = 0; point_index < ctx.total_points; ++point_index)
+        {
+          VisualPoint *point = ctx.visual_submap->voxel_points[point_index];
+          if (point == nullptr) continue;
+          const int search_level = ctx.visual_submap->search_levels[point_index];
+          const int pyramid_level = level + search_level;
+          const int scale = 1 << pyramid_level;
+          const double inv_scale = 1.0 / scale;
+          const std::vector<float> &reference_patch = ctx.visual_submap->warp_patch[point_index];
+          const double reference_exposure = ctx.visual_submap->inv_expo_list[point_index];
+          double patch_error = 0.0;
+
+          if (virtual_fisheye_patch_en)
+          {
+            if (point_index >= static_cast<int>(ctx.visual_submap->virtual_track_patches.size())) continue;
+            const VirtualTrackPatch &track = ctx.visual_submap->virtual_track_patches[point_index];
+            const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
+            const V3D point_v = track.R_vcur_from_ccur_seed * point_c;
+            if (point_v[2] <= virtual_min_z) continue;
+            const V2D center = virtualProject(point_v);
+            MD(2, 3) Jdpi;
+            computeVirtualProjectionJacobian(point_v, Jdpi);
+            M3D point_c_hat;
+            point_c_hat << SKEW_SYM_MATRX(point_c);
+            for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
+            {
+              const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
+              float current_value = 0.0f;
+              V2D image_gradient;
+              if (!sampleVirtualValueAndGradient(track.cur_support, center + offset.cast<double>(), scale,
+                                                 current_value, image_gradient)) continue;
+              MD(1, 2) Jimg;
+              Jimg << image_gradient[0], image_gradient[1];
+              Jimg *= current_exposure * inv_scale;
+              const MD(1, 3) Jimg_Jpi_R = Jimg * Jdpi * track.R_vcur_from_ccur_seed;
+              const MD(1, 3) Jdphi = Jimg_Jpi_R * point_c_hat;
+              const MD(1, 3) Jdp = -Jimg_Jpi_R;
+              const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
+              const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
+              const double residual = current_exposure * current_value -
+                                      reference_exposure * reference_patch[patch_size_total * level + patch_index];
+              Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
+              jacobian.segment<3>(0) = JdR.transpose();
+              jacobian.segment<3>(3) = Jdt.transpose();
+              if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
+              hessian.noalias() += jacobian * jacobian.transpose();
+              gradient.noalias() += jacobian * residual;
+              patch_error += residual * residual;
+              ++measurement_count;
+            }
+          }
+          else
+          {
+            const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
+            const V2D pixel = ctx.cam->world2cam(point_c);
+            const int required_border = (patch_size_half + 1) * scale + 1;
+            if (!pixel.array().isFinite().all() || !ctx.cam->isInFrame(pixel.cast<int>(), required_border)) continue;
+            MD(2, 3) Jdpi;
+            computeProjectionJacobian(ctx, point_c, Jdpi);
+            M3D point_hat;
+            point_hat << SKEW_SYM_MATRX(point_c);
+            const int u_i = static_cast<int>(std::floor(pixel[0] / scale)) * scale;
+            const int v_i = static_cast<int>(std::floor(pixel[1] / scale)) * scale;
+            const double du = (pixel[0] - u_i) / scale;
+            const double dv = (pixel[1] - v_i) / scale;
+            const double w_tl = (1.0 - du) * (1.0 - dv);
+            const double w_tr = du * (1.0 - dv);
+            const double w_bl = (1.0 - du) * dv;
+            const double w_br = du * dv;
+            for (int x = 0; x < patch_size; ++x)
+            {
+              const uint8_t *img_ptr = img.data +
+                  (v_i + x * scale - patch_size_half * scale) * ctx.width + u_i - patch_size_half * scale;
+              for (int y = 0; y < patch_size; ++y, img_ptr += scale)
+              {
+                const double grad_u = 0.5 *
+                    ((w_tl * img_ptr[scale] + w_tr * img_ptr[2 * scale] + w_bl * img_ptr[ctx.width * scale + scale] +
+                      w_br * img_ptr[ctx.width * scale + 2 * scale]) -
+                     (w_tl * img_ptr[-scale] + w_tr * img_ptr[0] + w_bl * img_ptr[ctx.width * scale - scale] +
+                      w_br * img_ptr[ctx.width * scale]));
+                const double grad_v = 0.5 *
+                    ((w_tl * img_ptr[ctx.width * scale] + w_tr * img_ptr[ctx.width * scale + scale] +
+                      w_bl * img_ptr[2 * ctx.width * scale] + w_br * img_ptr[2 * ctx.width * scale + scale]) -
+                     (w_tl * img_ptr[-ctx.width * scale] + w_tr * img_ptr[-ctx.width * scale + scale] +
+                      w_bl * img_ptr[0] + w_br * img_ptr[scale]));
+                MD(1, 2) Jimg;
+                Jimg << grad_u, grad_v;
+                Jimg *= current_exposure * inv_scale;
+                const MD(1, 3) Jdphi = Jimg * Jdpi * point_hat;
+                const MD(1, 3) Jdp = -Jimg * Jdpi;
+                const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
+                const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
+                const double current_value = w_tl * img_ptr[0] + w_tr * img_ptr[scale] +
+                                             w_bl * img_ptr[ctx.width * scale] + w_br * img_ptr[ctx.width * scale + scale];
+                const int patch_index = x * patch_size + y;
+                const double residual = current_exposure * current_value -
+                                        reference_exposure * reference_patch[patch_size_total * level + patch_index];
+                Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
+                jacobian.segment<3>(0) = JdR.transpose();
+                jacobian.segment<3>(3) = Jdt.transpose();
+                if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
+                hessian.noalias() += jacobian * jacobian.transpose();
+                gradient.noalias() += jacobian * residual;
+                patch_error += residual * residual;
+                ++measurement_count;
+              }
+            }
+          }
+          ctx.visual_submap->errors[point_index] = patch_error;
+          error += patch_error;
+        }
+      }
+
+      compute_jacobian_time += omp_get_wtime() - linearize_start;
+      if (measurement_count == 0) break;
+      error /= measurement_count;
+      if (error > last_error)
+      {
+        *state = old_state;
+        break;
+      }
+
+      old_state = *state;
+      last_error = error;
+      const double update_start = omp_get_wtime();
+      const Eigen::MatrixXd K1 = (hessian + (state->cov / img_point_cov).inverse()).inverse();
+      const Eigen::VectorXd prior_delta = *state_propagat - *state;
+      G = K1 * hessian;
+      const Eigen::VectorXd solution = -K1 * gradient + prior_delta - G * prior_delta;
+      *state += solution;
+      update_ekf_time += omp_get_wtime() - update_start;
+      if (solution.segment<3>(0).norm() * 57.3 < 0.001 && solution.segment<3>(3).norm() * 100.0 < 0.001) break;
     }
-    else
-      updateState(img, level);
   }
   state->cov -= G * state->cov;
-  updateFrameState(*state);
+  for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
 }
 
-void VIOManager::generateVisualMapPointsVirtual(cv::Mat img, vector<pointWithVar> &pg)
+void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg)
 {
   if (pg.size() <= 10) return;
 
-  auto consider_candidate = [&](const pointWithVar &candidate) {
+  auto consider_candidate = [&](const pointWithVar &candidate, int source_type, int source_index) {
     if (candidate.normal == V3D::Zero()) return;
     V2D raw_px;
-    if (!projectRawFisheyeIfValid(new_frame_->w2f(candidate.point_w), border, raw_px)) return;
-    const int grid_col = static_cast<int>(raw_px[0] / grid_size);
-    const int grid_row = static_cast<int>(raw_px[1] / grid_size);
-    if (grid_col < 0 || grid_col >= grid_n_width || grid_row < 0 || grid_row >= grid_n_height) return;
-    const int index = grid_row * grid_n_width + grid_col;
-    if (grid_num[index] == TYPE_MAP) return;
+    if (!projectRawFisheyeIfValid(ctx, ctx.new_frame->w2f(candidate.point_w), border, raw_px)) return;
+    const int grid_col = static_cast<int>(raw_px[0] / ctx.grid_size);
+    const int grid_row = static_cast<int>(raw_px[1] / ctx.grid_size);
+    if (grid_col < 0 || grid_col >= ctx.grid_n_width || grid_row < 0 || grid_row >= ctx.grid_n_height) return;
+    const int index = grid_row * ctx.grid_n_width + grid_col;
+    if (ctx.grid_num[index] == TYPE_MAP) return;
 
     const float score = vk::shiTomasiScore(img, raw_px[0], raw_px[1]);
     if (!std::isfinite(score)) return;
-    if (score > scan_value[index])
+    if (score > ctx.scan_value[index])
     {
-      scan_value[index] = score;
-      append_voxel_points[index] = candidate;
-      grid_num[index] = TYPE_POINTCLOUD;
+      ctx.scan_value[index] = score;
+      ctx.append_voxel_points[index] = candidate;
+      ctx.append_voxel_source_type[index] = source_type;
+      ctx.append_voxel_source_index[index] = source_index;
+      ctx.grid_num[index] = TYPE_POINTCLOUD;
     }
   };
 
-  for (const auto &candidate : pg) consider_candidate(candidate);
-  for (const auto &candidate : visual_submap->add_from_voxel_map) consider_candidate(candidate);
+  for (int i = 0; i < static_cast<int>(pg.size()); ++i) consider_candidate(pg[i], SOURCE_PG, i);
+  for (const auto &candidate : ctx.visual_submap->add_from_voxel_map)
+    consider_candidate(candidate, SOURCE_RAYCAST_PLANE, -1);
 
-  int add = 0;
-  for (int i = 0; i < length; ++i)
+  for (int i = 0; i < ctx.length; ++i)
   {
-    if (grid_num[i] != TYPE_POINTCLOUD) continue;
-    const pointWithVar &pt_var = append_voxel_points[i];
+    if (ctx.grid_num[i] != TYPE_POINTCLOUD) continue;
+    const pointWithVar &pt_var = ctx.append_voxel_points[i];
     V2D raw_px;
-    if (!projectRawFisheyeIfValid(new_frame_->w2f(pt_var.point_w), 1, raw_px)) continue;
+    if (!projectRawFisheyeIfValid(ctx, ctx.new_frame->w2f(pt_var.point_w), 1, raw_px)) continue;
 
-    std::unique_ptr<float[]> patch(new float[patch_size_total]);
+    std::vector<float> patch(patch_size_total);
     cv::Mat virtual_support_img;
     SE3<double> T_v_w;
     M3D R_v_from_c, R_c_from_v;
-    if (!createVirtualFeaturePatch(img, new_frame_->T_f_w_, pt_var.point_w, patch.get(), virtual_support_img, T_v_w, R_v_from_c,
+    if (!createVirtualFeaturePatch(ctx, img, ctx.new_frame->T_f_w_, pt_var.point_w, patch.data(), virtual_support_img, T_v_w, R_v_from_c,
                                    R_c_from_v))
     {
       ++rejected_virtual_support_oob_;
       continue;
     }
 
-    VisualPoint *pt_new = new VisualPoint(pt_var.point_w);
-    const V3D bearing = cam->cam2world(raw_px);
-    Feature *ftr_new = new Feature(pt_new, patch.release(), raw_px, bearing, new_frame_->T_f_w_, 0);
-    // [MODIFY] 使用第一次生成的参考 patch，不再每帧重构
-    ftr_new->img_ = virtual_support_img;
-    ftr_new->id_ = new_frame_->id_;
-    ftr_new->inv_expo_time_ = state->inv_expo_time;
-    ftr_new->T_v_w_ = T_v_w;
-    ftr_new->R_v_from_c_ = R_v_from_c;
-    ftr_new->R_c_from_v_ = R_c_from_v;
-    ftr_new->virtual_patch_valid_ = true;
-
-    pt_new->addFrameRef(ftr_new);
-    pt_new->covariance_ = pt_var.var;
-    pt_new->is_normal_initialized_ = true;
-    const V3D dir = new_frame_->w2f(pt_var.point_w).normalized();
-    const V3D normal_c = new_frame_->T_f_w_.rotationMatrix() * pt_var.normal;
-    pt_new->normal_ = dir.dot(normal_c) < 0.0 ? -pt_var.normal : pt_var.normal;
-    pt_new->previous_normal_ = pt_new->normal_;
-    insertPointIntoVoxelMap(pt_new);
-    ++add;
+    PendingNewPointObservation pending;
+    pending.camera_id = ctx.camera_id;
+    pending.source_type = ctx.append_voxel_source_type[i];
+    pending.source_index = ctx.append_voxel_source_index[i];
+    pending.pt_var = pt_var;
+    pending.px = raw_px;
+    pending.bearing = ctx.cam->cam2world(raw_px);
+    pending.patch = std::move(patch);
+    pending.img = virtual_support_img;
+    pending.T_f_w = ctx.new_frame->T_f_w_;
+    pending.T_v_w = T_v_w;
+    pending.R_v_from_c = R_v_from_c;
+    pending.R_c_from_v = R_c_from_v;
+    pending.virtual_patch_valid = true;
+    pending.inv_expo_time = state->inv_expo_time[ctx.camera_id];
+    ctx.pending_new_points.push_back(std::move(pending));
   }
-  printf("[ VIO Virtual ] Append %d new visual map points\n", add);
+  printf("[ VIO Virtual ] camera_id=%d selected %zu pending observations\n", ctx.camera_id, ctx.pending_new_points.size());
 }
 
-void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
+void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg)
 {
   if (virtual_fisheye_patch_en)
   {
-    generateVisualMapPointsVirtual(img, pg);
+    generateVisualMapPointsVirtual(ctx, img, pg);
     return;
   }
   if (pg.size() <= 10) return;
@@ -2064,43 +2252,47 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
     if (pg[i].normal == V3D(0, 0, 0)) continue;
 
     V3D pt = pg[i].point_w;
-    V2D pc(new_frame_->w2c(pt));
+    V2D pc(ctx.new_frame->w2c(pt));
 
-    if (new_frame_->cam_->isInFrame(pc.cast<int>(), border)) // 20px is the patch size in the matcher
+    if (ctx.cam->isInFrame(pc.cast<int>(), border))
     {
-      int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
+      int index = static_cast<int>(pc[1] / ctx.grid_size) * ctx.grid_n_width + static_cast<int>(pc[0] / ctx.grid_size);
 
-      if (grid_num[index] != TYPE_MAP)
+      if (ctx.grid_num[index] != TYPE_MAP)
       {
         float cur_value = vk::shiTomasiScore(img, pc[0], pc[1]);
         // if (cur_value < 5) continue;
-        if (cur_value > scan_value[index])
+        if (cur_value > ctx.scan_value[index])
         {
-          scan_value[index] = cur_value;
-          append_voxel_points[index] = pg[i];
-          grid_num[index] = TYPE_POINTCLOUD;
+          ctx.scan_value[index] = cur_value;
+          ctx.append_voxel_points[index] = pg[i];
+          ctx.append_voxel_source_type[index] = SOURCE_PG;
+          ctx.append_voxel_source_index[index] = i;
+          ctx.grid_num[index] = TYPE_POINTCLOUD;
         }
       }
     }
   }
 
-  for (int j = 0; j < visual_submap->add_from_voxel_map.size(); j++)
+  for (int j = 0; j < ctx.visual_submap->add_from_voxel_map.size(); j++)
   {
-    V3D pt = visual_submap->add_from_voxel_map[j].point_w;
-    V2D pc(new_frame_->w2c(pt));
+    V3D pt = ctx.visual_submap->add_from_voxel_map[j].point_w;
+    V2D pc(ctx.new_frame->w2c(pt));
 
-    if (new_frame_->cam_->isInFrame(pc.cast<int>(), border)) // 20px is the patch size in the matcher
+    if (ctx.cam->isInFrame(pc.cast<int>(), border))
     {
-      int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
+      int index = static_cast<int>(pc[1] / ctx.grid_size) * ctx.grid_n_width + static_cast<int>(pc[0] / ctx.grid_size);
 
-      if (grid_num[index] != TYPE_MAP)
+      if (ctx.grid_num[index] != TYPE_MAP)
       {
         float cur_value = vk::shiTomasiScore(img, pc[0], pc[1]);
-        if (cur_value > scan_value[index])
+        if (cur_value > ctx.scan_value[index])
         {
-          scan_value[index] = cur_value;
-          append_voxel_points[index] = visual_submap->add_from_voxel_map[j];
-          grid_num[index] = TYPE_POINTCLOUD;
+          ctx.scan_value[index] = cur_value;
+          ctx.append_voxel_points[index] = ctx.visual_submap->add_from_voxel_map[j];
+          ctx.append_voxel_source_type[index] = SOURCE_RAYCAST_PLANE;
+          ctx.append_voxel_source_index[index] = -1;
+          ctx.grid_num[index] = TYPE_POINTCLOUD;
         }
       }
     }
@@ -2109,64 +2301,113 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
   // double t_b1 = omp_get_wtime() - t0;
   // t0 = omp_get_wtime();
 
-  int add = 0;
-  for (int i = 0; i < length; i++)
+  for (int i = 0; i < ctx.length; i++)
   {
-    if (grid_num[i] == TYPE_POINTCLOUD) // && (scan_value[i]>=50))
+    if (ctx.grid_num[i] == TYPE_POINTCLOUD)
     {
-      pointWithVar pt_var = append_voxel_points[i];
+      pointWithVar pt_var = ctx.append_voxel_points[i];
       V3D pt = pt_var.point_w;
 
-      V3D norm_vec(new_frame_->T_f_w_.rotationMatrix() * pt_var.normal);
-      V3D dir(new_frame_->T_f_w_ * pt);
+      V3D norm_vec(ctx.new_frame->T_f_w_.rotationMatrix() * pt_var.normal);
+      V3D dir(ctx.new_frame->T_f_w_ * pt);
       dir.normalize();
       double cos_theta = dir.dot(norm_vec);
       // if(std::fabs(cos_theta)<0.34) continue; // 70 degree
-      V2D pc(new_frame_->w2c(pt));
+      V2D pc(ctx.new_frame->w2c(pt));
 
-      float *patch = new float[patch_size_total];
-      getImagePatch(img, pc, patch, 0);
-
-      VisualPoint *pt_new = new VisualPoint(pt);
-
-      Vector3d f = cam->cam2world(pc);
-      Feature *ftr_new = new Feature(pt_new, patch, pc, f, new_frame_->T_f_w_, 0);
-      ftr_new->img_ = img;
-      ftr_new->id_ = new_frame_->id_;
-      ftr_new->inv_expo_time_ = state->inv_expo_time;
-
-      pt_new->addFrameRef(ftr_new);
-      pt_new->covariance_ = pt_var.var;
-      pt_new->is_normal_initialized_ = true;
-
-      if (cos_theta < 0) { pt_new->normal_ = -pt_var.normal; }
-      else { pt_new->normal_ = pt_var.normal; }
-      
-      pt_new->previous_normal_ = pt_new->normal_;
-
-      insertPointIntoVoxelMap(pt_new);
-      add += 1;
-      // map_cur_frame.push_back(pt_new);
+      PendingNewPointObservation pending;
+      pending.camera_id = ctx.camera_id;
+      pending.source_type = ctx.append_voxel_source_type[i];
+      pending.source_index = ctx.append_voxel_source_index[i];
+      pending.pt_var = pt_var;
+      pending.px = pc;
+      pending.bearing = ctx.cam->cam2world(pc);
+      pending.patch.resize(patch_size_total);
+      getImagePatch(ctx, img, pc, pending.patch.data(), 0);
+      pending.img = img;
+      pending.T_f_w = ctx.new_frame->T_f_w_;
+      pending.inv_expo_time = state->inv_expo_time[ctx.camera_id];
+      ctx.pending_new_points.push_back(std::move(pending));
     }
   }
 
   // double t_b2 = omp_get_wtime() - t0;
 
-  printf("[ VIO ] Append %d new visual map points\n", add);
+  printf("[ VIO ] camera_id=%d selected %zu pending observations\n", ctx.camera_id, ctx.pending_new_points.size());
   // printf("pg.size: %d \n", pg.size());
   // printf("B1. : %.6lf \n", t_b1);
   // printf("B2. : %.6lf \n", t_b2);
 }
 
-void VIOManager::updateVisualMapPointsVirtual(cv::Mat img)
+void VIOManager::commitPendingNewPoints()
 {
-  if (total_points == 0) return;
+  std::unordered_map<int, VisualPoint *> created_from_pg;
+  std::vector<VisualPoint *> created_points;
+  for (PerCameraData &ctx : cameras_)
+  {
+    for (PendingNewPointObservation &pending : ctx.pending_new_points)
+    {
+      VisualPoint *point = nullptr;
+      if (pending.source_type == SOURCE_PG && pending.source_index >= 0)
+      {
+        const auto found = created_from_pg.find(pending.source_index);
+        if (found != created_from_pg.end()) point = found->second;
+      }
+      if (point == nullptr)
+      {
+        point = new VisualPoint(pending.pt_var.point_w);
+        point->ensureCameraCount(numCameras());
+        point->covariance_ = pending.pt_var.var;
+        point->is_normal_initialized_ = true;
+        const V3D dir = pending.T_f_w * pending.pt_var.point_w;
+        const V3D normal_c = pending.T_f_w.rotationMatrix() * pending.pt_var.normal;
+        point->normal_ = dir.normalized().dot(normal_c) < 0.0 ? -pending.pt_var.normal : pending.pt_var.normal;
+        point->previous_normal_ = point->normal_;
+        created_points.push_back(point);
+        if (pending.source_type == SOURCE_PG && pending.source_index >= 0)
+          created_from_pg[pending.source_index] = point;
+      }
+
+      float *patch = new float[pending.patch.size()];
+      std::copy(pending.patch.begin(), pending.patch.end(), patch);
+      Feature *feature = new Feature(point, patch, pending.px, pending.bearing, pending.T_f_w, pending.level,
+                                     pending.camera_id, ctx.new_frame->timestamp_);
+      feature->img_ = pending.img;
+      feature->id_ = ctx.new_frame->id_;
+      feature->inv_expo_time_ = pending.inv_expo_time;
+      feature->T_v_w_ = pending.T_v_w;
+      feature->R_v_from_c_ = pending.R_v_from_c;
+      feature->R_c_from_v_ = pending.R_c_from_v;
+      feature->virtual_patch_valid_ = pending.virtual_patch_valid;
+      point->addFrameRef(feature);
+      if (cross_camera_reference_en)
+      {
+        if (!point->has_ref_patch_)
+        {
+          point->ref_patch = feature;
+          point->has_ref_patch_ = true;
+        }
+      }
+      else
+      {
+        point->ref_patch_by_camera_[pending.camera_id] = feature;
+        point->has_ref_patch_by_camera_[pending.camera_id] = 1;
+      }
+    }
+  }
+  for (VisualPoint *point : created_points) insertPointIntoVoxelMap(point);
+  printf("[ VIO ] committed %zu new shared visual map points\n", created_points.size());
+}
+
+void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img)
+{
+  if (ctx.total_points == 0) return;
 
   int update_num = 0;
-  const SE3<double> pose_cur = new_frame_->T_f_w_;
-  for (int i = 0; i < total_points; ++i)
+  const SE3<double> pose_cur = ctx.new_frame->T_f_w_;
+  for (int i = 0; i < ctx.total_points; ++i)
   {
-    VisualPoint *pt = visual_submap->voxel_points[i];
+    VisualPoint *pt = ctx.visual_submap->voxel_points[i];
     if (pt == nullptr) continue;
     if (pt->is_converged_)
     {
@@ -2175,19 +2416,24 @@ void VIOManager::updateVisualMapPointsVirtual(cv::Mat img)
     }
 
     V2D raw_px;
-    if (!projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, raw_px)) continue;
-    Feature *last_feature = pt->obs_.back();
-    bool add_flag = false;
-    const SE3<double> delta_pose = last_feature->T_f_w_ * pose_cur.inverse();
-    const double delta_p = delta_pose.translation().norm();
-    const double trace = delta_pose.rotationMatrix().trace();
-    const double delta_theta = trace > 3.0 - 1e-6 ? 0.0 : std::acos(std::clamp(0.5 * (trace - 1.0), -1.0, 1.0));
-    if (delta_p > 0.5 || delta_theta > 0.3 || (raw_px - last_feature->px_).norm() > 40.0) add_flag = true;
+    if (!projectRawFisheyeIfValid(ctx, ctx.new_frame->w2f(pt->pos_), 1, raw_px)) continue;
+    Feature *last_feature = nullptr;
+    for (Feature *feature : pt->obs_)
+      if (feature != nullptr && feature->camera_id_ == ctx.camera_id) { last_feature = feature; break; }
+    bool add_flag = last_feature == nullptr;
+    if (last_feature != nullptr)
+    {
+      const SE3<double> delta_pose = last_feature->T_f_w_ * pose_cur.inverse();
+      const double delta_p = delta_pose.translation().norm();
+      const double trace = delta_pose.rotationMatrix().trace();
+      const double delta_theta = trace > 3.0 - 1e-6 ? 0.0 : std::acos(std::clamp(0.5 * (trace - 1.0), -1.0, 1.0));
+      if (delta_p > 0.5 || delta_theta > 0.3 || (raw_px - last_feature->px_).norm() > 40.0) add_flag = true;
+    }
 
     if (pt->obs_.size() >= 30)
     {
       Feature *ref_ftr;
-      pt->findMinScoreFeature(new_frame_->pos(), ref_ftr);
+      pt->findMinScoreFeature(ctx.new_frame->pos(), ref_ftr);
       pt->deleteFeatureRef(ref_ftr);
     }
     if (!add_flag) continue;
@@ -2196,43 +2442,44 @@ void VIOManager::updateVisualMapPointsVirtual(cv::Mat img)
     cv::Mat virtual_support_img;
     SE3<double> T_v_w;
     M3D R_v_from_c, R_c_from_v;
-    if (!createVirtualFeaturePatch(img, new_frame_->T_f_w_, pt->pos_, patch.get(), virtual_support_img, T_v_w, R_v_from_c, R_c_from_v))
+    if (!createVirtualFeaturePatch(ctx, img, ctx.new_frame->T_f_w_, pt->pos_, patch.get(), virtual_support_img, T_v_w, R_v_from_c, R_c_from_v))
     {
       ++rejected_virtual_support_oob_;
       continue;
     }
 
-    const V3D bearing = cam->cam2world(raw_px);
-    Feature *ftr_new = new Feature(pt, patch.release(), raw_px, bearing, new_frame_->T_f_w_, visual_submap->search_levels[i]);
+    const V3D bearing = ctx.cam->cam2world(raw_px);
+    Feature *ftr_new = new Feature(pt, patch.release(), raw_px, bearing, ctx.new_frame->T_f_w_,
+                                   ctx.visual_submap->search_levels[i], ctx.camera_id, ctx.new_frame->timestamp_);
     // [MODIFY] 使用第一次生成的参考 patch，不再每帧重构
     ftr_new->img_ = virtual_support_img;
-    ftr_new->id_ = new_frame_->id_;
-    ftr_new->inv_expo_time_ = state->inv_expo_time;
+    ftr_new->id_ = ctx.new_frame->id_;
+    ftr_new->inv_expo_time_ = state->inv_expo_time[ctx.camera_id];
     ftr_new->T_v_w_ = T_v_w;
     ftr_new->R_v_from_c_ = R_v_from_c;
     ftr_new->R_c_from_v_ = R_c_from_v;
     ftr_new->virtual_patch_valid_ = true;
     pt->addFrameRef(ftr_new);
-    update_flag[i] = 1;
+    ctx.update_flag[i] = 1;
     ++update_num;
   }
   printf("[ VIO Virtual ] Update %d points in visual submap\n", update_num);
 }
 
-void VIOManager::updateVisualMapPoints(cv::Mat img)
+void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
 {
   if (virtual_fisheye_patch_en)
   {
-    updateVisualMapPointsVirtual(img);
+    updateVisualMapPointsVirtual(ctx, img);
     return;
   }
-  if (total_points == 0) return;
+  if (ctx.total_points == 0) return;
 
   int update_num = 0;
-  SE3 pose_cur = new_frame_->T_f_w_;
-  for (int i = 0; i < total_points; i++)
+  SE3 pose_cur = ctx.new_frame->T_f_w_;
+  for (int i = 0; i < ctx.total_points; i++)
   {
-    VisualPoint *pt = visual_submap->voxel_points[i];
+    VisualPoint *pt = ctx.visual_submap->voxel_points[i];
     if (pt == nullptr) continue;
     if (pt->is_converged_)
     { 
@@ -2240,63 +2487,69 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
       continue;
     }
 
-    V2D pc(new_frame_->w2c(pt->pos_));
+    V2D pc(ctx.new_frame->w2c(pt->pos_));
     bool add_flag = false;
     
     float *patch_temp = new float[patch_size_total];
-    getImagePatch(img, pc, patch_temp, 0);
+    getImagePatch(ctx, img, pc, patch_temp, 0);
     // TODO: condition: distance and view_angle
     // Step 1: time
-    Feature *last_feature = pt->obs_.back();
+    Feature *last_feature = nullptr;
+    for (Feature *feature : pt->obs_)
+      if (feature != nullptr && feature->camera_id_ == ctx.camera_id) { last_feature = feature; break; }
     // if(new_frame_->id_ >= last_feature->id_ + 10) add_flag = true; // 10
 
     // Step 2: delta_pose
-    SE3 pose_ref = last_feature->T_f_w_;
-    SE3 delta_pose = pose_ref * pose_cur.inverse();
-    double delta_p = delta_pose.translation().norm();
-    double delta_theta = (delta_pose.rotationMatrix().trace() > 3.0 - 1e-6) ? 0.0 : std::acos(0.5 * (delta_pose.rotationMatrix().trace() - 1));
-    if (delta_p > 0.5 || delta_theta > 0.3) add_flag = true; // 0.5 || 0.3
-
-    // Step 3: pixel distance
-    Vector2d last_px = last_feature->px_;
-    double pixel_dist = (pc - last_px).norm();
-    if (pixel_dist > 40) add_flag = true;
+    if (last_feature == nullptr) add_flag = true;
+    else
+    {
+      SE3 pose_ref = last_feature->T_f_w_;
+      SE3 delta_pose = pose_ref * pose_cur.inverse();
+      double delta_p = delta_pose.translation().norm();
+      double delta_theta = (delta_pose.rotationMatrix().trace() > 3.0 - 1e-6) ? 0.0 : std::acos(0.5 * (delta_pose.rotationMatrix().trace() - 1));
+      if (delta_p > 0.5 || delta_theta > 0.3 || (pc - last_feature->px_).norm() > 40) add_flag = true;
+    }
 
     // Maintain the size of 3D point observation features.
     if (pt->obs_.size() >= 30)
     {
       Feature *ref_ftr;
-      pt->findMinScoreFeature(new_frame_->pos(), ref_ftr);
+      pt->findMinScoreFeature(ctx.new_frame->pos(), ref_ftr);
       pt->deleteFeatureRef(ref_ftr);
       // cout<<"pt->obs_.size() exceed 20 !!!!!!"<<endl;
     }
     if (add_flag)
     {
       update_num += 1;
-      update_flag[i] = 1;
-      Vector3d f = cam->cam2world(pc);
-      Feature *ftr_new = new Feature(pt, patch_temp, pc, f, new_frame_->T_f_w_, visual_submap->search_levels[i]);
+      ctx.update_flag[i] = 1;
+      Vector3d f = ctx.cam->cam2world(pc);
+      Feature *ftr_new = new Feature(pt, patch_temp, pc, f, ctx.new_frame->T_f_w_,
+                                     ctx.visual_submap->search_levels[i], ctx.camera_id, ctx.new_frame->timestamp_);
       ftr_new->img_ = img;
-      ftr_new->id_ = new_frame_->id_;
-      ftr_new->inv_expo_time_ = state->inv_expo_time;
+      ftr_new->id_ = ctx.new_frame->id_;
+      ftr_new->inv_expo_time_ = state->inv_expo_time[ctx.camera_id];
       pt->addFrameRef(ftr_new);
+    }
+    else
+    {
+      delete[] patch_temp;
     }
   }
   printf("[ VIO ] Update %d points in visual submap\n", update_num);
 }
 
-void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
+void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
-  if (total_points == 0) return;
+  if (ctx.total_points == 0) return;
 
-  for (int i = 0; i < visual_submap->voxel_points.size(); i++)
+  for (int i = 0; i < static_cast<int>(ctx.visual_submap->voxel_points.size()); i++)
   {
-    VisualPoint *pt = visual_submap->voxel_points[i];
+    VisualPoint *pt = ctx.visual_submap->voxel_points[i];
 
     if (!pt->is_normal_initialized_) continue;
     if (pt->is_converged_) continue;
     if (pt->obs_.size() <= 5) continue;
-    if (update_flag[i] == 0) continue;
+    if (ctx.update_flag[i] == 0) continue;
 
     const V3D &p_w = pt->pos_;
     float loc_xyz[3];
@@ -2353,9 +2606,12 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
     }
 
     float score_max = -1000.;
+    Feature *best_reference = nullptr;
     for (auto it = pt->obs_.begin(), ite = pt->obs_.end(); it != ite; ++it)
     {
       Feature *ref_patch_temp = *it;
+      if (ref_patch_temp == nullptr) continue;
+      if (!cross_camera_reference_en && ref_patch_temp->camera_id_ != ctx.camera_id) continue;
       float *patch_temp = ref_patch_temp->patch_;
       float NCC_up = 0.0;
       float NCC_down1 = 0.0;
@@ -2380,7 +2636,8 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
 
       for (auto itm = pt->obs_.begin(), itme = pt->obs_.end(); itm != itme; ++itm)
       {
-        if ((*itm)->id_ == ref_patch_temp->id_) continue;
+        if (*itm == nullptr || *itm == ref_patch_temp) continue;
+        if (!cross_camera_reference_en && (*itm)->camera_id_ != ctx.camera_id) continue;
         float *patch_cache = (*itm)->patch_;
 
         float other_mean = (*itm)->mean_;
@@ -2401,7 +2658,7 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
         count++;
       }
 
-      NCC = NCC / count;
+      if (count > 0) NCC /= count;
 
       score = NCC + cos_angle;
 
@@ -2410,14 +2667,29 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
       if (score > score_max)
       {
         score_max = score;
-        pt->ref_patch = ref_patch_temp;
+        best_reference = ref_patch_temp;
+      }
+    }
+
+    if (best_reference != nullptr)
+    {
+      pt->ensureCameraCount(numCameras());
+      if (cross_camera_reference_en)
+      {
+        pt->ref_patch = best_reference;
         pt->has_ref_patch_ = true;
+      }
+      else
+      {
+        pt->ref_patch_by_camera_[ctx.camera_id] = best_reference;
+        pt->has_ref_patch_by_camera_[ctx.camera_id] = 1;
       }
     }
 
   }
 }
 
+#if 0  // Legacy single-camera diagnostic renderer.
 void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
   if (virtual_fisheye_patch_en)
@@ -2653,6 +2925,22 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
   cv::imwrite(dir + std::to_string(new_frame_->id_) + "_0_" + "normal" + ".png", ref_cur_combine_normal);
 }
 
+#endif
+
+void VIOManager::projectPatchFromRefToCur(PerCameraData &ctx,
+                                          const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
+{
+  (void)ctx;
+  (void)plane_map;
+  static bool warned = false;
+  if (!warned)
+  {
+    printf("[ VIO ] reference/current patch dump is disabled in the multi-camera target.\n");
+    warned = true;
+  }
+}
+
+#if 0  // Superseded by the dynamic multi-camera joint linearization above.
 void VIOManager::precomputeReferencePatchesVirtual(int level)
 {
   if (total_points == 0) return;
@@ -3316,18 +3604,21 @@ void VIOManager::updateState(cv::Mat img, int level)
   // if (state->inv_expo_time < 0.0)  {ROS_ERROR("reset expo time!!!!!!!!!!\n"); state->inv_expo_time = 0.0;}
 }
 
-void VIOManager::updateFrameState(StatesGroup state)
+#endif
+
+void VIOManager::updateFrameState(PerCameraData &ctx, const StatesGroup &state_value)
 {
-  M3D Rwi(state.rot_end);
-  V3D Pwi(state.pos_end);
-  Rcw = Rci * Rwi.transpose();
-  Pcw = -Rci * Rwi.transpose() * Pwi + Pci;
-  new_frame_->T_f_w_ = SE3(Eigen::Quaterniond(Rcw).normalized().toRotationMatrix(), Pcw);  // avoid R is not orthogonal
+  M3D Rwi(state_value.rot_end);
+  V3D Pwi(state_value.pos_end);
+  ctx.Rcw = ctx.Rci * Rwi.transpose();
+  ctx.Pcw = -ctx.Rci * Rwi.transpose() * Pwi + ctx.Pci;
+  if (ctx.new_frame != nullptr)
+    ctx.new_frame->T_f_w_ = SE3(Eigen::Quaterniond(ctx.Rcw).normalized().toRotationMatrix(), ctx.Pcw);
 }
 
-void VIOManager::plotTrackedPoints()
+void VIOManager::plotTrackedPoints(PerCameraData &ctx)
 {
-  int total_points = visual_submap->voxel_points.size();
+  int total_points = ctx.visual_submap->voxel_points.size();
   // int inlier_count = 0;
   // for (int i = 0; i < img_cp.rows / grid_size; i++)
   // {
@@ -3347,25 +3638,25 @@ void VIOManager::plotTrackedPoints()
   // }
   for (int i = 0; i < total_points; i++)
   {
-    VisualPoint *pt = visual_submap->voxel_points[i];
+    VisualPoint *pt = ctx.visual_submap->voxel_points[i];
     V2D pc;
     if (virtual_fisheye_patch_en)
     {
-      if (!projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, pc)) continue;
+      if (!projectRawFisheyeIfValid(ctx, ctx.new_frame->w2f(pt->pos_), 1, pc)) continue;
     }
     else
     {
-      pc = new_frame_->w2c(pt->pos_);
+      pc = ctx.new_frame->w2c(pt->pos_);
     }
 
-    if (visual_submap->errors[i] <= visual_submap->propa_errors[i])
+    if (ctx.visual_submap->errors[i] <= ctx.visual_submap->propa_errors[i])
     {
       // inlier_count++;
-      cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 7, cv::Scalar(0, 255, 0), -1, 8); // Green Sparse Align tracked
+      cv::circle(ctx.img_cp, cv::Point2f(pc[0], pc[1]), 7, cv::Scalar(0, 255, 0), -1, 8);
     }
     else
     {
-      cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 7, cv::Scalar(255, 0, 0), -1, 8); // Blue Sparse Align tracked
+      cv::circle(ctx.img_cp, cv::Point2f(pc[0], pc[1]), 7, cv::Scalar(255, 0, 0), -1, 8);
     }
   }
   if (draw_rejected_points_en)
@@ -3403,9 +3694,9 @@ void VIOManager::plotTrackedPoints()
         return cv::Scalar(0, 0, 255);
       }
     };
-    for (const VIOManager::RejectedVisualPointForDraw &rejected_pt : rejected_visual_points_for_draw_)
+    for (const auto &rejected_pt : ctx.rejected_visual_points_for_draw)
     {
-      cv::circle(img_cp, rejected_pt.px, 5, rejectedPointColor(rejected_pt.reason), -1, 8);
+      cv::circle(ctx.img_cp, rejected_pt.first, 5, rejectedPointColor(rejected_pt.second), -1, 8);
     }
   }
   // std::string text = std::to_string(inlier_count) + " " + std::to_string(total_points);
@@ -3415,7 +3706,7 @@ void VIOManager::plotTrackedPoints()
   // cv::putText(img_cp, text, origin, cv::FONT_HERSHEY_COMPLEX, 0.7, cv::Scalar(0, 255, 0), 2, 8, 0);
 }
 
-V3F VIOManager::getInterpolatedPixel(cv::Mat img, V2D pc)
+V3F VIOManager::getInterpolatedPixel(const cv::Mat &img, V2D pc) const
 {
   const float u_ref = pc[0];
   const float v_ref = pc[1];
@@ -3427,17 +3718,33 @@ V3F VIOManager::getInterpolatedPixel(cv::Mat img, V2D pc)
   const float w_ref_tr = subpix_u_ref * (1.0 - subpix_v_ref);
   const float w_ref_bl = (1.0 - subpix_u_ref) * subpix_v_ref;
   const float w_ref_br = subpix_u_ref * subpix_v_ref;
-  uint8_t *img_ptr = (uint8_t *)img.data + ((v_ref_i)*width + (u_ref_i)) * 3;
-  float B = w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[0 + 3] + w_ref_bl * img_ptr[width * 3] + w_ref_br * img_ptr[width * 3 + 0 + 3];
-  float G = w_ref_tl * img_ptr[1] + w_ref_tr * img_ptr[1 + 3] + w_ref_bl * img_ptr[1 + width * 3] + w_ref_br * img_ptr[width * 3 + 1 + 3];
-  float R = w_ref_tl * img_ptr[2] + w_ref_tr * img_ptr[2 + 3] + w_ref_bl * img_ptr[2 + width * 3] + w_ref_br * img_ptr[width * 3 + 2 + 3];
+  const uint8_t *img_ptr = img.data + ((v_ref_i)*img.cols + (u_ref_i)) * 3;
+  float B = w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[3] + w_ref_bl * img_ptr[img.cols * 3] + w_ref_br * img_ptr[img.cols * 3 + 3];
+  float G = w_ref_tl * img_ptr[1] + w_ref_tr * img_ptr[4] + w_ref_bl * img_ptr[1 + img.cols * 3] + w_ref_br * img_ptr[img.cols * 3 + 4];
+  float R = w_ref_tl * img_ptr[2] + w_ref_tr * img_ptr[5] + w_ref_bl * img_ptr[2 + img.cols * 3] + w_ref_br * img_ptr[img.cols * 3 + 5];
   V3F pixel(B, G, R);
   return pixel;
 }
 
+bool VIOManager::getColorFromCamera(int camera_id, const V3D &p_w, V3F &bgr, double *cam_range) const
+{
+  if (camera_id < 0 || camera_id >= numCameras()) return false;
+  const PerCameraData &ctx = cameras_[camera_id];
+  if (ctx.cam == nullptr || ctx.new_frame == nullptr || ctx.img_rgb.empty() || ctx.img_rgb.channels() != 3) return false;
+  const V3D point_c = ctx.new_frame->w2f(p_w);
+  if (!point_c.array().isFinite().all()) return false;
+  if (cam_range != nullptr) *cam_range = point_c.norm();
+  const V2D pixel = ctx.cam->world2cam(point_c);
+  if (!pixel.array().isFinite().all() || !ctx.cam->isInFrame(pixel.cast<int>(), 1)) return false;
+  bgr = getInterpolatedPixel(ctx.img_rgb, pixel);
+  return bgr.array().isFinite().all();
+}
+
 void VIOManager::dumpDataForColmap()
 {
-  if (pinhole_cam == nullptr)
+  if (cameras_.empty()) return;
+  PerCameraData &ctx = cameras_.front();
+  if (ctx.pinhole_cam == nullptr)
   {
     colmap_output_en = false;
     printf("[ VIO ] COLMAP output disabled: pinhole camera conversion is unavailable.\n");
@@ -3450,11 +3757,11 @@ void VIOManager::dumpDataForColmap()
   std::string image_path = std::string(ROOT_DIR) + "Log/Colmap/images/" + cnt_str + ".png";
   
   cv::Mat img_rgb_undistort;
-  pinhole_cam->undistortImage(img_rgb, img_rgb_undistort);
+  ctx.pinhole_cam->undistortImage(ctx.img_rgb, img_rgb_undistort);
   cv::imwrite(image_path, img_rgb_undistort);
   
-  Eigen::Quaterniond q(new_frame_->T_f_w_.rotationMatrix());
-  Eigen::Vector3d t = new_frame_->T_f_w_.translation();
+  Eigen::Quaterniond q(ctx.new_frame->T_f_w_.rotationMatrix());
+  Eigen::Vector3d t = ctx.new_frame->T_f_w_.translation();
   fout_colmap << cnt << " "
             << std::fixed << std::setprecision(6)  // 保证浮点数精度为6位
             << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " "
@@ -3465,24 +3772,24 @@ void VIOManager::dumpDataForColmap()
   cnt++;
 }
 
-bool VIOManager::inOpticalFlowBorder(const cv::Point2f &pt) const
+bool VIOManager::inOpticalFlowBorder(const PerCameraData &ctx, const cv::Point2f &pt) const
 {
   const int img_x = cvRound(pt.x);
   const int img_y = cvRound(pt.y);
   const int border_size = 1;
-  return border_size <= img_x && img_x < width - border_size && border_size <= img_y && img_y < height - border_size;
+  return border_size <= img_x && img_x < ctx.width - border_size && border_size <= img_y && img_y < ctx.height - border_size;
 }
 
-V3D VIOManager::getOpticalFlowBearing(const cv::Point2f &px) const
+V3D VIOManager::getOpticalFlowBearing(const PerCameraData &ctx, const cv::Point2f &px) const
 {
-  V3D bearing = cam->cam2world(px.x, px.y);
+  V3D bearing = ctx.cam->cam2world(px.x, px.y);
   if (bearing.norm() > 1e-12) bearing.normalize();
   return bearing;
 }
 
-void VIOManager::setOpticalFlowMask(cv::Mat &mask)
+void VIOManager::setOpticalFlowMask(const PerCameraData &ctx, cv::Mat &mask)
 {
-  mask = cv::Mat(height, width, CV_8UC1, cv::Scalar(255));
+  mask = cv::Mat(ctx.height, ctx.width, CV_8UC1, cv::Scalar(255));
 
   std::vector<std::tuple<int, cv::Point2f, int>> cnt_pts_id;
   cnt_pts_id.reserve(optical_flow_cur_pts.size());
@@ -3505,7 +3812,7 @@ void VIOManager::setOpticalFlowMask(cv::Mat &mask)
     const cv::Point2f &pt = std::get<1>(it);
     const int x = cvRound(pt.x);
     const int y = cvRound(pt.y);
-    if (x < 0 || x >= width || y < 0 || y >= height) continue;
+    if (x < 0 || x >= ctx.width || y < 0 || y >= ctx.height) continue;
     if (mask.at<uchar>(y, x) == 255)
     {
       optical_flow_track_cnt.push_back(std::get<0>(it));
@@ -3518,12 +3825,13 @@ void VIOManager::setOpticalFlowMask(cv::Mat &mask)
 
 void VIOManager::addOpticalFlowObservation(OpticalFlowTrack &track, const cv::Point2f &px, double img_time)
 {
+  const PerCameraData &ctx = cameras_.front();
   OpticalFlowObservation obs;
   obs.frame_id = optical_flow_frame_id;
   obs.timestamp = img_time;
   obs.px = px;
-  obs.bearing = getOpticalFlowBearing(px);
-  obs.T_f_w = new_frame_->T_f_w_;
+  obs.bearing = getOpticalFlowBearing(ctx, px);
+  obs.T_f_w = ctx.new_frame->T_f_w_;
   track.observations.push_back(obs);
 
   track.history.push_back(px);
@@ -3532,6 +3840,7 @@ void VIOManager::addOpticalFlowObservation(OpticalFlowTrack &track, const cv::Po
 
 bool VIOManager::triangulateOpticalFlowTrack(OpticalFlowTrack &track)
 {
+  const PerCameraData &ctx = cameras_.front();
   const int obs_num = static_cast<int>(track.observations.size());
   if (obs_num < optical_flow_min_track_len_for_triangulation) return false;
 
@@ -3561,7 +3870,7 @@ bool VIOManager::triangulateOpticalFlowTrack(OpticalFlowTrack &track)
     if (virtual_fisheye_patch_en)
     {
       V2D raw_px;
-      if (!projectRawFisheyeIfValid(point_c, 1, raw_px)) return false;
+      if (!projectRawFisheyeIfValid(ctx, point_c, 1, raw_px)) return false;
     }
     else if (point_c[2] <= 0.05)
     {
@@ -3600,19 +3909,20 @@ void VIOManager::updateOpticalFlowPointClouds()
 void VIOManager::drawOpticalFlowDebugImage(const std::vector<cv::Point2f> &rejected_pts, int prev, int tracked, int flow_back_pass,
                                            int border_pass, int mask_reject, int new_points, int final_points, int triangulated)
 {
-  if (img_rgb.empty()) return;
-  if (img_rgb.channels() == 3)
+  const PerCameraData &ctx = cameras_.front();
+  if (ctx.img_rgb.empty()) return;
+  if (ctx.img_rgb.channels() == 3)
   {
-    optical_flow_debug_img = img_rgb.clone();
+    optical_flow_debug_img = ctx.img_rgb.clone();
   }
   else
   {
-    cv::cvtColor(img_rgb, optical_flow_debug_img, CV_GRAY2BGR);
+    cv::cvtColor(ctx.img_rgb, optical_flow_debug_img, CV_GRAY2BGR);
   }
 
   for (const auto &pt : rejected_pts)
   {
-    if (!inOpticalFlowBorder(pt)) continue;
+    if (!inOpticalFlowBorder(ctx, pt)) continue;
     cv::drawMarker(optical_flow_debug_img, pt, cv::Scalar(0, 0, 255), cv::MARKER_TILTED_CROSS, 12, 2);
   }
 
@@ -3658,14 +3968,16 @@ void VIOManager::drawOpticalFlowDebugImage(const std::vector<cv::Point2f> &rejec
 
 void VIOManager::processFrameOpticalFlow(cv::Mat &img, double img_time)
 {
-  if (width != img.cols || height != img.rows)
+  if (cameras_.empty()) return;
+  PerCameraData &ctx = cameras_.front();
+  if (ctx.width != img.cols || ctx.height != img.rows)
   {
     if (img.empty()) printf("[ OpticalFlow ] Empty Image!\n");
-    cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
+    cv::resize(img, img, cv::Size(img.cols * ctx.image_resize_factor, img.rows * ctx.image_resize_factor), 0, 0, CV_INTER_LINEAR);
   }
 
-  img_rgb = img.clone();
-  img_cp = img.clone();
+  ctx.img_rgb = img.clone();
+  ctx.img_cp = img.clone();
 
   cv::Mat cur_img;
   if (img.channels() == 3)
@@ -3677,8 +3989,10 @@ void VIOManager::processFrameOpticalFlow(cv::Mat &img, double img_time)
     cur_img = img.clone();
   }
 
-  new_frame_.reset(new Frame(cam, cur_img));
-  updateFrameState(*state);
+  ctx.new_frame.reset(new Frame(ctx.cam, cur_img));
+  ctx.new_frame->camera_id_ = 0;
+  ctx.new_frame->timestamp_ = img_time;
+  updateFrameState(ctx, *state);
 
   const int prev = static_cast<int>(optical_flow_prev_pts.size());
   int tracked = 0;
@@ -3729,7 +4043,7 @@ void VIOManager::processFrameOpticalFlow(cv::Mat &img, double img_time)
 
     for (size_t i = 0; i < optical_flow_cur_pts.size(); i++)
     {
-      if (status[i] && !inOpticalFlowBorder(optical_flow_cur_pts[i]))
+      if (status[i] && !inOpticalFlowBorder(ctx, optical_flow_cur_pts[i]))
       {
         rejected_pts.push_back(optical_flow_cur_pts[i]);
         status[i] = 0;
@@ -3759,7 +4073,7 @@ void VIOManager::processFrameOpticalFlow(cv::Mat &img, double img_time)
 
   cv::Mat mask;
   const int before_mask = static_cast<int>(optical_flow_cur_pts.size());
-  setOpticalFlowMask(mask);
+  setOpticalFlowMask(ctx, mask);
   mask_reject = before_mask - static_cast<int>(optical_flow_cur_pts.size());
 
   const int need_new_points = optical_flow_max_cnt - static_cast<int>(optical_flow_cur_pts.size());
@@ -3826,147 +4140,76 @@ void VIOManager::processFrameOpticalFlow(cv::Mat &img, double img_time)
 
 void VIOManager::processFrameFake(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time) 
 {
-  if (width != img.cols || height != img.rows)
+  (void)pg;
+  (void)feat_map;
+  if (cameras_.empty()) return;
+  PerCameraData &ctx = cameras_.front();
+  if (ctx.width != img.cols || ctx.height != img.rows)
   {
     if (img.empty()) printf("[ VIO ] Empty Image!\n");
-    cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
+    cv::resize(img, img, cv::Size(img.cols * ctx.image_resize_factor, img.rows * ctx.image_resize_factor), 0, 0, CV_INTER_LINEAR);
   }
-  img_rgb = img.clone();
-  img_cp = img.clone();
-  // img_test = img.clone();
+  ctx.img_rgb = img.clone();
+  ctx.img_cp = img.clone();
 
   if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
 
-  new_frame_.reset(new Frame(cam, img));
-  updateFrameState(*state);
-  return;
+  ctx.new_frame.reset(new Frame(ctx.cam, img, -1, 0, img_time));
+  updateFrameState(ctx, *state);
 }
-void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
+
+void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointWithVar> &pg,
+                                         const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
-  if (width != img.cols || height != img.rows)
+  if (!meas.has_multi_cam_frame) throw std::runtime_error("direct VIO requires MeasureGroup::multi_cam_frame");
+  const MultiCameraFrame &mf = meas.multi_cam_frame;
+  if (static_cast<int>(mf.images.size()) != numCameras())
+    throw std::runtime_error("MultiCameraFrame image count does not match VIOManager camera count");
+
+  const double frame_start = omp_get_wtime();
+  for (int camera_id = 0; camera_id < numCameras(); ++camera_id)
   {
-    if (img.empty()) printf("[ VIO ] Empty Image!\n");
-    cv::resize(img, img, cv::Size(img.cols * image_resize_factor, img.rows * image_resize_factor), 0, 0, CV_INTER_LINEAR);
-  }
-  img_rgb = img.clone();
-  img_cp = img.clone();
-  // img_test = img.clone();
-
-  if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
-
-  new_frame_.reset(new Frame(cam, img));
-  updateFrameState(*state);
-  
-  resetGrid();
-
-  double t1 = omp_get_wtime();
-
-  retrieveFromVisualSparseMap(img, pg, feat_map);
-
-  double t2 = omp_get_wtime();
-
-  computeJacobianAndUpdateEKF(img);
-
-  double t3 = omp_get_wtime();
-
-  generateVisualMapPoints(img, pg);
-
-  double t4 = omp_get_wtime();
-  
-  plotTrackedPoints();
-
-  if (plot_flag) projectPatchFromRefToCur(feat_map);
-
-  double t5 = omp_get_wtime();
-
-  updateVisualMapPoints(img);
-
-  double t6 = omp_get_wtime();
-
-  updateReferencePatch(feat_map);
-
-  double t7 = omp_get_wtime();
-  
-  if(colmap_output_en)  dumpDataForColmap();
-
-  frame_count++;
-  ave_total = ave_total * (frame_count - 1) / frame_count + (t7 - t1 - (t5 - t4)) / frame_count;
-
-  // printf("[ VIO ] feat_map.size(): %zu\n", feat_map.size());
-  // printf("\033[1;32m[ VIO time ]: current frame: retrieveFromVisualSparseMap time: %.6lf secs.\033[0m\n", t2 - t1);
-  // printf("\033[1;32m[ VIO time ]: current frame: computeJacobianAndUpdateEKF time: %.6lf secs, comp H: %.6lf secs, ekf: %.6lf secs.\033[0m\n", t3 - t2, computeH, ekf_time);
-  // printf("\033[1;32m[ VIO time ]: current frame: generateVisualMapPoints time: %.6lf secs.\033[0m\n", t4 - t3);
-  // printf("\033[1;32m[ VIO time ]: current frame: updateVisualMapPoints time: %.6lf secs.\033[0m\n", t6 - t5);
-  // printf("\033[1;32m[ VIO time ]: current frame: updateReferencePatch time: %.6lf secs.\033[0m\n", t7 - t6);
-  // printf("\033[1;32m[ VIO time ]: current total time: %.6lf, average total time: %.6lf secs.\033[0m\n", t7 - t1 - (t5 - t4), ave_total);
-
-  // ave_build_residual_time = ave_build_residual_time * (frame_count - 1) / frame_count + (t2 - t1) / frame_count;
-  // ave_ekf_time = ave_ekf_time * (frame_count - 1) / frame_count + (t3 - t2) / frame_count;
- 
-  // cout << BLUE << "ave_build_residual_time: " << ave_build_residual_time << RESET << endl;
-  // cout << BLUE << "ave_ekf_time: " << ave_ekf_time << RESET << endl;
-  
-  if (virtual_fisheye_patch_en)
-  {
-    const int virtual_candidate_reject_count = virtual_map_grid_count_ - virtual_candidate_count_;
-    const int virtual_track_reject_count = virtual_candidate_count_ - virtual_valid_track_count_;
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;34m|                      VIO Virtual Time                       |\033[0m\n");
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
-    printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Map Grid Points", virtual_map_grid_count_);
-    printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Virtual Candidates", virtual_candidate_count_);
-    printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Tracked Virtual Points", virtual_valid_track_count_);
-    printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Candidate Rejects", virtual_candidate_reject_count);
-    printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Track Rejects", virtual_track_reject_count);
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t2 - t1);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> candidate/select wall", virtual_candidate_select_time_);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> parallel track wall", virtual_parallel_track_time_);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> support build sum(all)", build_virtual_support_time_);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> affine matrix sum(all)", virtual_affine_time_);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> warp reference sum(all)", virtual_warp_time_);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> current core sum(all)", virtual_current_core_time_);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> result collect wall", virtual_result_collect_time_);
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t4 - t3);
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateVisualMapPoints", t6 - t5);
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateReferencePatch", t7 - t6);
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - t1 - (t5 - t4));
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  }
-  else
-  {
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t2 - t1);
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
-    printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t4 - t3);
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateVisualMapPoints", t6 - t5);
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateReferencePatch", t7 - t6);
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - t1 - (t5 - t4));
-    printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
-    printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+    PerCameraData &ctx = cameras_[camera_id];
+    cv::Mat image = mf.images[camera_id].clone();
+    if (image.empty()) throw std::runtime_error("empty image for camera_id=" + std::to_string(camera_id));
+    if (ctx.width != image.cols || ctx.height != image.rows)
+      cv::resize(image, image, cv::Size(image.cols * ctx.image_resize_factor, image.rows * ctx.image_resize_factor), 0, 0, CV_INTER_LINEAR);
+    ctx.img_rgb = image.clone();
+    ctx.img_cp = image.clone();
+    if (image.channels() == 3) cv::cvtColor(image, image, CV_BGR2GRAY);
+    ctx.new_frame.reset(new Frame(ctx.cam, image, mf.frame_id, camera_id, mf.timestamp));
+    updateFrameState(ctx, *state);
+    resetGrid(ctx);
   }
 
-  // std::string text = std::to_string(int(1 / (t7 - t1 - (t5 - t4)))) + " HZ";
-  // cv::Point2f origin;
-  // origin.x = 20;
-  // origin.y = 20;
-  // cv::putText(img_cp, text, origin, cv::FONT_HERSHEY_COMPLEX, 0.6, cv::Scalar(255, 255, 255), 1, 8, 0);
-  // cv::imwrite("/home/chunran/Desktop/raycasting/" + std::to_string(new_frame_->id_) + ".png", img_cp);
+  for (PerCameraData &ctx : cameras_)
+  {
+    retrieveFromVisualSparseMap(ctx, ctx.new_frame->img_, pg, plane_map);
+    generateVisualMapPoints(ctx, ctx.new_frame->img_, pg);
+  }
+
+  computeJacobianAndUpdateEKF();
+
+  for (PerCameraData &ctx : cameras_)
+  {
+    for (PendingNewPointObservation &pending : ctx.pending_new_points)
+    {
+      pending.T_f_w = ctx.new_frame->T_f_w_;
+      if (pending.virtual_patch_valid) pending.T_v_w = composeVirtualPose(pending.R_v_from_c, pending.T_f_w);
+    }
+    updateVisualMapPoints(ctx, ctx.new_frame->img_);
+  }
+  commitPendingNewPoints();
+  for (PerCameraData &ctx : cameras_)
+  {
+    updateReferencePatch(ctx, plane_map);
+    plotTrackedPoints(ctx);
+    if (plot_flag) projectPatchFromRefToCur(ctx, plane_map);
+  }
+  if (colmap_output_en && numCameras() == 1) dumpDataForColmap();
+  ++frame_count;
+  const double elapsed = omp_get_wtime() - frame_start;
+  ave_total = ave_total * (frame_count - 1) / frame_count + elapsed / frame_count;
+  printf("[ VIO ] multi-camera frame=%d cameras=%d observations=%zu elapsed=%.6f s\n",
+         mf.frame_id, numCameras(), feat_map.size(), elapsed);
 }
