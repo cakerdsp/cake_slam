@@ -1,4 +1,8 @@
 function(configure_fast_livo_multi_cam_targets)
+  if(TARGET fastlivo_mapping_multi_cam)
+    return()
+  endif()
+
   add_library(vio_multi_cam
     ${CMAKE_SOURCE_DIR}/src/vio_multi_cam.cpp
     ${CMAKE_SOURCE_DIR}/src/frame_multi_cam.cpp

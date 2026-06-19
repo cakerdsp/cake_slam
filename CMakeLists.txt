@@ -144,11 +144,28 @@ add_library(imu_proc src/IMU_Processing.cpp)
 add_library(laser_mapping src/LIVMapper.cpp)
 add_library(utils src/utils.cpp)
 
+# Multi-camera implementation. Keep the original targets available so both
+# executables can be built from the same package with a standard colcon build.
+add_library(vio_multi_cam
+  src/vio_multi_cam.cpp
+  src/frame_multi_cam.cpp
+  src/visual_point_multi_cam.cpp
+)
+add_library(lio_multi_cam src/voxel_map_multi_cam.cpp)
+add_library(pre_multi_cam src/preprocess_multi_cam.cpp)
+add_library(imu_proc_multi_cam src/IMU_Processing_multi_cam.cpp)
+add_library(laser_mapping_multi_cam src/LIVMapper_multi_cam.cpp)
+
 ament_target_dependencies(vio ${dependencies} )
 ament_target_dependencies(lio ${dependencies})
 ament_target_dependencies(pre ${dependencies})
 ament_target_dependencies(imu_proc ${dependencies})
 ament_target_dependencies(laser_mapping ${dependencies})
+ament_target_dependencies(vio_multi_cam ${dependencies})
+ament_target_dependencies(lio_multi_cam ${dependencies})
+ament_target_dependencies(pre_multi_cam ${dependencies})
+ament_target_dependencies(imu_proc_multi_cam ${dependencies})
+ament_target_dependencies(laser_mapping_multi_cam ${dependencies})
 
 # linking libraries or executables to public dependencies
 target_link_libraries(laser_mapping ${COMMON_DEPENDENCIES})
@@ -156,11 +173,18 @@ target_link_libraries(vio ${COMMON_DEPENDENCIES})
 target_link_libraries(lio utils ${COMMON_DEPENDENCIES})
 target_link_libraries(pre ${COMMON_DEPENDENCIES})
 target_link_libraries(imu_proc ${COMMON_DEPENDENCIES})
+target_link_libraries(laser_mapping_multi_cam ${COMMON_DEPENDENCIES})
+target_link_libraries(vio_multi_cam ${COMMON_DEPENDENCIES})
+target_link_libraries(lio_multi_cam utils ${COMMON_DEPENDENCIES})
+target_link_libraries(pre_multi_cam ${COMMON_DEPENDENCIES})
+target_link_libraries(imu_proc_multi_cam ${COMMON_DEPENDENCIES})
 
 # Add the main executable
 add_executable(fastlivo_mapping src/main.cpp)
+add_executable(fastlivo_mapping_multi_cam src/main_multi_cam.cpp)
 
 ament_target_dependencies(fastlivo_mapping ${dependencies})
+ament_target_dependencies(fastlivo_mapping_multi_cam ${dependencies})
 
 # Link libraries to the executable
 target_link_libraries(fastlivo_mapping
@@ -175,14 +199,28 @@ target_link_libraries(fastlivo_mapping
   ${Boost_LIBRARIES}
 )
 
+target_link_libraries(fastlivo_mapping_multi_cam
+  laser_mapping_multi_cam
+  vio_multi_cam
+  lio_multi_cam
+  pre_multi_cam
+  imu_proc_multi_cam
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES}
+  ${Boost_LIBRARIES}
+)
+
 # Link mimalloc if found
 if(mimalloc_FOUND)
   target_link_libraries(fastlivo_mapping mimalloc)
+  target_link_libraries(fastlivo_mapping_multi_cam mimalloc)
 endif()
 
 # Install the executable
 install(TARGETS
   fastlivo_mapping
+  fastlivo_mapping_multi_cam
   DESTINATION lib/${PROJECT_NAME}
 )
 
