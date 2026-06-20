@@ -11,7 +11,9 @@ which is included as part of this source code package.
 */
 
 #include "LIVMapper_multi_cam.h"
+#include <cmath>
 #include <filesystem>
+#include <limits>
 #include <vikit/camera_loader.h>
 
 using namespace Sophus;
@@ -104,6 +106,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<int>("common.num_cameras", 1);
   try_declare.template operator()<bool>("common.require_all_cameras", true);
   try_declare.template operator()<int>("common.multi_cam_sync_queue_size", 5);
+  try_declare.template operator()<double>("common.multi_cam_sync_tolerance_ms", 0.0);
 
   try_declare.template operator()<bool>("vio.normal_en", true);
   try_declare.template operator()<bool>("vio.inverse_composition_en", false);
@@ -185,9 +188,12 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("common.num_cameras", num_cameras);
   this->node->get_parameter("common.require_all_cameras", require_all_cameras);
   this->node->get_parameter("common.multi_cam_sync_queue_size", multi_cam_sync_queue_size);
+  this->node->get_parameter("common.multi_cam_sync_tolerance_ms", multi_cam_sync_tolerance_ms);
   if (num_cameras < 1) throw std::runtime_error("common.num_cameras must be at least 1");
   if (!require_all_cameras) throw std::runtime_error("partial camera frames are not supported; common.require_all_cameras must be true");
   if (multi_cam_sync_queue_size < 1) throw std::runtime_error("common.multi_cam_sync_queue_size must be at least 1");
+  if (!std::isfinite(multi_cam_sync_tolerance_ms) || multi_cam_sync_tolerance_ms < 0.0)
+    throw std::runtime_error("common.multi_cam_sync_tolerance_ms must be finite and non-negative");
 
   camera_configs.resize(num_cameras);
   last_timestamp_img_by_camera.assign(num_cameras, -1.0);
@@ -1157,19 +1163,131 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
     return;
   }
 
+  const uint64_t sync_tolerance_ns =
+      static_cast<uint64_t>(std::llround(multi_cam_sync_tolerance_ms * 1.0e6));
+
   {
     std::lock_guard<std::mutex> lock(mtx_buffer);
-    PendingImageGroup &group = pending_images[stamp_ns];
-    if (group.arrived.empty())
-    {
-      group.stamp_ns = stamp_ns;
-      group.timestamp = image_time;
+
+    const auto stampDifferenceNs = [](uint64_t lhs, uint64_t rhs) {
+      return lhs >= rhs ? lhs - rhs : rhs - lhs;
+    };
+    const auto initializeGroup = [this](PendingImageGroup &group, uint64_t group_stamp_ns,
+                                        double group_timestamp) {
+      if (!group.arrived.empty()) return;
+      group.stamp_ns = group_stamp_ns;
+      group.timestamp = group_timestamp;
       group.images.resize(num_cameras);
       group.arrived.assign(num_cameras, 0);
+      group.image_stamp_ns.assign(num_cameras, 0);
+    };
+    const auto groupHasImages = [](const PendingImageGroup &group) {
+      for (uint8_t arrived : group.arrived)
+        if (arrived) return true;
+      return false;
+    };
+
+    if (camera_id == 0)
+    {
+      auto anchor_it = pending_images.find(stamp_ns);
+      if (anchor_it == pending_images.end())
+        anchor_it = pending_images.emplace(stamp_ns, PendingImageGroup()).first;
+
+      PendingImageGroup &anchor = anchor_it->second;
+      initializeGroup(anchor, stamp_ns, image_time);
+      if (anchor.arrived[0]) return;
+
+      anchor.stamp_ns = stamp_ns;
+      anchor.timestamp = image_time;
+      anchor.images[0] = img_cur.clone();
+      anchor.arrived[0] = 1;
+      anchor.image_stamp_ns[0] = stamp_ns;
+
+      for (int matched_camera_id = 1; matched_camera_id < num_cameras; ++matched_camera_id)
+      {
+        if (anchor.arrived[matched_camera_id]) continue;
+
+        auto best_it = pending_images.end();
+        uint64_t best_delta_ns = std::numeric_limits<uint64_t>::max();
+        for (auto it = pending_images.begin(); it != pending_images.end(); ++it)
+        {
+          if (it == anchor_it || it->second.arrived.empty() || it->second.arrived[0] ||
+              !it->second.arrived[matched_camera_id])
+            continue;
+
+          const uint64_t candidate_stamp_ns = it->second.image_stamp_ns[matched_camera_id];
+          const uint64_t delta_ns = stampDifferenceNs(stamp_ns, candidate_stamp_ns);
+          if (delta_ns <= sync_tolerance_ns &&
+              (delta_ns < best_delta_ns ||
+               (delta_ns == best_delta_ns &&
+                (best_it == pending_images.end() || candidate_stamp_ns < best_it->second.image_stamp_ns[matched_camera_id]))))
+          {
+            best_it = it;
+            best_delta_ns = delta_ns;
+          }
+        }
+
+        if (best_it == pending_images.end()) continue;
+        anchor.images[matched_camera_id] = std::move(best_it->second.images[matched_camera_id]);
+        anchor.arrived[matched_camera_id] = 1;
+        anchor.image_stamp_ns[matched_camera_id] = best_it->second.image_stamp_ns[matched_camera_id];
+        best_it->second.arrived[matched_camera_id] = 0;
+        best_it->second.image_stamp_ns[matched_camera_id] = 0;
+      }
+
+      for (auto it = pending_images.begin(); it != pending_images.end();)
+      {
+        if (it != anchor_it && !groupHasImages(it->second))
+          it = pending_images.erase(it);
+        else
+          ++it;
+      }
     }
-    if (group.arrived[camera_id]) return;
-    group.images[camera_id] = img_cur.clone();
-    group.arrived[camera_id] = 1;
+    else
+    {
+      const auto findClosestGroup = [&](bool require_camera0) {
+        auto best_it = pending_images.end();
+        uint64_t best_delta_ns = std::numeric_limits<uint64_t>::max();
+        for (auto it = pending_images.begin(); it != pending_images.end(); ++it)
+        {
+          PendingImageGroup &candidate = it->second;
+          if (candidate.arrived.empty() ||
+              static_cast<bool>(candidate.arrived[0]) != require_camera0 ||
+              candidate.arrived[camera_id])
+            continue;
+
+          const uint64_t reference_stamp_ns =
+              require_camera0 ? candidate.image_stamp_ns[0] : candidate.stamp_ns;
+          const uint64_t delta_ns = stampDifferenceNs(stamp_ns, reference_stamp_ns);
+          if (delta_ns <= sync_tolerance_ns &&
+              (delta_ns < best_delta_ns ||
+               (delta_ns == best_delta_ns &&
+                (best_it == pending_images.end() || reference_stamp_ns < best_it->second.stamp_ns))))
+          {
+            best_it = it;
+            best_delta_ns = delta_ns;
+          }
+        }
+        return best_it;
+      };
+
+      auto group_it = findClosestGroup(true);
+      if (group_it == pending_images.end()) group_it = findClosestGroup(false);
+      if (group_it == pending_images.end())
+      {
+        group_it = pending_images.find(stamp_ns);
+        if (group_it == pending_images.end())
+          group_it = pending_images.emplace(stamp_ns, PendingImageGroup()).first;
+      }
+
+      PendingImageGroup &group = group_it->second;
+      initializeGroup(group, group_it->first, image_time);
+      if (group.arrived[camera_id]) return;
+      group.images[camera_id] = img_cur.clone();
+      group.arrived[camera_id] = 1;
+      group.image_stamp_ns[camera_id] = stamp_ns;
+    }
+
     last_timestamp_img_by_camera[camera_id] = image_time;
     flushCompletedImageGroupsLocked();
     while (static_cast<int>(pending_images.size()) > multi_cam_sync_queue_size)
@@ -1187,7 +1305,6 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
   RCLCPP_INFO(this->node->get_logger(), "Get camera_id=%d image, header time %.6f", camera_id, image_time);
   sig_buffer.notify_all();
 }
-
 void LIVMapper::img_cbk(int camera_id, const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
 {
   cv::Mat img_cur = getImageFromMsg(msg_in);

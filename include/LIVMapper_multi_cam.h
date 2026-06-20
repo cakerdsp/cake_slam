@@ -43,6 +43,7 @@ struct PendingImageGroup
   double timestamp = 0.0;
   std::vector<cv::Mat> images;
   std::vector<uint8_t> arrived;
+  std::vector<uint64_t> image_stamp_ns;
 
   bool isComplete() const
   {
@@ -111,6 +112,7 @@ public:
   int num_cameras = 1;
   bool require_all_cameras = true;
   int multi_cam_sync_queue_size = 5;
+  double multi_cam_sync_tolerance_ms = 0.0;
   std::vector<CameraInputConfig> camera_configs;
   V3D extT;
   M3D extR;

@@ -6,6 +6,7 @@
       num_cameras: 6
       require_all_cameras: true
       multi_cam_sync_queue_size: 10
+      multi_cam_sync_tolerance_ms: 20.0
       lid_topic: "/velodyne_points"
       imu_topic: "/handsfree/imu"
       img_en: 1

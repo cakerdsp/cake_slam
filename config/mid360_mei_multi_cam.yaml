@@ -4,6 +4,7 @@
       num_cameras: 1
       require_all_cameras: true
       multi_cam_sync_queue_size: 5
+      multi_cam_sync_tolerance_ms: 0.0
       lid_topic: "/livox/lidar"
       imu_topic: "/livox/imu"
       img_en: 1
