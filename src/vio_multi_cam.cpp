@@ -4158,6 +4158,36 @@ void VIOManager::processFrameFake(cv::Mat &img, vector<pointWithVar> &pg, const 
   updateFrameState(ctx, *state);
 }
 
+void VIOManager::processMultiCameraFrameFake(const MeasureGroup &meas)
+{
+  if (!meas.has_multi_cam_frame)
+    throw std::runtime_error("color-only multi-camera mode requires MeasureGroup::multi_cam_frame");
+
+  const MultiCameraFrame &mf = meas.multi_cam_frame;
+  if (static_cast<int>(mf.images.size()) != numCameras())
+    throw std::runtime_error("MultiCameraFrame image count does not match VIOManager camera count");
+
+  for (int camera_id = 0; camera_id < numCameras(); ++camera_id)
+  {
+    PerCameraData &ctx = cameras_[camera_id];
+    cv::Mat image = mf.images[camera_id].clone();
+    if (image.empty())
+      throw std::runtime_error("empty image for camera_id=" + std::to_string(camera_id));
+
+    if (ctx.width != image.cols || ctx.height != image.rows)
+      cv::resize(image, image,
+                 cv::Size(image.cols * ctx.image_resize_factor, image.rows * ctx.image_resize_factor),
+                 0, 0, CV_INTER_LINEAR);
+
+    ctx.img_rgb = image.clone();
+    ctx.img_cp = image.clone();
+    if (image.channels() == 3) cv::cvtColor(image, image, CV_BGR2GRAY);
+
+    ctx.new_frame.reset(new Frame(ctx.cam, image, mf.frame_id, camera_id, mf.timestamp));
+    updateFrameState(ctx, *state);
+  }
+}
+
 void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointWithVar> &pg,
                                          const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {

@@ -374,6 +374,7 @@ public:
                                const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void processFrameOpticalFlow(cv::Mat &img, double img_time);
   void processFrameFake(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
+  void processMultiCameraFrameFake(const MeasureGroup &meas);
   bool inOpticalFlowBorder(const PerCameraData &ctx, const cv::Point2f &pt) const;
   V3D getOpticalFlowBearing(const PerCameraData &ctx, const cv::Point2f &px) const;
   void setOpticalFlowMask(const PerCameraData &ctx, cv::Mat &mask);

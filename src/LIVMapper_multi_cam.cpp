@@ -577,7 +577,7 @@ void LIVMapper::handleVIO()
       vio_manager->processFrameOpticalFlow(LidarMeasures.measures.back().img, LidarMeasures.last_lio_update_time - _first_lidar_time);
       break;
     case 2:
-      vio_manager->processFrameFake(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+      vio_manager->processMultiCameraFrameFake(LidarMeasures.measures.back());
       break;
     case 0:
     default:
