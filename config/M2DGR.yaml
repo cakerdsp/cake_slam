@@ -30,7 +30,7 @@
       exposure_time_init: 0.0
 
     preprocess:
-      hilti_en: false
+      image_downclock_en: false
       point_filter_num: 5
       filter_size_surf: 0.1 # 0.2
       lidar_type: 2 # 2 represents Velodyne in FAST-LIO2/FAST-LIVO

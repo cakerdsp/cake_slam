@@ -25,11 +25,6 @@ def generate_launch_description():
         default_value="True",
         description="Whether to launch Rviz2",
     )
-    num_cameras_arg = DeclareLaunchArgument(
-        "num_cameras",
-        default_value="6",
-        description="Enable the first N M2DGR fisheye cameras (1..7)",
-    )
     mapping_config_arg = DeclareLaunchArgument(
         "m2dgr_params_file",
         default_value=mapping_config,
@@ -41,14 +36,12 @@ def generate_launch_description():
         description="M2DGR fisheye camera-model parameter file",
     )
 
-    num_cameras = LaunchConfiguration("num_cameras")
     mapping_params = LaunchConfiguration("m2dgr_params_file")
     camera_params = LaunchConfiguration("camera_params_file")
 
     return LaunchDescription(
         [
             use_rviz_arg,
-            num_cameras_arg,
             mapping_config_arg,
             camera_config_arg,
             Node(
@@ -58,11 +51,6 @@ def generate_launch_description():
                 parameters=[
                     mapping_params,
                     camera_params,
-                    {
-                        "common.num_cameras": ParameterValue(
-                            num_cameras, value_type=int
-                        )
-                    },
                 ],
                 output="screen",
             ),

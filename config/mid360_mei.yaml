@@ -30,6 +30,8 @@
       exposure_time_init: 0.0
 
     preprocess:
+      image_downclock_en: true
+      image_downclock_factor: 2
       point_filter_num: 1
       filter_size_surf: 0.1
       lidar_type: 1

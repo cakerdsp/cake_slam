@@ -1,19 +1,19 @@
 /**:
   ros__parameters:
-    # camera0:
-    #   model: MEI
-    #   width: 1088
-    #   height: 1280
-    #   scale: 1.0
-    #   fx: 1661.519541
-    #   fy: 1661.186841
-    #   cx: 535.124575
-    #   cy: 646.963644
-    #   xi: 3.177956
-    #   k1: -0.056745
-    #   k2: 0.426441
-    #   p1: -0.000266
-    #   p2: -0.001028
+    camera0:
+      model: MEI
+      width: 1088
+      height: 1280
+      scale: 1.0
+      fx: 1661.519541
+      fy: 1661.186841
+      cx: 535.124575
+      cy: 646.963644
+      xi: 3.177956
+      k1: -0.056745
+      k2: 0.426441
+      p1: -0.000266
+      p2: -0.001028
 
       # Downsampled alternative. Use only if the incoming image topic is resized
       # to 544x640 before fast_livo consumes it.
@@ -25,7 +25,7 @@
       # cx: 535.124575
       # cy: 646.963644
 
-    camera0:
+    camera1:
       model: MEI
       width: 1088
       height: 1280

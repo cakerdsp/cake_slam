@@ -3,7 +3,7 @@
     common:
       # The first N camera entries below are enabled. Valid range: 1..7.
       # camera6 is excluded by default because its official extrinsic is marked "to be changed".
-      num_cameras: 6
+      num_cameras: 2
       require_all_cameras: true
       multi_cam_sync_queue_size: 10
       multi_cam_sync_tolerance_ms: 20.0
@@ -16,7 +16,7 @@
     cameras:
       # camera0: left 8823
       camera0:
-        img_topic: "/camera/left/image_raw/compressed"
+        img_topic: "/camera/left/image_raw"
         camera_ns: "camera0"
         Rcl: [0.0, -1.0,  0.0,
               0.0,  0.0, -1.0,
@@ -25,7 +25,7 @@
 
       # camera1: right 8828
       camera1:
-        img_topic: "/camera/right/image_raw/compressed"
+        img_topic: "/camera/right/image_raw"
         camera_ns: "camera1"
         Rcl: [0.0, -1.0,  0.0,
               0.0,  0.0, -1.0,
@@ -89,7 +89,7 @@
       exposure_time_init: 0.0
 
     preprocess:
-      hilti_en: false
+      image_downclock_en: false
       point_filter_num: 5
       filter_size_surf: 0.1
       lidar_type: 2
