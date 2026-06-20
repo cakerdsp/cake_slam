@@ -1,0 +1,187 @@
+/**:
+  ros__parameters:
+    common:
+      # The first N camera entries below are enabled. Valid range: 1..7.
+      # camera6 is excluded by default because its official extrinsic is marked "to be changed".
+      num_cameras: 6
+      require_all_cameras: true
+      multi_cam_sync_queue_size: 10
+      lid_topic: "/velodyne_points"
+      imu_topic: "/handsfree/imu"
+      img_en: 1
+      lidar_en: 1
+      ros_driver_bug_fix: false
+
+    cameras:
+      # camera0: left 8823
+      camera0:
+        img_topic: "/camera/left/image_raw/compressed"
+        camera_ns: "camera0"
+        Rcl: [0.0, -1.0,  0.0,
+              0.0,  0.0, -1.0,
+              1.0,  0.0,  0.0]
+        Pcl: [0.16123, -0.16711, -0.24221]
+
+      # camera1: right 8828
+      camera1:
+        img_topic: "/camera/right/image_raw/compressed"
+        camera_ns: "camera1"
+        Rcl: [0.0, -1.0,  0.0,
+              0.0,  0.0, -1.0,
+              1.0,  0.0,  0.0]
+        Pcl: [-0.16025, -0.16724, -0.242013]
+
+      # camera2: third / mid-left 8830
+      camera2:
+        img_topic: "/camera/third/image_raw/compressed"
+        camera_ns: "camera2"
+        Rcl: [1.0, 0.0,  0.0,
+              0.0, 0.0, -1.0,
+              0.0, 1.0,  0.0]
+        Pcl: [-0.00109, -0.16718, -0.16004]
+
+      # camera3: fourth / mid-right 8827
+      camera3:
+        img_topic: "/camera/fourth/image_raw/compressed"
+        camera_ns: "camera3"
+        Rcl: [-1.0,  0.0,  0.0,
+               0.0,  0.0, -1.0,
+               0.0, -1.0,  0.0]
+        Pcl: [0.00021, -0.16674, -0.16013]
+
+      # camera4: fifth / back-left 6450
+      camera4:
+        img_topic: "/camera/fifth/image_raw/compressed"
+        camera_ns: "camera4"
+        Rcl: [ 0.0, 1.0,  0.0,
+               0.0, 0.0, -1.0,
+              -1.0, 0.0,  0.0]
+        Pcl: [-0.16031, -0.16715, -0.24175]
+
+      # camera5: sixth / back-right 6548
+      camera5:
+        img_topic: "/camera/sixth/image_raw/compressed"
+        camera_ns: "camera5"
+        Rcl: [ 0.0, 1.0,  0.0,
+               0.0, 0.0, -1.0,
+              -1.0, 0.0,  0.0]
+        Pcl: [0.16037, -0.16689, -0.24313]
+
+      # camera6: sky-pointing head 3199. Verify this official provisional extrinsic before use.
+      camera6:
+        img_topic: "/camera/head/image_raw/compressed"
+        camera_ns: "camera6"
+        Rcl: [ 0.0, -1.0,  0.0,
+              -1.0,  0.0,  0.0,
+               0.0,  0.0, -1.0]
+        Pcl: [0.00127, 0.07410, 0.65608]
+
+    extrin_calib:
+      extrinsic_T: [0.27255, -0.00053, 0.17954]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+
+    time_offset:
+      imu_time_offset: 0.0
+      img_time_offset: 0.0
+      exposure_time_init: 0.0
+
+    preprocess:
+      hilti_en: false
+      point_filter_num: 5
+      filter_size_surf: 0.1
+      lidar_type: 2
+      scan_line: 32
+      scan_rate: 10
+      blind: 0.6
+      feature_extract_enabled: false
+
+    vio:
+      frontend_mode: 0
+      cross_camera_reference_en: false
+      max_iterations: 5
+      outlier_threshold: 1000
+      img_point_cov: 1000
+      grid_size: 5
+      # Suggested grid_n_height: 17/12/10/8/7 for 1/2/3/4/6 cameras.
+      grid_n_height: 7
+      patch_size: 8
+      patch_pyrimid_level: 2
+      virtual_fisheye_patch_en: true
+      virtual_focal_length: 300.0
+      virtual_patch_margin: 8
+      virtual_max_search_level: 1
+      virtual_patch_resampling_mode: "pull_exact"
+      virtual_raw_window_half_size: 96
+      virtual_splat_min_weight: 1.0e-6
+      virtual_splat_require_full_core_coverage: true
+      virtual_splat_debug_compare_pull_exact: false
+      draw_rejected_points_en: false
+      normal_en: true
+      raycast_en: false
+      inverse_composition_en: false
+      exposure_estimate_en: true
+      inv_expo_time_init: 1.0
+      inv_expo_cov: 0.1
+      opticalflow:
+        max_cnt: 250
+        min_dist: 20
+        quality_level: 0.01
+        flow_back: true
+        f_threshold: 0.5
+        min_track_len_for_triangulation: 3
+        track_history_size: 20
+        feature_image_topic: "/fast_livo/feature_image"
+        triangulated_points_topic: "/fast_livo/triangulated_points"
+
+    imu:
+      imu_en: true
+      imu_int_frame: 30
+      acc_cov: 0.5
+      gyr_cov: 0.01
+      gravity_est_en: true
+      ba_bg_est_en: true
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+
+    lio:
+      min_iterations: 5
+      dept_err: 0.02
+      beam_err: 0.05
+      sigma_num: 3.0
+      min_eigen_value: 0.0001
+      voxel_size: 0.4
+      max_layer: 2
+      max_points_num: 100
+      layer_init_num: [5, 5, 5, 5, 5]
+
+    local_map:
+      map_sliding_en: false
+      half_map_size: 100
+      sliding_thresh: 8.0
+
+    uav:
+      imu_rate_odom: false
+      gravity_align_en: false
+
+    publish:
+      dense_map_en: true
+      pub_effect_point_en: false
+      pub_plane_en: false
+      pub_scan_num: 1
+      blind_rgb_points: 0.0
+
+    evo:
+      seq_name: "m2dgr_multi_cam"
+      pose_output_en: true
+
+    pcd_save:
+      pcd_save_en: false
+      colmap_output_en: false
+      filter_size_pcd: 0.15
+      interval: -1
+
+    debug:
+      plot_time: -10.0
+      frame_cnt: 6
