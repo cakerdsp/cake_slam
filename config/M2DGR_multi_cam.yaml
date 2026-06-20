@@ -3,10 +3,10 @@
     common:
       # The first N camera entries below are enabled. Valid range: 1..7.
       # camera6 is excluded by default because its official extrinsic is marked "to be changed".
-      num_cameras: 2
+      num_cameras: 3
       require_all_cameras: true
-      multi_cam_sync_queue_size: 10
-      multi_cam_sync_tolerance_ms: 20.0
+      multi_cam_sync_queue_size: 5
+      multi_cam_sync_tolerance_ms: 40.0
       lid_topic: "/velodyne_points"
       imu_topic: "/handsfree/imu"
       img_en: 1
@@ -23,28 +23,28 @@
               1.0,  0.0,  0.0]
         Pcl: [0.16123, -0.16711, -0.24221]
 
-      # camera1: right 8828
-      camera1:
-        img_topic: "/camera/right/image_raw"
-        camera_ns: "camera1"
-        Rcl: [0.0, -1.0,  0.0,
-              0.0,  0.0, -1.0,
-              1.0,  0.0,  0.0]
-        Pcl: [-0.16025, -0.16724, -0.242013]
+      # # camera1: right 8828
+      # camera1:
+      #   img_topic: "/camera/right/image_raw"
+      #   camera_ns: "camera1"
+      #   Rcl: [0.0, -1.0,  0.0,
+      #         0.0,  0.0, -1.0,
+      #         1.0,  0.0,  0.0]
+      #   Pcl: [-0.16025, -0.16724, -0.242013]
 
       # camera2: third / mid-left 8830
-      camera2:
-        img_topic: "/camera/third/image_raw/compressed"
-        camera_ns: "camera2"
+      camera1:
+        img_topic: "/camera/third/image_raw"
+        camera_ns: "camera1"
         Rcl: [1.0, 0.0,  0.0,
               0.0, 0.0, -1.0,
               0.0, 1.0,  0.0]
         Pcl: [-0.00109, -0.16718, -0.16004]
 
       # camera3: fourth / mid-right 8827
-      camera3:
-        img_topic: "/camera/fourth/image_raw/compressed"
-        camera_ns: "camera3"
+      camera2:
+        img_topic: "/camera/fourth/image_raw"
+        camera_ns: "camera2"
         Rcl: [-1.0,  0.0,  0.0,
                0.0,  0.0, -1.0,
                0.0, -1.0,  0.0]
@@ -106,9 +106,11 @@
       img_point_cov: 1000
       grid_size: 5
       # Suggested grid_n_height: 17/12/10/8/7 for 1/2/3/4/6 cameras.
-      grid_n_height: 7
+      grid_n_height: 10
       patch_size: 8
-      patch_pyrimid_level: 2
+      patch_pyrimid_level: 3
+
+
       virtual_fisheye_patch_en: true
       virtual_focal_length: 300.0
       virtual_patch_margin: 8
