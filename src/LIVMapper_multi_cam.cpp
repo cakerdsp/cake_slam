@@ -198,7 +198,6 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
 
   camera_configs.resize(num_cameras);
   last_timestamp_img_by_camera.assign(num_cameras, -1.0);
-  image_decimation_counters.assign(num_cameras, 0);
   for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
   {
     const std::string camera_cfg_ns = "cameras.camera" + std::to_string(camera_id);
@@ -281,6 +280,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("preprocess.feature_extract_enabled", p_pre->feature_enabled);
   this->node->get_parameter("preprocess.image_downclock_en", image_downclock_en);
   this->node->get_parameter("preprocess.image_downclock_factor", image_downclock_factor);
+  if (image_downclock_factor < 1)
+    throw std::runtime_error("preprocess.image_downclock_factor must be at least 1");
 
   this->node->get_parameter("pcd_save.interval", pcd_save_interval);
   this->node->get_parameter("pcd_save.pcd_save_en", pcd_save_en);
@@ -1124,6 +1125,13 @@ void LIVMapper::flushCompletedImageGroupsLocked()
     auto oldest = pending_images.begin();
     if (oldest->second.isComplete())
     {
+      if (image_downclock_en &&
+          (++multi_cam_downclock_counter % static_cast<uint64_t>(image_downclock_factor) != 0))
+      {
+        pending_images.erase(oldest);
+        continue;
+      }
+
       MultiCameraFrame frame;
       frame.stamp_ns = oldest->second.stamp_ns;
       frame.timestamp = oldest->second.timestamp;
@@ -1153,8 +1161,6 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
 {
   if (!img_en) return;
   if (camera_id < 0 || camera_id >= num_cameras || img_cur.empty()) return;
-  if (image_downclock_en && (++image_decimation_counters[camera_id] % image_downclock_factor != 0)) return;
-
   const uint64_t stamp_ns = static_cast<uint64_t>(stamp.sec) * 1000000000ULL + static_cast<uint64_t>(stamp.nanosec);
   const double image_time = static_cast<double>(stamp_ns) * 1.0e-9 + img_time_offset;
   if (last_timestamp_lidar < 0) return;

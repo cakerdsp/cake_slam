@@ -124,7 +124,7 @@ public:
   double blind_rgb_points = 0.0;
   double last_timestamp_lidar = -1.0, last_timestamp_imu = -1.0;
   std::vector<double> last_timestamp_img_by_camera;
-  std::vector<int> image_decimation_counters;
+  uint64_t multi_cam_downclock_counter = 0;
   double filter_size_surf_min = 0;
   double filter_size_pcd = 0;
   double _first_lidar_time = 0.0;
