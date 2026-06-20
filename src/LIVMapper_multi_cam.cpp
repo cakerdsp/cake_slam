@@ -1634,47 +1634,101 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
     }
     pub_num = 1;
 
+    const int camera_count = vio_manager->numCameras();
+    const long long point_count = static_cast<long long>(pcl_wait_pub->size());
+    const int color_worker_count = std::max(1, std::min(MP_PROC_NUM, omp_get_max_threads()));
+    int active_color_workers = 1;
+
     std::vector<uint8_t> colored(pcl_wait_pub->size(), 0);
     std::vector<PointTypeRGB> rgb_points(pcl_wait_pub->size());
-    std::vector<size_t> projection_rejects(vio_manager->numCameras(), 0);
-    std::vector<size_t> blind_rejects(vio_manager->numCameras(), 0);
-    std::vector<size_t> color_hits(vio_manager->numCameras(), 0);
-    std::vector<double> sampled_r_sum(vio_manager->numCameras(), 0.0);
-    std::vector<double> sampled_g_sum(vio_manager->numCameras(), 0.0);
-    std::vector<double> sampled_b_sum(vio_manager->numCameras(), 0.0);
-    for (int camera_id = 0; camera_id < vio_manager->numCameras(); ++camera_id)
+    std::vector<size_t> projection_rejects(camera_count, 0);
+    std::vector<size_t> blind_rejects(camera_count, 0);
+    std::vector<size_t> color_hits(camera_count, 0);
+    std::vector<double> sampled_r_sum(camera_count, 0.0);
+    std::vector<double> sampled_g_sum(camera_count, 0.0);
+    std::vector<double> sampled_b_sum(camera_count, 0.0);
+
+    std::vector<std::vector<size_t>> thread_projection_rejects(
+        color_worker_count, std::vector<size_t>(camera_count, 0));
+    std::vector<std::vector<size_t>> thread_blind_rejects(
+        color_worker_count, std::vector<size_t>(camera_count, 0));
+    std::vector<std::vector<size_t>> thread_color_hits(
+        color_worker_count, std::vector<size_t>(camera_count, 0));
+    std::vector<std::vector<double>> thread_r_sum(
+        color_worker_count, std::vector<double>(camera_count, 0.0));
+    std::vector<std::vector<double>> thread_g_sum(
+        color_worker_count, std::vector<double>(camera_count, 0.0));
+    std::vector<std::vector<double>> thread_b_sum(
+        color_worker_count, std::vector<double>(camera_count, 0.0));
+
+    // Each point is independent; camera order stays serial per point to preserve first-hit priority.
+    const double color_start = omp_get_wtime();
+#pragma omp parallel num_threads(color_worker_count) if(point_count >= 1024)
     {
-      for (size_t i = 0; i < pcl_wait_pub->size(); ++i)
+#pragma omp single
+      active_color_workers = omp_get_num_threads();
+
+      const int thread_id = omp_get_thread_num();
+      std::vector<size_t> &local_projection_rejects = thread_projection_rejects[thread_id];
+      std::vector<size_t> &local_blind_rejects = thread_blind_rejects[thread_id];
+      std::vector<size_t> &local_color_hits = thread_color_hits[thread_id];
+      std::vector<double> &local_r_sum = thread_r_sum[thread_id];
+      std::vector<double> &local_g_sum = thread_g_sum[thread_id];
+      std::vector<double> &local_b_sum = thread_b_sum[thread_id];
+
+#pragma omp for schedule(static)
+      for (long long point_index = 0; point_index < point_count; ++point_index)
       {
-        if (colored[i]) continue;
+        const size_t i = static_cast<size_t>(point_index);
         const PointType &point = pcl_wait_pub->points[i];
-        V3F bgr;
-        double camera_range = 0.0;
-        if (!vio_manager->getColorFromCamera(camera_id, V3D(point.x, point.y, point.z), bgr, &camera_range))
+
+        for (int camera_id = 0; camera_id < camera_count; ++camera_id)
         {
-          ++projection_rejects[camera_id];
-          continue;
+          V3F bgr;
+          double camera_range = 0.0;
+          if (!vio_manager->getColorFromCamera(
+                  camera_id, V3D(point.x, point.y, point.z), bgr, &camera_range))
+          {
+            ++local_projection_rejects[camera_id];
+            continue;
+          }
+          if (camera_range < blind_rgb_points)
+          {
+            ++local_blind_rejects[camera_id];
+            continue;
+          }
+
+          PointTypeRGB output;
+          output.x = point.x;
+          output.y = point.y;
+          output.z = point.z;
+          output.r = static_cast<uint8_t>(std::clamp(bgr[2], 0.0f, 255.0f));
+          output.g = static_cast<uint8_t>(std::clamp(bgr[1], 0.0f, 255.0f));
+          output.b = static_cast<uint8_t>(std::clamp(bgr[0], 0.0f, 255.0f));
+          rgb_points[i] = output;
+          colored[i] = 1;
+          ++local_color_hits[camera_id];
+          local_r_sum[camera_id] += output.r;
+          local_g_sum[camera_id] += output.g;
+          local_b_sum[camera_id] += output.b;
+          break;
         }
-        if (camera_range < blind_rgb_points)
-        {
-          ++blind_rejects[camera_id];
-          continue;
-        }
-        PointTypeRGB output;
-        output.x = point.x;
-        output.y = point.y;
-        output.z = point.z;
-        output.r = static_cast<uint8_t>(std::clamp(bgr[2], 0.0f, 255.0f));
-        output.g = static_cast<uint8_t>(std::clamp(bgr[1], 0.0f, 255.0f));
-        output.b = static_cast<uint8_t>(std::clamp(bgr[0], 0.0f, 255.0f));
-        rgb_points[i] = output;
-        colored[i] = 1;
-        ++color_hits[camera_id];
-        sampled_r_sum[camera_id] += output.r;
-        sampled_g_sum[camera_id] += output.g;
-        sampled_b_sum[camera_id] += output.b;
       }
     }
+
+    for (int thread_id = 0; thread_id < color_worker_count; ++thread_id)
+    {
+      for (int camera_id = 0; camera_id < camera_count; ++camera_id)
+      {
+        projection_rejects[camera_id] += thread_projection_rejects[thread_id][camera_id];
+        blind_rejects[camera_id] += thread_blind_rejects[thread_id][camera_id];
+        color_hits[camera_id] += thread_color_hits[thread_id][camera_id];
+        sampled_r_sum[camera_id] += thread_r_sum[thread_id][camera_id];
+        sampled_g_sum[camera_id] += thread_g_sum[thread_id][camera_id];
+        sampled_b_sum[camera_id] += thread_b_sum[thread_id][camera_id];
+      }
+    }
+    const double color_elapsed = omp_get_wtime() - color_start;
     laserCloudWorldRGB->reserve(pcl_wait_pub->size());
     for (size_t i = 0; i < rgb_points.size(); ++i)
       if (colored[i]) laserCloudWorldRGB->push_back(rgb_points[i]);
@@ -1684,6 +1738,8 @@ void LIVMapper::publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::Po
            static_cast<size_t>(std::count(colored.begin(), colored.end(), static_cast<uint8_t>(1))),
            has_camera_color ? 0UL : pcl_wait_pub->size(),
            has_camera_color ? "camera_color" : "empty_rgb_retry");
+    printf("[ VIO Color Timing ] elapsed=%.6f s workers=%d points=%lld cameras=%d\n",
+           color_elapsed, active_color_workers, point_count, camera_count);
     for (int camera_id = 0; camera_id < vio_manager->numCameras(); ++camera_id)
     {
       const double hit_count = static_cast<double>(color_hits[camera_id]);
