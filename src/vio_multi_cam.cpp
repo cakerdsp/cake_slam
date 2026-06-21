@@ -406,7 +406,9 @@ bool VIOManager::buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &
   if (!std::isfinite(norm) || norm <= virtual_min_z) return false;
 
   const V3D z_v_in_c = point_in_raw_camera / norm;
-  auto sample_raw_ray = [&ctx](const V2D &px, V3D &ray) {
+  const double min_z = virtual_min_z;
+
+  auto sample_raw_ray = [&ctx, min_z](const V2D &px, V3D &ray) {
     if (!px.array().isFinite().all() || px[0] < 0.0 || px[1] < 0.0 || px[0] >= ctx.width - 1 || px[1] >= ctx.height - 1)
       return false;
 
@@ -426,8 +428,10 @@ bool VIOManager::buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &
           dx * (1.0 - dy) * ctx.raw_pixel_to_unit_ray_lut[indices[1]].cast<double>() +
           (1.0 - dx) * dy * ctx.raw_pixel_to_unit_ray_lut[indices[2]].cast<double>() +
           dx * dy * ctx.raw_pixel_to_unit_ray_lut[indices[3]].cast<double>();
+
     const double ray_norm = ray.norm();
-    if (!ray.array().isFinite().all() || !std::isfinite(ray_norm) || ray_norm <= virtual_min_z) return false;
+    if (!ray.array().isFinite().all() || !std::isfinite(ray_norm) || ray_norm <= min_z) return false;
+
     ray /= ray_norm;
     return true;
   };

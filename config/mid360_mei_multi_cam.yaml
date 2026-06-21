@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     common:
-      num_cameras: 2
+      num_cameras: 1
       require_all_cameras: true
       multi_cam_sync_queue_size: 5
       multi_cam_sync_tolerance_ms: 0.0
@@ -42,7 +42,7 @@
       exposure_time_init: 0.0
 
     preprocess:
-      image_downclock_en: false
+      image_downclock_en: true
       image_downclock_factor: 2
       point_filter_num: 1
       filter_size_surf: 0.1
@@ -154,4 +154,4 @@
       plot_time: -10.0
       frame_cnt: 6
       # Follow up to three camera-0 debug probes; each probe saves at most 12 paired observations.
-      ref_patch_dump_en: false
+      ref_patch_dump_en: true
