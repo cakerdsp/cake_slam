@@ -3,7 +3,7 @@
     common:
       # The first N camera entries below are enabled. Valid range: 1..7.
       # camera6 is excluded by default because its official extrinsic is marked "to be changed".
-      num_cameras: 3
+      num_cameras: 1
       require_all_cameras: true
       multi_cam_sync_queue_size: 5
       multi_cam_sync_tolerance_ms: 40.0
@@ -90,7 +90,7 @@
 
     preprocess:
       image_downclock_en: false
-      point_filter_num: 5
+      point_filter_num: 13
       filter_size_surf: 0.1
       lidar_type: 2
       scan_line: 32
