@@ -22,7 +22,7 @@ using namespace Eigen;
 namespace
 {
 constexpr int kRefPatchDumpCameraId = 0;
-constexpr int kRefPatchDumpMaxPoints = 3;
+constexpr int kRefPatchDumpMaxPoints = 8;
 constexpr int kRefPatchDumpMaxRefsPerPoint = 12;
 constexpr int kRefPatchDumpFrameInterval = 5;
 constexpr int kRefPatchDumpMaxMissedFrames = 20;
@@ -514,6 +514,31 @@ bool VIOManager::projectRawFisheyeIfValid(const PerCameraData &ctx, const V3D &r
       raw_px[1] >= ctx.height - required_border - 1)
     return false;
   return ctx.cam->isInFrame(raw_px.cast<int>(), required_border);
+}
+
+bool VIOManager::hasRangeDiscontinuity(const PerCameraData &ctx, const cv::Mat &range_img,
+                                       const V2D &raw_px, double point_range) const
+{
+  if (range_img.empty() || range_img.type() != CV_32FC1 ||
+      range_img.cols != ctx.width || range_img.rows != ctx.height ||
+      !raw_px.array().isFinite().all() || !std::isfinite(point_range))
+    return false;
+
+  const int center_col = static_cast<int>(raw_px[0]);
+  const int center_row = static_cast<int>(raw_px[1]);
+  for (int dv = -patch_size_half; dv <= patch_size_half; ++dv)
+  {
+    for (int du = -patch_size_half; du <= patch_size_half; ++du)
+    {
+      if (du == 0 && dv == 0) continue;
+      const int col = center_col + du;
+      const int row = center_row + dv;
+      if (col < 0 || col >= ctx.width || row < 0 || row >= ctx.height) continue;
+      const float range = range_img.at<float>(row, col);
+      if (range > 0.0f && std::fabs(point_range - range) > 0.5) return true;
+    }
+  }
+  return false;
 }
 
 bool VIOManager::buildVirtualSupportPatchPullExact(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v,
@@ -1064,6 +1089,20 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
     mark_missed();
     return;
   }
+  if (ctx.current_range_pose_valid)
+  {
+    const V3D range_point_c = ctx.current_range_T_f_w * ref_patch_dump_probe_.point_w;
+    V2D range_raw_px;
+    if (projectRawFisheyeIfValid(ctx, range_point_c, 1, range_raw_px) &&
+        hasRangeDiscontinuity(ctx, ctx.current_range_img, range_raw_px, range_point_c.norm()))
+    {
+      printf("[ VIO Ref Patch Dump ] Probe=%03d stopped at frame=%d after range discontinuity, with %d saved refs.\n",
+             ref_patch_dump_probe_.point_id, ctx.new_frame->id_, ref_patch_dump_probe_.saved_refs);
+      ref_patch_dump_probe_.active = false;
+      return;
+    }
+  }
+
   const double incidence_deg =
       std::acos(std::clamp(point_c[2] / point_norm, -1.0, 1.0)) * kRadiansToDegrees;
   const int frame_id = ctx.new_frame->id_;
@@ -1503,6 +1542,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
 {
   ctx.visual_submap->reset();
   ctx.total_points = 0;
+  ctx.current_range_img.release();
+  ctx.current_range_pose_valid = false;
   rejected_virtual_support_oob_ = 0;
   rejected_virtual_projection_invalid_ = 0;
   rejected_virtual_z_ = 0;
@@ -1560,6 +1601,13 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     float &stored_range = range_img.at<float>(row, col);
     const float range = static_cast<float>(pt_c.norm());
     if (stored_range == 0.0f || range < stored_range) stored_range = range;
+  }
+
+  if (ref_patch_dump_en && ctx.camera_id == kRefPatchDumpCameraId)
+  {
+    ctx.current_range_img = range_img;
+    ctx.current_range_T_f_w = ctx.new_frame->T_f_w_;
+    ctx.current_range_pose_valid = true;
   }
 
   vector<VOXEL_LOCATION> delete_keys;
@@ -1745,27 +1793,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       continue;
     }
 
-    bool range_discontinuous = false;
     const double point_range = pt_c_seed.norm();
-    const int center_col = static_cast<int>(raw_px[0]);
-    const int center_row = static_cast<int>(raw_px[1]);
-    for (int dv = -patch_size_half; dv <= patch_size_half && !range_discontinuous; ++dv)
-    {
-      for (int du = -patch_size_half; du <= patch_size_half; ++du)
-      {
-        if (du == 0 && dv == 0) continue;
-        const int col = center_col + du;
-        const int row = center_row + dv;
-        if (col < 0 || col >= ctx.width || row < 0 || row >= ctx.height) continue;
-        const float range = range_img.at<float>(row, col);
-        if (range > 0.0f && std::fabs(point_range - range) > 0.5)
-        {
-          range_discontinuous = true;
-          break;
-        }
-      }
-    }
-    if (range_discontinuous)
+    if (hasRangeDiscontinuity(ctx, range_img, raw_px, point_range))
     {
       ++virtual_candidate_range_reject_count_;
       recordRejectedPoint(raw_px, REJECT_DRAW_RANGE);

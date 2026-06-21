@@ -235,6 +235,9 @@ struct PerCameraData
   cv::Mat img_cp;
   cv::Mat img_rgb;
   cv::Mat img_test;
+  cv::Mat current_range_img;
+  SE3<double> current_range_T_f_w;
+  bool current_range_pose_valid = false;
   std::vector<std::pair<cv::Point2f, int>> rejected_visual_points_for_draw;
 };
 
@@ -432,6 +435,8 @@ public:
   bool buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &point_in_raw_camera, const V2D &raw_center_px,
                                  M3D &R_v_from_c, M3D &R_c_from_v) const;
   bool projectRawFisheyeIfValid(const PerCameraData &ctx, const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const;
+  bool hasRangeDiscontinuity(const PerCameraData &ctx, const cv::Mat &range_img,
+                             const V2D &raw_px, double point_range) const;
   bool buildVirtualSupportPatchPullExact(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v, VirtualPatchImage &output) const;
   void splatRawPixelToVirtualPatch(const PerCameraData &ctx, const cv::Mat &raw_img, int raw_x, int raw_y, const M3D &R_v_from_c, cv::Mat &value_sum,
                                    cv::Mat &weight_sum) const;
