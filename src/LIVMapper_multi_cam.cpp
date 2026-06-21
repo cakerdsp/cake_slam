@@ -174,6 +174,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<vector<double>>("extrin_calib.extrinsic_R", vector<double>{});
   try_declare.template operator()<double>("debug.plot_time", -10);
   try_declare.template operator()<int>("debug.frame_cnt", 6);
+  try_declare.template operator()<bool>("debug.ref_patch_dump_en", false);
 
   try_declare.template operator()<double>("publish.blind_rgb_points", 0.01);
   try_declare.template operator()<int>("publish.pub_scan_num", 1);
@@ -291,6 +292,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("extrin_calib.extrinsic_R", extrinR);
   this->node->get_parameter("debug.plot_time", plot_time);
   this->node->get_parameter("debug.frame_cnt", frame_cnt);
+  this->node->get_parameter("debug.ref_patch_dump_en", ref_patch_dump_en);
 
   this->node->get_parameter("publish.blind_rgb_points", blind_rgb_points);
   this->node->get_parameter("publish.pub_scan_num", pub_scan_num);
@@ -359,6 +361,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->virtual_splat_require_full_core_coverage = virtual_splat_require_full_core_coverage;
   vio_manager->virtual_splat_debug_compare_pull_exact = virtual_splat_debug_compare_pull_exact;
   vio_manager->draw_rejected_points_en = draw_rejected_points_en;
+  vio_manager->ref_patch_dump_en = ref_patch_dump_en;
   vio_manager->exposure_estimate_en = exposure_estimate_en;
   vio_manager->colmap_output_en = colmap_output_en;
   vio_manager->frontend_mode = frontend_mode;

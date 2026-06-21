@@ -171,6 +171,7 @@ public:
   bool virtual_splat_require_full_core_coverage = true;
   bool virtual_splat_debug_compare_pull_exact = false;
   bool draw_rejected_points_en = false;
+  bool ref_patch_dump_en = false;
   int frontend_mode = 0;
   int optical_flow_max_cnt = 250;
   int optical_flow_min_dist = 20;
