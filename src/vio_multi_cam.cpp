@@ -881,7 +881,8 @@ bool VIOManager::extractRefPatchDumpRawRoi(const PerCameraData &ctx, const cv::M
   int valid_boundary_points = 0;
   auto include_virtual_boundary = [&](int x, int y) {
     const V3D ray_v = virtual_support_ray_lut_[y * virtual_support_size + x].cast<double>();
-    const V2D boundary_px = ctx.cam->world2cam(R_c_from_v * ray_v);
+    const V3D ray_c = R_c_from_v * ray_v;
+    const V2D boundary_px = ctx.cam->world2cam(ray_c);
     if (!boundary_px.array().isFinite().all() || boundary_px[0] < -raw_img.cols || boundary_px[0] > 2 * raw_img.cols ||
         boundary_px[1] < -raw_img.rows || boundary_px[1] > 2 * raw_img.rows)
       return;
