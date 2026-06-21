@@ -436,7 +436,8 @@ public:
   V3D virtualCam2World(const V2D &px_v) const;
   bool createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img, const SE3<double> &T_c_w, const V3D &point_w, float *core_patch,
                                  cv::Mat &virtual_support_img, SE3<double> &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const;
-  bool extractRefPatchDumpRawRoi(const cv::Mat &raw_img, const V2D &raw_px, cv::Mat &raw_roi) const;
+  bool extractRefPatchDumpRawRoi(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px,
+                                 const M3D &R_c_from_v, cv::Mat &raw_roi) const;
   void maybeInitializeRefPatchDumpProbe(const PerCameraData &ctx, const V3D &point_w, const V2D &raw_px,
                                         const V3D &bearing, const float *core_patch);
   void initializeRefPatchDump();

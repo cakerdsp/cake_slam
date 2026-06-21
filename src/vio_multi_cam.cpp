@@ -866,29 +866,78 @@ bool VIOManager::createVirtualFeaturePatch(const PerCameraData &ctx, const cv::M
   return true;
 }
 
-bool VIOManager::extractRefPatchDumpRawRoi(const cv::Mat &raw_img, const V2D &raw_px, cv::Mat &raw_roi) const
+bool VIOManager::extractRefPatchDumpRawRoi(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px,
+                                           const M3D &R_c_from_v, cv::Mat &raw_roi) const
 {
-  if (raw_img.empty() || raw_img.type() != CV_8UC1 || virtual_support_size <= 0 || !raw_px.array().isFinite().all())
+  if (ctx.cam == nullptr || raw_img.empty() || raw_img.type() != CV_8UC1 || virtual_support_size <= 0 ||
+      virtual_support_ray_lut_.size() != static_cast<size_t>(virtual_support_size * virtual_support_size) ||
+      !raw_px.array().isFinite().all() || !R_c_from_v.array().isFinite().all())
     return false;
 
-  const int center_x = static_cast<int>(std::lround(raw_px[0]));
-  const int center_y = static_cast<int>(std::lround(raw_px[1]));
-  if (center_x < 0 || center_y < 0 || center_x >= raw_img.cols || center_y >= raw_img.rows) return false;
+  double min_u = raw_px[0];
+  double max_u = raw_px[0];
+  double min_v = raw_px[1];
+  double max_v = raw_px[1];
+  int valid_boundary_points = 0;
+  auto include_virtual_boundary = [&](int x, int y) {
+    const V3D ray_v = virtual_support_ray_lut_[y * virtual_support_size + x].cast<double>();
+    const V2D boundary_px = ctx.cam->world2cam(R_c_from_v * ray_v);
+    if (!boundary_px.array().isFinite().all() || boundary_px[0] < -raw_img.cols || boundary_px[0] > 2 * raw_img.cols ||
+        boundary_px[1] < -raw_img.rows || boundary_px[1] > 2 * raw_img.rows)
+      return;
+    min_u = std::min(min_u, boundary_px[0]);
+    max_u = std::max(max_u, boundary_px[0]);
+    min_v = std::min(min_v, boundary_px[1]);
+    max_v = std::max(max_v, boundary_px[1]);
+    ++valid_boundary_points;
+  };
 
-  const int half_size = virtual_support_size / 2;
-  const int requested_x0 = center_x - half_size;
-  const int requested_y0 = center_y - half_size;
+  for (int coordinate = 0; coordinate < virtual_support_size; ++coordinate)
+  {
+    include_virtual_boundary(coordinate, 0);
+    include_virtual_boundary(coordinate, virtual_support_size - 1);
+    include_virtual_boundary(0, coordinate);
+    include_virtual_boundary(virtual_support_size - 1, coordinate);
+  }
+  if (valid_boundary_points < 4) return false;
+
+  const int requested_x0 = static_cast<int>(std::floor(min_u));
+  const int requested_y0 = static_cast<int>(std::floor(min_v));
+  const int requested_x1 = static_cast<int>(std::ceil(max_u)) + 1;
+  const int requested_y1 = static_cast<int>(std::ceil(max_v)) + 1;
+  const int native_width = requested_x1 - requested_x0;
+  const int native_height = requested_y1 - requested_y0;
+  if (native_width <= 0 || native_height <= 0) return false;
+
   const int source_x0 = std::max(0, requested_x0);
   const int source_y0 = std::max(0, requested_y0);
-  const int source_x1 = std::min(raw_img.cols, requested_x0 + virtual_support_size);
-  const int source_y1 = std::min(raw_img.rows, requested_y0 + virtual_support_size);
+  const int source_x1 = std::min(raw_img.cols, requested_x1);
+  const int source_y1 = std::min(raw_img.rows, requested_y1);
   if (source_x0 >= source_x1 || source_y0 >= source_y1) return false;
 
-  raw_roi = cv::Mat::zeros(virtual_support_size, virtual_support_size, CV_8UC1);
   const cv::Rect source_rect(source_x0, source_y0, source_x1 - source_x0, source_y1 - source_y0);
-  const cv::Rect destination_rect(source_x0 - requested_x0, source_y0 - requested_y0,
-                                  source_rect.width, source_rect.height);
-  raw_img(source_rect).copyTo(raw_roi(destination_rect));
+  // Preserve the raw image geometry while matching the virtual output dimensions.
+  const double display_scale = std::min(static_cast<double>(virtual_support_size) / native_width,
+                                        static_cast<double>(virtual_support_size) / native_height);
+  const int display_width = std::max(1, static_cast<int>(std::lround(native_width * display_scale)));
+  const int display_height = std::max(1, static_cast<int>(std::lround(native_height * display_scale)));
+  raw_roi = cv::Mat::zeros(virtual_support_size, virtual_support_size, CV_8UC1);
+  const int display_x0 = (virtual_support_size - display_width) / 2;
+  const int display_y0 = (virtual_support_size - display_height) / 2;
+  const int destination_x0 = std::clamp(display_x0 + static_cast<int>(std::lround((source_x0 - requested_x0) * display_scale)),
+                                        0, virtual_support_size);
+  const int destination_y0 = std::clamp(display_y0 + static_cast<int>(std::lround((source_y0 - requested_y0) * display_scale)),
+                                        0, virtual_support_size);
+  const int destination_x1 = std::clamp(display_x0 + static_cast<int>(std::lround((source_x1 - requested_x0) * display_scale)),
+                                        0, virtual_support_size);
+  const int destination_y1 = std::clamp(display_y0 + static_cast<int>(std::lround((source_y1 - requested_y0) * display_scale)),
+                                        0, virtual_support_size);
+  if (destination_x0 >= destination_x1 || destination_y0 >= destination_y1) return false;
+  cv::Mat resized_source;
+  cv::resize(raw_img(source_rect), resized_source,
+             cv::Size(destination_x1 - destination_x0, destination_y1 - destination_y0), 0.0, 0.0, cv::INTER_LINEAR);
+  resized_source.copyTo(raw_roi(cv::Rect(destination_x0, destination_y0,
+                                         destination_x1 - destination_x0, destination_y1 - destination_y0)));
   return true;
 }
 
@@ -990,13 +1039,6 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
     return;
   }
 
-  cv::Mat raw_roi;
-  if (!extractRefPatchDumpRawRoi(raw_img, raw_px, raw_roi))
-  {
-    mark_missed();
-    return;
-  }
-
   M3D R_v_from_c, R_c_from_v;
   if (!buildVirtualFrameRotation(ctx, point_c, raw_px, R_v_from_c, R_c_from_v))
   {
@@ -1005,6 +1047,13 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
   }
   VirtualPatchImage support;
   if (!buildVirtualSupportPatch(ctx, raw_img, raw_px, R_v_from_c, R_c_from_v, support))
+  {
+    mark_missed();
+    return;
+  }
+
+  cv::Mat raw_roi;
+  if (!extractRefPatchDumpRawRoi(ctx, raw_img, raw_px, R_c_from_v, raw_roi))
   {
     mark_missed();
     return;
