@@ -419,7 +419,8 @@ public:
                                      const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
   void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
-  bool buildVirtualFrameRotation(const V3D &point_in_raw_camera, M3D &R_v_from_c, M3D &R_c_from_v) const;
+  bool buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &point_in_raw_camera, const V2D &raw_center_px,
+                                 M3D &R_v_from_c, M3D &R_c_from_v) const;
   bool projectRawFisheyeIfValid(const PerCameraData &ctx, const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const;
   bool buildVirtualSupportPatchPullExact(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v, VirtualPatchImage &output) const;
   void splatRawPixelToVirtualPatch(const PerCameraData &ctx, const cv::Mat &raw_img, int raw_x, int raw_y, const M3D &R_v_from_c, cv::Mat &value_sum,

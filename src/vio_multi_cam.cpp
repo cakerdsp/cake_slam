@@ -399,16 +399,79 @@ SE3<double> VIOManager::composeVirtualPose(const M3D &R_v_from_c, const SE3<doub
   return SE3<double>(R_v_from_c * T_c_w.rotationMatrix(), R_v_from_c * T_c_w.translation());
 }
 
-bool VIOManager::buildVirtualFrameRotation(const V3D &point_in_raw_camera, M3D &R_v_from_c, M3D &R_c_from_v) const
+bool VIOManager::buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &point_in_raw_camera,
+                                           const V2D &raw_center_px, M3D &R_v_from_c, M3D &R_c_from_v) const
 {
   const double norm = point_in_raw_camera.norm();
   if (!std::isfinite(norm) || norm <= virtual_min_z) return false;
 
   const V3D z_v_in_c = point_in_raw_camera / norm;
-  V3D reference_axis = V3D::UnitX();
-  if (std::fabs(reference_axis.dot(z_v_in_c)) > 0.95) reference_axis = V3D::UnitY();
+  auto sample_raw_ray = [&ctx](const V2D &px, V3D &ray) {
+    if (!px.array().isFinite().all() || px[0] < 0.0 || px[1] < 0.0 || px[0] >= ctx.width - 1 || px[1] >= ctx.height - 1)
+      return false;
 
-  V3D x_v_in_c = reference_axis - reference_axis.dot(z_v_in_c) * z_v_in_c;
+    const int x0 = static_cast<int>(std::floor(px[0]));
+    const int y0 = static_cast<int>(std::floor(px[1]));
+    const int indices[4] = {y0 * ctx.width + x0, y0 * ctx.width + x0 + 1,
+                            (y0 + 1) * ctx.width + x0, (y0 + 1) * ctx.width + x0 + 1};
+    if (ctx.raw_pixel_to_unit_ray_lut.size() != static_cast<size_t>(ctx.width * ctx.height) ||
+        ctx.raw_pixel_unit_ray_valid_mask.size() != static_cast<size_t>(ctx.width * ctx.height))
+      return false;
+    for (const int index : indices)
+      if (!ctx.raw_pixel_unit_ray_valid_mask[index]) return false;
+
+    const double dx = px[0] - x0;
+    const double dy = px[1] - y0;
+    ray = (1.0 - dx) * (1.0 - dy) * ctx.raw_pixel_to_unit_ray_lut[indices[0]].cast<double>() +
+          dx * (1.0 - dy) * ctx.raw_pixel_to_unit_ray_lut[indices[1]].cast<double>() +
+          (1.0 - dx) * dy * ctx.raw_pixel_to_unit_ray_lut[indices[2]].cast<double>() +
+          dx * dy * ctx.raw_pixel_to_unit_ray_lut[indices[3]].cast<double>();
+    const double ray_norm = ray.norm();
+    if (!ray.array().isFinite().all() || !std::isfinite(ray_norm) || ray_norm <= virtual_min_z) return false;
+    ray /= ray_norm;
+    return true;
+  };
+
+  auto tangent_difference = [&](const V2D &offset, V3D &tangent) {
+    V3D ray_plus, ray_minus;
+    const bool plus_valid = sample_raw_ray(raw_center_px + offset, ray_plus);
+    const bool minus_valid = sample_raw_ray(raw_center_px - offset, ray_minus);
+    if (plus_valid && minus_valid) tangent = ray_plus - ray_minus;
+    else if (plus_valid) tangent = ray_plus - z_v_in_c;
+    else if (minus_valid) tangent = z_v_in_c - ray_minus;
+    else return false;
+
+    tangent -= tangent.dot(z_v_in_c) * z_v_in_c;
+    const double tangent_norm = tangent.norm();
+    if (!tangent.array().isFinite().all() || !std::isfinite(tangent_norm) || tangent_norm <= virtual_min_z) return false;
+    tangent /= tangent_norm;
+    return true;
+  };
+
+  V3D tangent_u, tangent_v;
+  const bool tangent_u_valid = tangent_difference(V2D(1.0, 0.0), tangent_u);
+  const bool tangent_v_valid = tangent_difference(V2D(0.0, 1.0), tangent_v);
+
+  V3D x_v_in_c = V3D::Zero();
+  if (tangent_u_valid) x_v_in_c = tangent_u;
+  if (tangent_v_valid)
+  {
+    V3D x_from_v = tangent_v.cross(z_v_in_c);
+    const double x_from_v_norm = x_from_v.norm();
+    if (std::isfinite(x_from_v_norm) && x_from_v_norm > virtual_min_z)
+    {
+      x_from_v /= x_from_v_norm;
+      if (!tangent_u_valid || x_v_in_c.dot(x_from_v) > 0.0) x_v_in_c += x_from_v;
+    }
+  }
+
+  // The fixed-axis fallback is only used at invalid image-chart derivatives.
+  if (x_v_in_c.norm() <= virtual_min_z)
+  {
+    V3D reference_axis = V3D::UnitX();
+    if (std::fabs(reference_axis.dot(z_v_in_c)) > 0.95) reference_axis = V3D::UnitY();
+    x_v_in_c = reference_axis - reference_axis.dot(z_v_in_c) * z_v_in_c;
+  }
   const double x_norm = x_v_in_c.norm();
   if (!std::isfinite(x_norm) || x_norm <= virtual_min_z) return false;
   x_v_in_c /= x_norm;
@@ -785,7 +848,7 @@ bool VIOManager::createVirtualFeaturePatch(const PerCameraData &ctx, const cv::M
   const V3D point_c = T_c_w * point_w;
   V2D raw_center_px;
   if (!projectRawFisheyeIfValid(ctx, point_c, 1, raw_center_px)) return false;
-  if (!buildVirtualFrameRotation(point_c, R_v_from_c, R_c_from_v)) return false;
+  if (!buildVirtualFrameRotation(ctx, point_c, raw_center_px, R_v_from_c, R_c_from_v)) return false;
   T_v_w = composeVirtualPose(R_v_from_c, T_c_w);
   VirtualPatchImage support;
   support.T_v_w_seed = T_v_w;
@@ -931,7 +994,7 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
   }
 
   M3D R_v_from_c, R_c_from_v;
-  if (!buildVirtualFrameRotation(point_c, R_v_from_c, R_c_from_v))
+  if (!buildVirtualFrameRotation(ctx, point_c, raw_px, R_v_from_c, R_c_from_v))
   {
     mark_missed();
     return;
@@ -1579,7 +1642,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     VisualPoint *pt = candidate.point;
     Feature *ref_ftr = candidate.reference;
 
-    if (!buildVirtualFrameRotation(candidate.point_c_seed, result.track.R_vcur_from_ccur_seed, result.track.R_ccur_from_vcur_seed))
+    if (!buildVirtualFrameRotation(ctx, candidate.point_c_seed, candidate.current_raw_center_px,
+                                   result.track.R_vcur_from_ccur_seed, result.track.R_ccur_from_vcur_seed))
     {
       result.rejection = VIRTUAL_REJECT_ROTATION;
       continue;
