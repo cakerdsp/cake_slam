@@ -30,6 +30,7 @@ constexpr double kRefPatchDumpMaxInitialIncidenceDeg = 20.0;
 constexpr double kRefPatchDumpMinAngleChangeDeg = 8.0;
 constexpr double kRefPatchDumpMinStdDev = 12.0;
 constexpr double kRadiansToDegrees = 57.29577951308232;
+constexpr int kRefPatchDumpWarpDisplaySize = 128;
 
 struct VirtualPatchWorkspace
 {
@@ -191,6 +192,18 @@ void VIOManager::initializeVIO()
   {
     printf("[ VIO Ref Patch Dump ] Disabled because virtual_fisheye_patch_en is false.\n");
     ref_patch_dump_en = false;
+  }
+
+  if (ref_patch_dump_en)
+  {
+    if (ref_patch_dump_max_candidate_skip < 0)
+      throw std::runtime_error("ref_patch_dump_max_candidate_skip must be non-negative");
+    ref_patch_dump_effective_seed_ =
+        ref_patch_dump_random_seed >= 0 ? static_cast<unsigned int>(ref_patch_dump_random_seed) : std::random_device{}();
+    ref_patch_dump_rng_.seed(ref_patch_dump_effective_seed_);
+    ref_patch_dump_candidates_to_skip_ = -1;
+    printf("[ VIO Ref Patch Dump ] Selection seed=%u max_candidate_skip=%d\n",
+           ref_patch_dump_effective_seed_, ref_patch_dump_max_candidate_skip);
   }
 
   if (colmap_output_en && numCameras() > 1)
@@ -942,8 +955,8 @@ bool VIOManager::extractRefPatchDumpRawRoi(const PerCameraData &ctx, const cv::M
   return true;
 }
 
-void VIOManager::maybeInitializeRefPatchDumpProbe(const PerCameraData &ctx, const V3D &point_w, const V2D &raw_px,
-                                                   const V3D &bearing, const float *core_patch)
+void VIOManager::maybeInitializeRefPatchDumpProbe(const PerCameraData &ctx, const V3D &point_w, const V3D &normal_w,
+                                                   const V2D &raw_px, const V3D &bearing, const float *core_patch)
 {
   if (!ref_patch_dump_en || !virtual_fisheye_patch_en || ctx.camera_id != kRefPatchDumpCameraId ||
       ref_patch_dump_probe_.active || ref_patch_dump_next_point_id_ >= kRefPatchDumpMaxPoints ||
@@ -951,7 +964,10 @@ void VIOManager::maybeInitializeRefPatchDumpProbe(const PerCameraData &ctx, cons
     return;
 
   const double bearing_norm = bearing.norm();
-  if (!point_w.array().isFinite().all() || !std::isfinite(bearing_norm) || bearing_norm <= 1.0e-9) return;
+  const double normal_norm = normal_w.norm();
+  if (!point_w.array().isFinite().all() || !normal_w.array().isFinite().all() ||
+      !std::isfinite(bearing_norm) || bearing_norm <= 1.0e-9 || !std::isfinite(normal_norm) || normal_norm <= 1.0e-9)
+    return;
   const double incidence_deg =
       std::acos(std::clamp(bearing[2] / bearing_norm, -1.0, 1.0)) * kRadiansToDegrees;
   if (incidence_deg > kRefPatchDumpMaxInitialIncidenceDeg) return;
@@ -967,10 +983,27 @@ void VIOManager::maybeInitializeRefPatchDumpProbe(const PerCameraData &ctx, cons
   const double variance = std::max(0.0, squared_sum / patch_size_total - mean * mean);
   if (std::sqrt(variance) < kRefPatchDumpMinStdDev) return;
 
+  if (ref_patch_dump_candidates_to_skip_ < 0)
+  {
+    std::uniform_int_distribution<int> skip_distribution(0, ref_patch_dump_max_candidate_skip);
+    ref_patch_dump_candidates_to_skip_ = skip_distribution(ref_patch_dump_rng_);
+  }
+  if (ref_patch_dump_candidates_to_skip_ > 0)
+  {
+    --ref_patch_dump_candidates_to_skip_;
+    return;
+  }
+  ref_patch_dump_candidates_to_skip_ = -1;
+
   ref_patch_dump_probe_ = RefPatchDumpProbeState();
   ref_patch_dump_probe_.active = true;
   ref_patch_dump_probe_.point_id = ref_patch_dump_next_point_id_++;
   ref_patch_dump_probe_.selected_frame_id = ctx.new_frame->id_;
+  ref_patch_dump_probe_.normal_w = normal_w / normal_norm;
+  const V3D point_c = ctx.new_frame->T_f_w_ * point_w;
+  const V3D normal_c = ctx.new_frame->T_f_w_.rotationMatrix() * ref_patch_dump_probe_.normal_w;
+  if (point_c.normalized().dot(normal_c) < 0.0)
+    ref_patch_dump_probe_.normal_w = -ref_patch_dump_probe_.normal_w;
   ref_patch_dump_probe_.point_w = point_w;
   printf("[ VIO Ref Patch Dump ] Selected probe=%03d camera=0 frame=%d incidence=%.2f deg pixel=(%.1f, %.1f)\n",
          ref_patch_dump_probe_.point_id, ctx.new_frame->id_, incidence_deg, raw_px[0], raw_px[1]);
@@ -983,7 +1016,11 @@ void VIOManager::initializeRefPatchDump()
   const std::filesystem::path root = std::filesystem::path(ROOT_DIR) / "Log" / "ref_patch_probe";
   std::filesystem::create_directories(root / "raw");
   std::filesystem::create_directories(root / "virtual");
-
+  std::filesystem::create_directories(root / "raw_patch");
+  std::filesystem::create_directories(root / "virtual_patch");
+  std::ofstream selection(root / "selection.txt");
+  selection << "random_seed=" << ref_patch_dump_effective_seed_ << "\n"
+            << "max_candidate_skip=" << ref_patch_dump_max_candidate_skip << "\n";
   const std::filesystem::path index_path = root / "index.csv";
   if (!std::filesystem::exists(index_path) || std::filesystem::file_size(index_path) == 0)
   {
@@ -1061,7 +1098,13 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
   }
 
   ref_patch_dump_probe_.missed_frames = 0;
-  dumpRefPatchProbeObservation(ctx, raw_px, incidence_deg, raw_roi, support.values);
+  const SE3<double> T_v_w = composeVirtualPose(R_v_from_c, ctx.new_frame->T_f_w_);
+  cv::Mat raw_patch_display;
+  cv::Mat virtual_patch_display;
+  buildRefPatchDumpWarpPatches(ctx, raw_img, raw_px, point_c, T_v_w, support.values,
+                               raw_patch_display, virtual_patch_display);
+  dumpRefPatchProbeObservation(ctx, raw_px, incidence_deg, raw_roi, support.values,
+                               raw_patch_display, virtual_patch_display);
   if (ref_patch_dump_probe_.saved_refs >= kRefPatchDumpMaxRefsPerPoint)
   {
     printf("[ VIO Ref Patch Dump ] Probe=%03d completed with %d saved refs.\n",
@@ -1070,8 +1113,120 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
   }
 }
 
+bool VIOManager::buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px,
+                                               const V3D &point_c, const SE3<double> &T_v_w,
+                                               const cv::Mat &virtual_support_img, cv::Mat &raw_patch_display,
+                                               cv::Mat &virtual_patch_display)
+{
+  raw_patch_display.release();
+  virtual_patch_display.release();
+  if (!ref_patch_dump_probe_.active || ctx.new_frame == nullptr || ctx.cam == nullptr ||
+      raw_img.empty() || raw_img.type() != CV_8UC1 || virtual_support_img.empty() ||
+      virtual_support_img.type() != CV_32FC1 || !raw_px.array().isFinite().all() ||
+      !point_c.array().isFinite().all() || point_c.norm() <= virtual_min_z ||
+      patch_size_half <= 0 || patch_size_half * 2 != patch_size)
+    return false;
+
+  if (!ref_patch_dump_probe_.anchor_valid)
+  {
+    ref_patch_dump_probe_.anchor_T_c_w = ctx.new_frame->T_f_w_;
+    ref_patch_dump_probe_.anchor_T_v_w = T_v_w;
+    ref_patch_dump_probe_.anchor_valid = true;
+  }
+
+  auto make_display = [&](const std::vector<float> &values, cv::Mat &display) {
+    if (values.size() != static_cast<size_t>(patch_size_total)) return false;
+    cv::Mat patch_image(patch_size, patch_size, CV_8UC1);
+    for (int y = 0; y < patch_size; ++y)
+    {
+      uint8_t *destination = patch_image.ptr<uint8_t>(y);
+      for (int x = 0; x < patch_size; ++x)
+      {
+        const float value = values[y * patch_size + x];
+        destination[x] = std::isfinite(value)
+                             ? static_cast<uint8_t>(std::lround(std::clamp(value, 0.0f, 255.0f)))
+                             : 0;
+      }
+    }
+    cv::resize(patch_image, display, cv::Size(kRefPatchDumpWarpDisplaySize, kRefPatchDumpWarpDisplaySize),
+               0.0, 0.0, cv::INTER_NEAREST);
+    return true;
+  };
+
+  bool raw_valid = false;
+  V3D source_bearing = ctx.cam->cam2world(raw_px);
+  const double bearing_norm = source_bearing.norm();
+  if (source_bearing.array().isFinite().all() && std::isfinite(bearing_norm) && bearing_norm > virtual_min_z)
+  {
+    source_bearing /= bearing_norm;
+    // Current observation is the source; the first saved observation is the fixed target.
+    const SE3<double> T_canchor_csource =
+        ref_patch_dump_probe_.anchor_T_c_w * ctx.new_frame->T_f_w_.inverse();
+    Matrix2d A_anchor_source = Matrix2d::Zero();
+    bool raw_affine_valid = false;
+    if (normal_en)
+    {
+      V3D normal_c = ctx.new_frame->T_f_w_.rotationMatrix() * ref_patch_dump_probe_.normal_w;
+      const double normal_norm = normal_c.norm();
+      if (normal_c.array().isFinite().all() && std::isfinite(normal_norm) && normal_norm > virtual_min_z)
+      {
+        normal_c /= normal_norm;
+        getWarpMatrixAffineHomography(ctx, ctx, raw_px, point_c, normal_c, T_canchor_csource, 0, A_anchor_source);
+        raw_affine_valid = true;
+      }
+    }
+    else
+    {
+      getWarpMatrixAffine(ctx, ctx, raw_px, source_bearing, point_c.norm(), T_canchor_csource,
+                          0, 0, patch_size_half, A_anchor_source);
+      raw_affine_valid = true;
+    }
+
+    if (raw_affine_valid && A_anchor_source.array().isFinite().all() && std::fabs(A_anchor_source.determinant()) > 1.0e-9)
+    {
+      std::vector<float> raw_patch(patch_size_total, 0.0f);
+      warpAffine(A_anchor_source, raw_img, raw_px, 0, 0, 0, patch_size_half, raw_patch.data());
+      raw_valid = make_display(raw_patch, raw_patch_display);
+    }
+  }
+
+  bool virtual_valid = false;
+  const V3D point_vsource = T_v_w * ref_patch_dump_probe_.point_w;
+  const SE3<double> T_vanchor_vsource = ref_patch_dump_probe_.anchor_T_v_w * T_v_w.inverse();
+  Matrix2d A_virtual_anchor_source = Matrix2d::Zero();
+  bool virtual_affine_valid = false;
+  if (normal_en)
+  {
+    V3D normal_vsource = T_v_w.rotationMatrix() * ref_patch_dump_probe_.normal_w;
+    const double normal_norm = normal_vsource.norm();
+    if (normal_vsource.array().isFinite().all() && std::isfinite(normal_norm) && normal_norm > virtual_min_z)
+    {
+      normal_vsource /= normal_norm;
+      virtual_affine_valid = getWarpMatrixAffineHomographyVirtual(
+          point_vsource, normal_vsource, T_vanchor_vsource, 0, A_virtual_anchor_source);
+    }
+  }
+  else
+  {
+    virtual_affine_valid = getWarpMatrixAffineVirtual(
+        point_vsource, T_vanchor_vsource, 0, 0, patch_size_half, A_virtual_anchor_source);
+  }
+
+  if (virtual_affine_valid && A_virtual_anchor_source.array().isFinite().all() &&
+      std::fabs(A_virtual_anchor_source.determinant()) > 1.0e-9)
+  {
+    std::vector<float> virtual_patch(patch_size_total, 0.0f);
+    if (warpAffineVirtual(A_virtual_anchor_source, virtual_support_img, 0, 0, 0,
+                          patch_size_half, virtual_patch.data()))
+      virtual_valid = make_display(virtual_patch, virtual_patch_display);
+  }
+
+  return raw_valid || virtual_valid;
+}
+
 void VIOManager::dumpRefPatchProbeObservation(const PerCameraData &ctx, const V2D &raw_px, double incidence_deg,
-                                               const cv::Mat &raw_roi, const cv::Mat &virtual_support_img)
+                                               const cv::Mat &raw_roi, const cv::Mat &virtual_support_img,
+                                               const cv::Mat &raw_patch_display, const cv::Mat &virtual_patch_display)
 {
   if (!ref_patch_dump_probe_.active || ctx.new_frame == nullptr || raw_roi.empty() ||
       virtual_support_img.empty() || virtual_support_img.type() != CV_32FC1)
@@ -1094,14 +1249,20 @@ void VIOManager::dumpRefPatchProbeObservation(const PerCameraData &ctx, const V2
   point_name << "point_" << std::setw(3) << std::setfill('0') << ref_patch_dump_probe_.point_id;
   const std::filesystem::path raw_dir = root / "raw" / point_name.str();
   const std::filesystem::path virtual_dir = root / "virtual" / point_name.str();
+  const std::filesystem::path raw_patch_dir = root / "raw_patch" / point_name.str();
+  const std::filesystem::path virtual_patch_dir = root / "virtual_patch" / point_name.str();
   std::filesystem::create_directories(raw_dir);
   std::filesystem::create_directories(virtual_dir);
+  std::filesystem::create_directories(raw_patch_dir);
+  std::filesystem::create_directories(virtual_patch_dir);
 
   std::ostringstream file_name;
   file_name << "ref_" << std::setw(3) << std::setfill('0') << ref_patch_dump_probe_.saved_refs
             << "_cam_0_frame_" << std::setw(6) << std::setfill('0') << ctx.new_frame->id_ << ".png";
   const std::filesystem::path raw_path = raw_dir / file_name.str();
   const std::filesystem::path virtual_path = virtual_dir / file_name.str();
+  const std::filesystem::path raw_patch_path = raw_patch_dir / file_name.str();
+  const std::filesystem::path virtual_patch_path = virtual_patch_dir / file_name.str();
   const bool raw_saved = cv::imwrite(raw_path.string(), raw_roi);
   const bool virtual_saved = cv::imwrite(virtual_path.string(), virtual_display);
   if (!raw_saved || !virtual_saved)
@@ -1110,7 +1271,16 @@ void VIOManager::dumpRefPatchProbeObservation(const PerCameraData &ctx, const V2
            ref_patch_dump_probe_.point_id, ref_patch_dump_probe_.saved_refs);
     return;
   }
-
+  bool patch_saved = true;
+  if (!raw_patch_display.empty())
+    patch_saved = cv::imwrite(raw_patch_path.string(), raw_patch_display) && patch_saved;
+  if (!virtual_patch_display.empty())
+    patch_saved = cv::imwrite(virtual_patch_path.string(), virtual_patch_display) && patch_saved;
+  if (!patch_saved)
+  {
+    printf("[ VIO Ref Patch Dump ] Failed to save warped patch probe=%03d ref=%03d\n",
+           ref_patch_dump_probe_.point_id, ref_patch_dump_probe_.saved_refs);
+  }
   std::ofstream index(root / "index.csv", std::ios::app);
   index << ref_patch_dump_probe_.point_id << ',' << ref_patch_dump_probe_.saved_refs << ','
         << ctx.camera_id << ',' << ctx.new_frame->id_ << ','
@@ -2578,7 +2748,7 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
     pending.px = raw_px;
     pending.bearing = ctx.cam->cam2world(raw_px);
     pending.patch = std::move(patch);
-    maybeInitializeRefPatchDumpProbe(ctx, pt_var.point_w, raw_px, pending.bearing, pending.patch.data());
+    maybeInitializeRefPatchDumpProbe(ctx, pt_var.point_w, pt_var.normal, raw_px, pending.bearing, pending.patch.data());
     pending.img = virtual_support_img;
     pending.T_f_w = ctx.new_frame->T_f_w_;
     pending.T_v_w = T_v_w;

@@ -22,6 +22,7 @@ which is included as part of this source code package.
 #include <map>
 #include <memory>
 #include <numeric>
+#include <random>
 #include <opencv2/imgproc/imgproc_c.h>
 #include <opencv2/video/tracking.hpp>
 #include <pcl/filters/voxel_grid.h>
@@ -270,6 +271,8 @@ public:
   bool virtual_splat_debug_compare_pull_exact = false;
   bool draw_rejected_points_en = false;
   bool ref_patch_dump_en = false;
+  int ref_patch_dump_random_seed = -1;
+  int ref_patch_dump_max_candidate_skip = 50;
   int virtual_support_radius = 0;
   int virtual_support_size = 0;
   std::vector<V3F> virtual_support_ray_lut_;
@@ -286,11 +289,18 @@ public:
     int missed_frames = 0;
     double last_saved_incidence_deg = 0.0;
     V3D point_w = V3D::Zero();
+    V3D normal_w = V3D::Zero();
+    bool anchor_valid = false;
+    SE3<double> anchor_T_c_w;
+    SE3<double> anchor_T_v_w;
   };
   RefPatchDumpProbeState ref_patch_dump_probe_;
   int ref_patch_dump_next_point_id_ = 0;
   bool ref_patch_dump_initialized_ = false;
 
+  std::mt19937 ref_patch_dump_rng_;
+  unsigned int ref_patch_dump_effective_seed_ = 0;
+  int ref_patch_dump_candidates_to_skip_ = -1;
   int rejected_virtual_support_oob_ = 0;
   int rejected_virtual_projection_invalid_ = 0;
   int rejected_virtual_z_ = 0;
@@ -438,12 +448,16 @@ public:
                                  cv::Mat &virtual_support_img, SE3<double> &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const;
   bool extractRefPatchDumpRawRoi(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px,
                                  const M3D &R_c_from_v, cv::Mat &raw_roi) const;
-  void maybeInitializeRefPatchDumpProbe(const PerCameraData &ctx, const V3D &point_w, const V2D &raw_px,
-                                        const V3D &bearing, const float *core_patch);
+  void maybeInitializeRefPatchDumpProbe(const PerCameraData &ctx, const V3D &point_w, const V3D &normal_w,
+                                        const V2D &raw_px, const V3D &bearing, const float *core_patch);
   void initializeRefPatchDump();
   void processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw_img);
+  bool buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px,
+                                    const V3D &point_c, const SE3<double> &T_v_w, const cv::Mat &virtual_support_img,
+                                    cv::Mat &raw_patch_display, cv::Mat &virtual_patch_display);
   void dumpRefPatchProbeObservation(const PerCameraData &ctx, const V2D &raw_px, double incidence_deg,
-                                    const cv::Mat &raw_roi, const cv::Mat &virtual_support_img);
+                                    const cv::Mat &raw_roi, const cv::Mat &virtual_support_img,
+                                    const cv::Mat &raw_patch_display, const cv::Mat &virtual_patch_display);
   bool getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
                                   int halfpatch_size, Matrix2d &A_cur_ref) const;
   bool getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_vcur_vref,

@@ -155,3 +155,6 @@
       frame_cnt: 6
       # Follow up to three camera-0 debug probes; each probe saves at most 12 paired observations.
       ref_patch_dump_en: true
+      # Negative seed changes the selected probes on every run; use a fixed non-negative seed for reproduction.
+      ref_patch_dump_random_seed: -1
+      ref_patch_dump_max_candidate_skip: 50

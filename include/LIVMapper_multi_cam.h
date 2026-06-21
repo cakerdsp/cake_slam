@@ -172,6 +172,8 @@ public:
   bool virtual_splat_debug_compare_pull_exact = false;
   bool draw_rejected_points_en = false;
   bool ref_patch_dump_en = false;
+  int ref_patch_dump_random_seed = -1;
+  int ref_patch_dump_max_candidate_skip = 50;
   int frontend_mode = 0;
   int optical_flow_max_cnt = 250;
   int optical_flow_min_dist = 20;
