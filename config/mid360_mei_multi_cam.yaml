@@ -153,5 +153,5 @@
     debug:
       plot_time: -10.0
       frame_cnt: 6
-      # Save paired raw/virtual reference neighborhoods for up to three camera-0 map points.
+      # Follow up to three camera-0 debug probes; each probe saves at most 12 paired observations.
       ref_patch_dump_en: false

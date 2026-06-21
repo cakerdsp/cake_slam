@@ -177,8 +177,6 @@ struct PendingNewPointObservation
   bool virtual_patch_valid = false;
   int level = 0;
   double inv_expo_time = 1.0;
-  int ref_patch_dump_point_id = -1;
-  cv::Mat ref_patch_dump_raw_roi;
 };
 
 struct PerCameraData
@@ -277,13 +275,20 @@ public:
   std::vector<V3F> virtual_support_ray_lut_;
   std::vector<V2F> core_patch_offsets_;
 
-  struct RefPatchDumpPointState
+  struct RefPatchDumpProbeState
   {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    bool active = false;
     int point_id = -1;
     int saved_refs = 0;
+    int selected_frame_id = -1;
+    int last_saved_frame_id = -1;
+    int missed_frames = 0;
+    double last_saved_incidence_deg = 0.0;
+    V3D point_w = V3D::Zero();
   };
-  std::unordered_map<VisualPoint *, RefPatchDumpPointState> ref_patch_dump_points_;
-  std::vector<V3D, Eigen::aligned_allocator<V3D>> ref_patch_dump_positions_;
+  RefPatchDumpProbeState ref_patch_dump_probe_;
+  int ref_patch_dump_next_point_id_ = 0;
   bool ref_patch_dump_initialized_ = false;
 
   int rejected_virtual_support_oob_ = 0;
@@ -431,10 +436,12 @@ public:
   bool createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img, const SE3<double> &T_c_w, const V3D &point_w, float *core_patch,
                                  cv::Mat &virtual_support_img, SE3<double> &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const;
   bool extractRefPatchDumpRawRoi(const cv::Mat &raw_img, const V2D &raw_px, cv::Mat &raw_roi) const;
-  int maybeSelectRefPatchDumpPoint(const PerCameraData &ctx, const cv::Mat &raw_img, const V3D &point_w, const V2D &raw_px,
-                                   const V3D &bearing, const float *core_patch, cv::Mat &raw_roi);
+  void maybeInitializeRefPatchDumpProbe(const PerCameraData &ctx, const V3D &point_w, const V2D &raw_px,
+                                        const V3D &bearing, const float *core_patch);
   void initializeRefPatchDump();
-  void dumpRefPatchObservation(VisualPoint *point, const Feature *feature, const cv::Mat &raw_roi);
+  void processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw_img);
+  void dumpRefPatchProbeObservation(const PerCameraData &ctx, const V2D &raw_px, double incidence_deg,
+                                    const cv::Mat &raw_roi, const cv::Mat &virtual_support_img);
   bool getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
                                   int halfpatch_size, Matrix2d &A_cur_ref) const;
   bool getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_vcur_vref,

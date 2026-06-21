@@ -23,10 +23,12 @@ namespace
 {
 constexpr int kRefPatchDumpCameraId = 0;
 constexpr int kRefPatchDumpMaxPoints = 3;
-constexpr int kRefPatchDumpMaxRefsPerPoint = 6;
-constexpr double kRefPatchDumpMinIncidenceDeg = 55.0;
+constexpr int kRefPatchDumpMaxRefsPerPoint = 12;
+constexpr int kRefPatchDumpFrameInterval = 5;
+constexpr int kRefPatchDumpMaxMissedFrames = 20;
+constexpr double kRefPatchDumpMaxInitialIncidenceDeg = 20.0;
+constexpr double kRefPatchDumpMinAngleChangeDeg = 8.0;
 constexpr double kRefPatchDumpMinStdDev = 12.0;
-constexpr double kRefPatchDumpMinPointSeparation = 0.75;
 constexpr double kRadiansToDegrees = 57.29577951308232;
 
 struct VirtualPatchWorkspace
@@ -804,30 +806,38 @@ bool VIOManager::extractRefPatchDumpRawRoi(const cv::Mat &raw_img, const V2D &ra
 
   const int center_x = static_cast<int>(std::lround(raw_px[0]));
   const int center_y = static_cast<int>(std::lround(raw_px[1]));
-  const int half_size = virtual_support_size / 2;
-  const int x0 = center_x - half_size;
-  const int y0 = center_y - half_size;
-  if (x0 < 0 || y0 < 0 || x0 + virtual_support_size > raw_img.cols || y0 + virtual_support_size > raw_img.rows)
-    return false;
+  if (center_x < 0 || center_y < 0 || center_x >= raw_img.cols || center_y >= raw_img.rows) return false;
 
-  raw_roi = raw_img(cv::Rect(x0, y0, virtual_support_size, virtual_support_size)).clone();
+  const int half_size = virtual_support_size / 2;
+  const int requested_x0 = center_x - half_size;
+  const int requested_y0 = center_y - half_size;
+  const int source_x0 = std::max(0, requested_x0);
+  const int source_y0 = std::max(0, requested_y0);
+  const int source_x1 = std::min(raw_img.cols, requested_x0 + virtual_support_size);
+  const int source_y1 = std::min(raw_img.rows, requested_y0 + virtual_support_size);
+  if (source_x0 >= source_x1 || source_y0 >= source_y1) return false;
+
+  raw_roi = cv::Mat::zeros(virtual_support_size, virtual_support_size, CV_8UC1);
+  const cv::Rect source_rect(source_x0, source_y0, source_x1 - source_x0, source_y1 - source_y0);
+  const cv::Rect destination_rect(source_x0 - requested_x0, source_y0 - requested_y0,
+                                  source_rect.width, source_rect.height);
+  raw_img(source_rect).copyTo(raw_roi(destination_rect));
   return true;
 }
 
-int VIOManager::maybeSelectRefPatchDumpPoint(const PerCameraData &ctx, const cv::Mat &raw_img, const V3D &point_w,
-                                              const V2D &raw_px, const V3D &bearing, const float *core_patch,
-                                              cv::Mat &raw_roi)
+void VIOManager::maybeInitializeRefPatchDumpProbe(const PerCameraData &ctx, const V3D &point_w, const V2D &raw_px,
+                                                   const V3D &bearing, const float *core_patch)
 {
   if (!ref_patch_dump_en || !virtual_fisheye_patch_en || ctx.camera_id != kRefPatchDumpCameraId ||
-      core_patch == nullptr || static_cast<int>(ref_patch_dump_positions_.size()) >= kRefPatchDumpMaxPoints)
-    return -1;
+      ref_patch_dump_probe_.active || ref_patch_dump_next_point_id_ >= kRefPatchDumpMaxPoints ||
+      core_patch == nullptr || ctx.new_frame == nullptr)
+    return;
 
   const double bearing_norm = bearing.norm();
-  if (!point_w.array().isFinite().all() || !std::isfinite(bearing_norm) || bearing_norm <= 1.0e-9) return -1;
+  if (!point_w.array().isFinite().all() || !std::isfinite(bearing_norm) || bearing_norm <= 1.0e-9) return;
   const double incidence_deg =
       std::acos(std::clamp(bearing[2] / bearing_norm, -1.0, 1.0)) * kRadiansToDegrees;
-  if (incidence_deg < kRefPatchDumpMinIncidenceDeg) return -1;
-  if (!extractRefPatchDumpRawRoi(raw_img, raw_px, raw_roi)) return -1;
+  if (incidence_deg > kRefPatchDumpMaxInitialIncidenceDeg) return;
 
   double sum = 0.0;
   double squared_sum = 0.0;
@@ -838,23 +848,22 @@ int VIOManager::maybeSelectRefPatchDumpPoint(const PerCameraData &ctx, const cv:
   }
   const double mean = sum / patch_size_total;
   const double variance = std::max(0.0, squared_sum / patch_size_total - mean * mean);
-  if (std::sqrt(variance) < kRefPatchDumpMinStdDev) return -1;
+  if (std::sqrt(variance) < kRefPatchDumpMinStdDev) return;
 
-  for (const V3D &selected_position : ref_patch_dump_positions_)
-    if ((selected_position - point_w).norm() < kRefPatchDumpMinPointSeparation) return -1;
-
-  const int point_id = static_cast<int>(ref_patch_dump_positions_.size());
-  ref_patch_dump_positions_.push_back(point_w);
-  printf("[ VIO Ref Patch Dump ] Selected point=%03d camera=0 incidence=%.2f deg pixel=(%.1f, %.1f)\n",
-         point_id, incidence_deg, raw_px[0], raw_px[1]);
-  return point_id;
+  ref_patch_dump_probe_ = RefPatchDumpProbeState();
+  ref_patch_dump_probe_.active = true;
+  ref_patch_dump_probe_.point_id = ref_patch_dump_next_point_id_++;
+  ref_patch_dump_probe_.selected_frame_id = ctx.new_frame->id_;
+  ref_patch_dump_probe_.point_w = point_w;
+  printf("[ VIO Ref Patch Dump ] Selected probe=%03d camera=0 frame=%d incidence=%.2f deg pixel=(%.1f, %.1f)\n",
+         ref_patch_dump_probe_.point_id, ctx.new_frame->id_, incidence_deg, raw_px[0], raw_px[1]);
 }
 
 void VIOManager::initializeRefPatchDump()
 {
   if (ref_patch_dump_initialized_) return;
 
-  const std::filesystem::path root = std::filesystem::path(ROOT_DIR) / "Log" / "ref_patch_debug";
+  const std::filesystem::path root = std::filesystem::path(ROOT_DIR) / "Log" / "ref_patch_probe";
   std::filesystem::create_directories(root / "raw");
   std::filesystem::create_directories(root / "virtual");
 
@@ -862,69 +871,146 @@ void VIOManager::initializeRefPatchDump()
   if (!std::filesystem::exists(index_path) || std::filesystem::file_size(index_path) == 0)
   {
     std::ofstream index(index_path);
-    index << "point_id,ref_index,camera_id,frame_id,timestamp,world_x,world_y,world_z,raw_u,raw_v,raw_path,virtual_path\n";
+    index << "point_id,ref_index,camera_id,frame_id,frames_since_selection,timestamp,incidence_deg,"
+             "world_x,world_y,world_z,raw_u,raw_v,raw_path,virtual_path\n";
   }
 
   ref_patch_dump_initialized_ = true;
   printf("[ VIO Ref Patch Dump ] Output: %s\n", root.string().c_str());
 }
 
-void VIOManager::dumpRefPatchObservation(VisualPoint *point, const Feature *feature, const cv::Mat &raw_roi)
+void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw_img)
 {
-  if (!ref_patch_dump_en || point == nullptr || feature == nullptr || feature->camera_id_ != kRefPatchDumpCameraId ||
-      raw_roi.empty())
+  if (!ref_patch_dump_en || !ref_patch_dump_probe_.active || ctx.camera_id != kRefPatchDumpCameraId ||
+      ctx.new_frame == nullptr)
     return;
 
-  auto state_it = ref_patch_dump_points_.find(point);
-  if (state_it == ref_patch_dump_points_.end() || state_it->second.saved_refs >= kRefPatchDumpMaxRefsPerPoint) return;
-  if (feature->img_.empty() || feature->img_.type() != CV_32FC1) return;
+  auto mark_missed = [&]() {
+    ++ref_patch_dump_probe_.missed_frames;
+    if (ref_patch_dump_probe_.missed_frames >= kRefPatchDumpMaxMissedFrames)
+    {
+      printf("[ VIO Ref Patch Dump ] Probe=%03d released after %d missed frames with %d saved refs.\n",
+             ref_patch_dump_probe_.point_id, ref_patch_dump_probe_.missed_frames,
+             ref_patch_dump_probe_.saved_refs);
+      ref_patch_dump_probe_.active = false;
+    }
+  };
 
-  cv::Mat virtual_display(feature->img_.rows, feature->img_.cols, CV_8UC1);
-  for (int y = 0; y < feature->img_.rows; ++y)
+  const V3D point_c = ctx.new_frame->w2f(ref_patch_dump_probe_.point_w);
+  V2D raw_px;
+  if (!projectRawFisheyeIfValid(ctx, point_c, 1, raw_px))
   {
-    const float *source = feature->img_.ptr<float>(y);
+    mark_missed();
+    return;
+  }
+
+  const double point_norm = point_c.norm();
+  if (!std::isfinite(point_norm) || point_norm <= 1.0e-9)
+  {
+    mark_missed();
+    return;
+  }
+  const double incidence_deg =
+      std::acos(std::clamp(point_c[2] / point_norm, -1.0, 1.0)) * kRadiansToDegrees;
+  const int frame_id = ctx.new_frame->id_;
+  const bool first_sample = ref_patch_dump_probe_.saved_refs == 0;
+  const bool interval_due = frame_id - ref_patch_dump_probe_.last_saved_frame_id >= kRefPatchDumpFrameInterval;
+  const bool angle_due =
+      std::fabs(incidence_deg - ref_patch_dump_probe_.last_saved_incidence_deg) >= kRefPatchDumpMinAngleChangeDeg;
+  if (!first_sample && !interval_due && !angle_due)
+  {
+    ref_patch_dump_probe_.missed_frames = 0;
+    return;
+  }
+
+  cv::Mat raw_roi;
+  if (!extractRefPatchDumpRawRoi(raw_img, raw_px, raw_roi))
+  {
+    mark_missed();
+    return;
+  }
+
+  M3D R_v_from_c, R_c_from_v;
+  if (!buildVirtualFrameRotation(point_c, R_v_from_c, R_c_from_v))
+  {
+    mark_missed();
+    return;
+  }
+  VirtualPatchImage support;
+  if (!buildVirtualSupportPatch(ctx, raw_img, raw_px, R_v_from_c, R_c_from_v, support))
+  {
+    mark_missed();
+    return;
+  }
+
+  ref_patch_dump_probe_.missed_frames = 0;
+  dumpRefPatchProbeObservation(ctx, raw_px, incidence_deg, raw_roi, support.values);
+  if (ref_patch_dump_probe_.saved_refs >= kRefPatchDumpMaxRefsPerPoint)
+  {
+    printf("[ VIO Ref Patch Dump ] Probe=%03d completed with %d saved refs.\n",
+           ref_patch_dump_probe_.point_id, ref_patch_dump_probe_.saved_refs);
+    ref_patch_dump_probe_.active = false;
+  }
+}
+
+void VIOManager::dumpRefPatchProbeObservation(const PerCameraData &ctx, const V2D &raw_px, double incidence_deg,
+                                               const cv::Mat &raw_roi, const cv::Mat &virtual_support_img)
+{
+  if (!ref_patch_dump_probe_.active || ctx.new_frame == nullptr || raw_roi.empty() ||
+      virtual_support_img.empty() || virtual_support_img.type() != CV_32FC1)
+    return;
+
+  cv::Mat virtual_display(virtual_support_img.rows, virtual_support_img.cols, CV_8UC1);
+  for (int y = 0; y < virtual_support_img.rows; ++y)
+  {
+    const float *source = virtual_support_img.ptr<float>(y);
     uint8_t *destination = virtual_display.ptr<uint8_t>(y);
-    for (int x = 0; x < feature->img_.cols; ++x)
+    for (int x = 0; x < virtual_support_img.cols; ++x)
       destination[x] = std::isfinite(source[x])
                            ? static_cast<uint8_t>(std::lround(std::clamp(source[x], 0.0f, 255.0f)))
                            : 0;
   }
 
   initializeRefPatchDump();
-  RefPatchDumpPointState &dump_state = state_it->second;
-  const std::filesystem::path root = std::filesystem::path(ROOT_DIR) / "Log" / "ref_patch_debug";
+  const std::filesystem::path root = std::filesystem::path(ROOT_DIR) / "Log" / "ref_patch_probe";
   std::ostringstream point_name;
-  point_name << "point_" << std::setw(3) << std::setfill('0') << dump_state.point_id;
+  point_name << "point_" << std::setw(3) << std::setfill('0') << ref_patch_dump_probe_.point_id;
   const std::filesystem::path raw_dir = root / "raw" / point_name.str();
   const std::filesystem::path virtual_dir = root / "virtual" / point_name.str();
   std::filesystem::create_directories(raw_dir);
   std::filesystem::create_directories(virtual_dir);
 
   std::ostringstream file_name;
-  file_name << "ref_" << std::setw(3) << std::setfill('0') << dump_state.saved_refs
-            << "_cam_0_frame_" << std::setw(6) << std::setfill('0') << feature->id_ << ".png";
+  file_name << "ref_" << std::setw(3) << std::setfill('0') << ref_patch_dump_probe_.saved_refs
+            << "_cam_0_frame_" << std::setw(6) << std::setfill('0') << ctx.new_frame->id_ << ".png";
   const std::filesystem::path raw_path = raw_dir / file_name.str();
   const std::filesystem::path virtual_path = virtual_dir / file_name.str();
   const bool raw_saved = cv::imwrite(raw_path.string(), raw_roi);
   const bool virtual_saved = cv::imwrite(virtual_path.string(), virtual_display);
   if (!raw_saved || !virtual_saved)
   {
-    printf("[ VIO Ref Patch Dump ] Failed to save point=%03d ref=%03d\n",
-           dump_state.point_id, dump_state.saved_refs);
+    printf("[ VIO Ref Patch Dump ] Failed to save probe=%03d ref=%03d\n",
+           ref_patch_dump_probe_.point_id, ref_patch_dump_probe_.saved_refs);
     return;
   }
 
   std::ofstream index(root / "index.csv", std::ios::app);
-  index << dump_state.point_id << ',' << dump_state.saved_refs << ',' << feature->camera_id_ << ',' << feature->id_ << ','
-        << std::fixed << std::setprecision(9) << feature->timestamp_ << ','
-        << point->pos_[0] << ',' << point->pos_[1] << ',' << point->pos_[2] << ','
-        << feature->px_[0] << ',' << feature->px_[1] << ','
+  index << ref_patch_dump_probe_.point_id << ',' << ref_patch_dump_probe_.saved_refs << ','
+        << ctx.camera_id << ',' << ctx.new_frame->id_ << ','
+        << ctx.new_frame->id_ - ref_patch_dump_probe_.selected_frame_id << ','
+        << std::fixed << std::setprecision(9) << ctx.new_frame->timestamp_ << ','
+        << std::setprecision(3) << incidence_deg << ','
+        << ref_patch_dump_probe_.point_w[0] << ',' << ref_patch_dump_probe_.point_w[1] << ','
+        << ref_patch_dump_probe_.point_w[2] << ',' << raw_px[0] << ',' << raw_px[1] << ','
         << std::filesystem::relative(raw_path, root).generic_string() << ','
         << std::filesystem::relative(virtual_path, root).generic_string() << '\n';
 
-  printf("[ VIO Ref Patch Dump ] Saved point=%03d ref=%03d frame=%d\n",
-         dump_state.point_id, dump_state.saved_refs, feature->id_);
-  ++dump_state.saved_refs;
+  ref_patch_dump_probe_.last_saved_frame_id = ctx.new_frame->id_;
+  ref_patch_dump_probe_.last_saved_incidence_deg = incidence_deg;
+  printf("[ VIO Ref Patch Dump ] Saved probe=%03d ref=%03d frame=%d incidence=%.2f deg\n",
+         ref_patch_dump_probe_.point_id, ref_patch_dump_probe_.saved_refs,
+         ctx.new_frame->id_, incidence_deg);
+  ++ref_patch_dump_probe_.saved_refs;
 }
 
 bool VIOManager::getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
@@ -2374,8 +2460,7 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
     pending.px = raw_px;
     pending.bearing = ctx.cam->cam2world(raw_px);
     pending.patch = std::move(patch);
-    pending.ref_patch_dump_point_id = maybeSelectRefPatchDumpPoint(ctx, img, pt_var.point_w, raw_px, pending.bearing,
-                                                                      pending.patch.data(), pending.ref_patch_dump_raw_roi);
+    maybeInitializeRefPatchDumpProbe(ctx, pt_var.point_w, raw_px, pending.bearing, pending.patch.data());
     pending.img = virtual_support_img;
     pending.T_f_w = ctx.new_frame->T_f_w_;
     pending.T_v_w = T_v_w;
@@ -2531,11 +2616,6 @@ void VIOManager::commitPendingNewPoints()
       feature->R_c_from_v_ = pending.R_c_from_v;
       feature->virtual_patch_valid_ = pending.virtual_patch_valid;
       point->addFrameRef(feature);
-      if (pending.ref_patch_dump_point_id >= 0)
-      {
-        ref_patch_dump_points_[point] = RefPatchDumpPointState{pending.ref_patch_dump_point_id, 0};
-        dumpRefPatchObservation(point, feature, pending.ref_patch_dump_raw_roi);
-      }
       if (cross_camera_reference_en)
       {
         if (!point->has_ref_patch_)
@@ -2604,12 +2684,6 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
       continue;
     }
 
-    cv::Mat ref_patch_dump_raw_roi;
-    const auto dump_point = ref_patch_dump_points_.find(pt);
-    if (ref_patch_dump_en && ctx.camera_id == kRefPatchDumpCameraId && dump_point != ref_patch_dump_points_.end() &&
-        dump_point->second.saved_refs < kRefPatchDumpMaxRefsPerPoint)
-      extractRefPatchDumpRawRoi(img, raw_px, ref_patch_dump_raw_roi);
-
     const V3D bearing = ctx.cam->cam2world(raw_px);
     Feature *ftr_new = new Feature(pt, patch.release(), raw_px, bearing, ctx.new_frame->T_f_w_,
                                    ctx.visual_submap->search_levels[i], ctx.camera_id, ctx.new_frame->timestamp_);
@@ -2622,7 +2696,6 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
     ftr_new->R_c_from_v_ = R_c_from_v;
     ftr_new->virtual_patch_valid_ = true;
     pt->addFrameRef(ftr_new);
-    dumpRefPatchObservation(pt, ftr_new, ref_patch_dump_raw_roi);
     ctx.update_flag[i] = 1;
     ++update_num;
   }
@@ -4385,6 +4458,9 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
 
   computeJacobianAndUpdateEKF();
   const double ekf_end = omp_get_wtime();
+
+  if (ref_patch_dump_en && !cameras_.empty())
+    processRefPatchDumpProbe(cameras_[kRefPatchDumpCameraId], cameras_[kRefPatchDumpCameraId].new_frame->img_);
 
   for (PerCameraData &ctx : cameras_)
   {
