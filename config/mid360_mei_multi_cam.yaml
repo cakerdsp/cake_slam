@@ -154,7 +154,9 @@
       plot_time: -10.0
       frame_cnt: 6
       # Follow up to eight camera-0 debug probes; each probe saves at most 12 paired observations.
-      ref_patch_dump_en: true
+      ref_patch_dump_en: false
       # Negative seed changes the selected probes on every run; use a fixed non-negative seed for reproduction.
       ref_patch_dump_random_seed: -1
       ref_patch_dump_max_candidate_skip: 50
+      # Stop a probe when its virtual patch NCC against the first observation falls below this value.
+      ref_patch_dump_ncc_threshold: 0.6

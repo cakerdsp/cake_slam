@@ -177,6 +177,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("debug.ref_patch_dump_en", false);
   try_declare.template operator()<int>("debug.ref_patch_dump_random_seed", -1);
   try_declare.template operator()<int>("debug.ref_patch_dump_max_candidate_skip", 50);
+  try_declare.template operator()<double>("debug.ref_patch_dump_ncc_threshold", 0.6);
 
   try_declare.template operator()<double>("publish.blind_rgb_points", 0.01);
   try_declare.template operator()<int>("publish.pub_scan_num", 1);
@@ -297,6 +298,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("debug.ref_patch_dump_en", ref_patch_dump_en);
   this->node->get_parameter("debug.ref_patch_dump_random_seed", ref_patch_dump_random_seed);
   this->node->get_parameter("debug.ref_patch_dump_max_candidate_skip", ref_patch_dump_max_candidate_skip);
+  this->node->get_parameter("debug.ref_patch_dump_ncc_threshold", ref_patch_dump_ncc_threshold);
 
   this->node->get_parameter("publish.blind_rgb_points", blind_rgb_points);
   this->node->get_parameter("publish.pub_scan_num", pub_scan_num);
@@ -368,6 +370,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->ref_patch_dump_en = ref_patch_dump_en;
   vio_manager->ref_patch_dump_random_seed = ref_patch_dump_random_seed;
   vio_manager->ref_patch_dump_max_candidate_skip = ref_patch_dump_max_candidate_skip;
+  vio_manager->ref_patch_dump_ncc_threshold = ref_patch_dump_ncc_threshold;
   vio_manager->exposure_estimate_en = exposure_estimate_en;
   vio_manager->colmap_output_en = colmap_output_en;
   vio_manager->frontend_mode = frontend_mode;

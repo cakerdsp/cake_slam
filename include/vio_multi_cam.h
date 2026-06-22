@@ -235,9 +235,6 @@ struct PerCameraData
   cv::Mat img_cp;
   cv::Mat img_rgb;
   cv::Mat img_test;
-  cv::Mat current_range_img;
-  SE3<double> current_range_T_f_w;
-  bool current_range_pose_valid = false;
   std::vector<std::pair<cv::Point2f, int>> rejected_visual_points_for_draw;
 };
 
@@ -276,6 +273,7 @@ public:
   bool ref_patch_dump_en = false;
   int ref_patch_dump_random_seed = -1;
   int ref_patch_dump_max_candidate_skip = 50;
+  double ref_patch_dump_ncc_threshold = 0.6;
   int virtual_support_radius = 0;
   int virtual_support_size = 0;
   std::vector<V3F> virtual_support_ray_lut_;
@@ -296,6 +294,7 @@ public:
     bool anchor_valid = false;
     SE3<double> anchor_T_c_w;
     SE3<double> anchor_T_v_w;
+    std::vector<float> anchor_virtual_patch;
   };
   RefPatchDumpProbeState ref_patch_dump_probe_;
   int ref_patch_dump_next_point_id_ = 0;
@@ -304,6 +303,9 @@ public:
   std::mt19937 ref_patch_dump_rng_;
   unsigned int ref_patch_dump_effective_seed_ = 0;
   int ref_patch_dump_candidates_to_skip_ = -1;
+  cv::Mat ref_patch_dump_range_img_;
+  SE3<double> ref_patch_dump_range_T_f_w_;
+  bool ref_patch_dump_range_pose_valid_ = false;
   int rejected_virtual_support_oob_ = 0;
   int rejected_virtual_projection_invalid_ = 0;
   int rejected_virtual_z_ = 0;
@@ -431,8 +433,7 @@ public:
   void getWarpMatrixAffineHomography(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const V2D &px_ref,
                                      const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
   void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
-                  const int pyramid_level, const int halfpatch_size, float *patch,
-                  std::vector<V2D> *sample_pixels = nullptr);
+                  const int pyramid_level, const int halfpatch_size, float *patch);
   bool buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &point_in_raw_camera, const V2D &raw_center_px,
                                  M3D &R_v_from_c, M3D &R_c_from_v) const;
   bool projectRawFisheyeIfValid(const PerCameraData &ctx, const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const;
@@ -461,7 +462,8 @@ public:
   bool buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px,
                                     const V3D &point_c, const SE3<double> &T_v_w, const cv::Mat &virtual_support_img,
                                     cv::Mat &raw_patch_display, cv::Mat &virtual_patch_display,
-                                    std::vector<V2D> &raw_sample_pixels, std::vector<V2D> &virtual_sample_pixels);
+                                    std::vector<V2D> &raw_sample_pixels, std::vector<V2D> &virtual_sample_pixels,
+                                    double &virtual_ncc);
   void dumpRefPatchProbeObservation(const PerCameraData &ctx, const V2D &raw_px, const V2D &virtual_px,
                                     double incidence_deg, const cv::Mat &raw_roi, const M3D &raw_to_roi,
                                     const cv::Mat &virtual_support_img, const std::vector<V2D> &raw_sample_pixels,
@@ -472,8 +474,7 @@ public:
   bool getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_vcur_vref,
                                             int level_ref, Matrix2d &A_cur_ref) const;
   bool warpAffineVirtual(const Matrix2d &A_cur_ref, const cv::Mat &virtual_ref_img, int level_ref, int search_level,
-                         int pyramid_level, int halfpatch_size, float *patch,
-                         std::vector<V2D> *sample_pixels = nullptr) const;
+                         int pyramid_level, int halfpatch_size, float *patch) const;
   bool sampleVirtualCorePatch(const VirtualPatchImage &support, const V2D &center, int scale, float *patch) const;
   bool sampleVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px, int scale, float &value, V2D &gradient) const;
   bool sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V2D &px, int scale, float &value, V2D &gradient) const;

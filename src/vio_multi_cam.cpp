@@ -198,12 +198,14 @@ void VIOManager::initializeVIO()
   {
     if (ref_patch_dump_max_candidate_skip < 0)
       throw std::runtime_error("ref_patch_dump_max_candidate_skip must be non-negative");
+    if (ref_patch_dump_ncc_threshold < -1.0 || ref_patch_dump_ncc_threshold > 1.0)
+      throw std::runtime_error("ref_patch_dump_ncc_threshold must be in [-1, 1]");
     ref_patch_dump_effective_seed_ =
         ref_patch_dump_random_seed >= 0 ? static_cast<unsigned int>(ref_patch_dump_random_seed) : std::random_device{}();
     ref_patch_dump_rng_.seed(ref_patch_dump_effective_seed_);
     ref_patch_dump_candidates_to_skip_ = -1;
-    printf("[ VIO Ref Patch Dump ] Selection seed=%u max_candidate_skip=%d\n",
-           ref_patch_dump_effective_seed_, ref_patch_dump_max_candidate_skip);
+    printf("[ VIO Ref Patch Dump ] Selection seed=%u max_candidate_skip=%d ncc_threshold=%.3f\n",
+           ref_patch_dump_effective_seed_, ref_patch_dump_max_candidate_skip, ref_patch_dump_ncc_threshold);
   }
 
   if (colmap_output_en && numCameras() > 1)
@@ -1055,7 +1057,8 @@ void VIOManager::initializeRefPatchDump()
   std::filesystem::create_directories(root / "virtual_patch");
   std::ofstream selection(root / "selection.txt");
   selection << "random_seed=" << ref_patch_dump_effective_seed_ << "\n"
-            << "max_candidate_skip=" << ref_patch_dump_max_candidate_skip << "\n";
+            << "max_candidate_skip=" << ref_patch_dump_max_candidate_skip << "\n"
+            << "ncc_threshold=" << ref_patch_dump_ncc_threshold << "\n";
   const std::filesystem::path index_path = root / "index.csv";
   if (!std::filesystem::exists(index_path) || std::filesystem::file_size(index_path) == 0)
   {
@@ -1099,12 +1102,12 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
     mark_missed();
     return;
   }
-  if (ctx.current_range_pose_valid)
+  if (ref_patch_dump_range_pose_valid_)
   {
-    const V3D range_point_c = ctx.current_range_T_f_w * ref_patch_dump_probe_.point_w;
+    const V3D range_point_c = ref_patch_dump_range_T_f_w_ * ref_patch_dump_probe_.point_w;
     V2D range_raw_px;
     if (projectRawFisheyeIfValid(ctx, range_point_c, 1, range_raw_px) &&
-        hasRangeDiscontinuity(ctx, ctx.current_range_img, range_raw_px, range_point_c.norm()))
+        hasRangeDiscontinuity(ctx, ref_patch_dump_range_img_, range_raw_px, range_point_c.norm()))
     {
       printf("[ VIO Ref Patch Dump ] Probe=%03d stopped at frame=%d after range discontinuity, with %d saved refs.\n",
              ref_patch_dump_probe_.point_id, ctx.new_frame->id_, ref_patch_dump_probe_.saved_refs);
@@ -1120,11 +1123,7 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
   const bool interval_due = frame_id - ref_patch_dump_probe_.last_saved_frame_id >= kRefPatchDumpFrameInterval;
   const bool angle_due =
       std::fabs(incidence_deg - ref_patch_dump_probe_.last_saved_incidence_deg) >= kRefPatchDumpMinAngleChangeDeg;
-  if (!first_sample && !interval_due && !angle_due)
-  {
-    ref_patch_dump_probe_.missed_frames = 0;
-    return;
-  }
+  const bool save_due = first_sample || interval_due || angle_due;
 
   M3D R_v_from_c, R_c_from_v;
   if (!buildVirtualFrameRotation(ctx, point_c, raw_px, R_v_from_c, R_c_from_v))
@@ -1139,6 +1138,29 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
     return;
   }
 
+  const SE3<double> T_v_w = composeVirtualPose(R_v_from_c, ctx.new_frame->T_f_w_);
+  cv::Mat raw_patch_display;
+  cv::Mat virtual_patch_display;
+  std::vector<V2D> raw_sample_pixels;
+  std::vector<V2D> virtual_sample_pixels;
+  double virtual_ncc = std::numeric_limits<double>::quiet_NaN();
+  if (!buildRefPatchDumpWarpPatches(ctx, raw_img, raw_px, point_c, T_v_w, support.values,
+                                    raw_patch_display, virtual_patch_display,
+                                    raw_sample_pixels, virtual_sample_pixels, virtual_ncc))
+  {
+    if (std::isfinite(virtual_ncc) && virtual_ncc < ref_patch_dump_ncc_threshold)
+      printf("[ VIO Ref Patch Dump ] Probe=%03d stopped at frame=%d: virtual NCC %.3f < %.3f, with %d saved refs.\n",
+             ref_patch_dump_probe_.point_id, ctx.new_frame->id_, virtual_ncc,
+             ref_patch_dump_ncc_threshold, ref_patch_dump_probe_.saved_refs);
+    else
+      printf("[ VIO Ref Patch Dump ] Probe=%03d stopped at frame=%d: debug patch warp invalid, with %d saved refs.\n",
+             ref_patch_dump_probe_.point_id, ctx.new_frame->id_, ref_patch_dump_probe_.saved_refs);
+    ref_patch_dump_probe_.active = false;
+    return;
+  }
+  ref_patch_dump_probe_.missed_frames = 0;
+  if (!save_due) return;
+
   cv::Mat raw_roi;
   M3D raw_to_roi;
   if (!extractRefPatchDumpRawRoi(ctx, raw_img, raw_px, R_c_from_v, raw_roi, raw_to_roi))
@@ -1147,15 +1169,6 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
     return;
   }
 
-  ref_patch_dump_probe_.missed_frames = 0;
-  const SE3<double> T_v_w = composeVirtualPose(R_v_from_c, ctx.new_frame->T_f_w_);
-  cv::Mat raw_patch_display;
-  cv::Mat virtual_patch_display;
-  std::vector<V2D> raw_sample_pixels;
-  std::vector<V2D> virtual_sample_pixels;
-  buildRefPatchDumpWarpPatches(ctx, raw_img, raw_px, point_c, T_v_w, support.values,
-                               raw_patch_display, virtual_patch_display,
-                               raw_sample_pixels, virtual_sample_pixels);
   const V2D virtual_px = virtualProject(T_v_w * ref_patch_dump_probe_.point_w);
   dumpRefPatchProbeObservation(ctx, raw_px, virtual_px, incidence_deg, raw_roi, raw_to_roi,
                                support.values, raw_sample_pixels, virtual_sample_pixels,
@@ -1172,8 +1185,10 @@ bool VIOManager::buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv
                                                const V3D &point_c, const SE3<double> &T_v_w,
                                                const cv::Mat &virtual_support_img, cv::Mat &raw_patch_display,
                                                cv::Mat &virtual_patch_display,
-                                               std::vector<V2D> &raw_sample_pixels, std::vector<V2D> &virtual_sample_pixels)
+                                               std::vector<V2D> &raw_sample_pixels, std::vector<V2D> &virtual_sample_pixels,
+                                               double &virtual_ncc)
 {
+  virtual_ncc = std::numeric_limits<double>::quiet_NaN();
   raw_patch_display.release();
   virtual_patch_display.release();
   raw_sample_pixels.clear();
@@ -1210,6 +1225,25 @@ bool VIOManager::buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv
                0.0, 0.0, cv::INTER_NEAREST);
     return true;
   };
+  auto collect_sample_pixels = [&](const Matrix2d &A_target_source, const V2D &source_center,
+                                   std::vector<V2D> &sample_pixels) {
+    sample_pixels.clear();
+    if (!A_target_source.array().isFinite().all() || std::fabs(A_target_source.determinant()) <= 1.0e-9)
+      return false;
+    const Matrix2f A_source_target = A_target_source.inverse().cast<float>();
+    const V2F center = source_center.cast<float>();
+    sample_pixels.reserve(patch_size_total);
+    for (int y = 0; y < patch_size; ++y)
+    {
+      for (int x = 0; x < patch_size; ++x)
+      {
+        const V2F offset(x - patch_size_half, y - patch_size_half);
+        const V2F pixel = A_source_target * offset + center;
+        sample_pixels.push_back(pixel.cast<double>());
+      }
+    }
+    return sample_pixels.size() == static_cast<size_t>(patch_size_total);
+  };
 
   bool raw_valid = false;
   V3D source_bearing = ctx.cam->cam2world(raw_px);
@@ -1243,8 +1277,8 @@ bool VIOManager::buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv
     if (raw_affine_valid && A_anchor_source.array().isFinite().all() && std::fabs(A_anchor_source.determinant()) > 1.0e-9)
     {
       std::vector<float> raw_patch(patch_size_total, 0.0f);
-      warpAffine(A_anchor_source, raw_img, raw_px, 0, 0, 0, patch_size_half, raw_patch.data(),
-                 &raw_sample_pixels);
+      warpAffine(A_anchor_source, raw_img, raw_px, 0, 0, 0, patch_size_half, raw_patch.data());
+      collect_sample_pixels(A_anchor_source, raw_px, raw_sample_pixels);
       raw_valid = make_display(raw_patch, raw_patch_display);
     }
   }
@@ -1276,11 +1310,23 @@ bool VIOManager::buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv
   {
     std::vector<float> virtual_patch(patch_size_total, 0.0f);
     if (warpAffineVirtual(A_virtual_anchor_source, virtual_support_img, 0, 0, 0,
-                          patch_size_half, virtual_patch.data(), &virtual_sample_pixels))
-      virtual_valid = make_display(virtual_patch, virtual_patch_display);
+                          patch_size_half, virtual_patch.data()))
+    {
+      collect_sample_pixels(A_virtual_anchor_source, V2D(virtual_support_radius, virtual_support_radius), virtual_sample_pixels);
+      if (ref_patch_dump_probe_.anchor_virtual_patch.empty())
+      {
+        ref_patch_dump_probe_.anchor_virtual_patch = virtual_patch;
+        virtual_ncc = 1.0;
+      }
+      else
+        virtual_ncc = calculateNCC(ref_patch_dump_probe_.anchor_virtual_patch.data(),
+                                   virtual_patch.data(), patch_size_total);
+      if (std::isfinite(virtual_ncc) && virtual_ncc >= ref_patch_dump_ncc_threshold)
+        virtual_valid = make_display(virtual_patch, virtual_patch_display);
+    }
   }
 
-  return raw_valid || virtual_valid;
+  return raw_valid && virtual_valid;
 }
 
 void VIOManager::dumpRefPatchProbeObservation(const PerCameraData &ctx, const V2D &raw_px, const V2D &virtual_px,
@@ -1309,28 +1355,28 @@ void VIOManager::dumpRefPatchProbeObservation(const PerCameraData &ctx, const V2
   cv::Mat virtual_display;
   cv::cvtColor(raw_roi, raw_display, CV_GRAY2BGR);
   cv::cvtColor(virtual_gray, virtual_display, CV_GRAY2BGR);
-  auto draw_marker = [](cv::Mat &image, const V2D &pixel, const cv::Scalar &color, int radius) {
+  auto draw_marker = [](cv::Mat &image, const V2D &pixel, const cv::Vec3b &color) {
     if (!pixel.array().isFinite().all()) return;
     const cv::Point center(static_cast<int>(std::lround(pixel[0])),
                            static_cast<int>(std::lround(pixel[1])));
     if (center.x < 0 || center.x >= image.cols || center.y < 0 || center.y >= image.rows) return;
-    cv::circle(image, center, radius, color, -1, 8);
+    image.at<cv::Vec3b>(center.y, center.x) = color;
   };
   auto map_raw_to_roi = [&](const V2D &pixel) {
     const V3D mapped = raw_to_roi * V3D(pixel[0], pixel[1], 1.0);
     return V2D(mapped[0], mapped[1]);
   };
 
-  const cv::Scalar green(0, 255, 0);
-  const cv::Scalar red(0, 0, 255);
+  const cv::Vec3b green(0, 255, 0);
+  const cv::Vec3b red(0, 0, 255);
   for (const V2D &sample_pixel : raw_sample_pixels)
-    draw_marker(raw_display, map_raw_to_roi(sample_pixel), green, 1);
+    draw_marker(raw_display, map_raw_to_roi(sample_pixel), green);
   for (const V2D &sample_pixel : virtual_sample_pixels)
-    draw_marker(virtual_display, sample_pixel, green, 1);
+    draw_marker(virtual_display, sample_pixel, green);
 
   // Draw the feature last so it remains red when it overlaps a sample pixel.
-  draw_marker(raw_display, map_raw_to_roi(raw_px), red, 2);
-  draw_marker(virtual_display, virtual_px, red, 2);
+  draw_marker(raw_display, map_raw_to_roi(raw_px), red);
+  draw_marker(virtual_display, virtual_px, red);
 
   initializeRefPatchDump();
   const std::filesystem::path root = std::filesystem::path(ROOT_DIR) / "Log" / "ref_patch_probe";
@@ -1436,11 +1482,9 @@ bool VIOManager::getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const 
 }
 
 bool VIOManager::warpAffineVirtual(const Matrix2d &A_cur_ref, const cv::Mat &virtual_ref_img, int level_ref, int search_level,
-                                   int pyramid_level, int halfpatch_size, float *patch,
-                                   std::vector<V2D> *sample_pixels) const
+                                   int pyramid_level, int halfpatch_size, float *patch) const
 {
   (void)level_ref;
-  if (sample_pixels != nullptr) sample_pixels->clear();
   if (virtual_ref_img.empty() || virtual_ref_img.type() != CV_32FC1 || std::fabs(A_cur_ref.determinant()) <= 1e-9) return false;
   const Matrix2f A_ref_cur = A_cur_ref.inverse().cast<float>();
   const int local_patch_size = halfpatch_size * 2;
@@ -1453,13 +1497,7 @@ bool VIOManager::warpAffineVirtual(const Matrix2d &A_cur_ref, const cv::Mat &vir
       offset *= static_cast<float>((1 << search_level) * (1 << pyramid_level));
       const V2F px = A_ref_cur * offset + center;
       float value;
-      if (!interpolateStoredVirtualImage(virtual_ref_img, px[0], px[1], value))
-      {
-        if (sample_pixels != nullptr) sample_pixels->clear();
-        return false;
-      }
-      const V2D sample_px = px.cast<double>();
-      if (sample_pixels != nullptr) sample_pixels->push_back(sample_px);
+      if (!interpolateStoredVirtualImage(virtual_ref_img, px[0], px[1], value)) return false;
       patch[patch_size_total * pyramid_level + y * local_patch_size + x] = value;
     }
   }
@@ -1536,10 +1574,8 @@ void VIOManager::getWarpMatrixAffine(const PerCameraData &ref_ctx, const PerCame
 }
 
 void VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
-                            const int pyramid_level, const int halfpatch_size, float *patch,
-                            std::vector<V2D> *sample_pixels)
+                            const int pyramid_level, const int halfpatch_size, float *patch)
 {
-  if (sample_pixels != nullptr) sample_pixels->clear();
   const int patch_size = halfpatch_size * 2;
   const Matrix2f A_ref_cur = A_cur_ref.inverse().cast<float>();
   if (isnan(A_ref_cur(0, 0)))
@@ -1557,8 +1593,6 @@ void VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, c
       px_patch *= (1 << search_level);
       px_patch *= (1 << pyramid_level);
       const Vector2f px(A_ref_cur * px_patch + px_ref.cast<float>());
-      const V2D sample_px = px.cast<double>();
-      if (sample_pixels != nullptr) sample_pixels->push_back(sample_px);
       if (px[0] < 0 || px[1] < 0 || px[0] >= img_ref.cols - 1 || px[1] >= img_ref.rows - 1)
         patch_ptr[patch_size_total * pyramid_level + y * patch_size + x] = 0;
       else
@@ -1604,8 +1638,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
 {
   ctx.visual_submap->reset();
   ctx.total_points = 0;
-  ctx.current_range_img.release();
-  ctx.current_range_pose_valid = false;
+  if (ref_patch_dump_en && ctx.camera_id == kRefPatchDumpCameraId)
+  {
+    ref_patch_dump_range_img_.release();
+    ref_patch_dump_range_pose_valid_ = false;
+  }
   rejected_virtual_support_oob_ = 0;
   rejected_virtual_projection_invalid_ = 0;
   rejected_virtual_z_ = 0;
@@ -1667,9 +1704,9 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
 
   if (ref_patch_dump_en && ctx.camera_id == kRefPatchDumpCameraId)
   {
-    ctx.current_range_img = range_img;
-    ctx.current_range_T_f_w = ctx.new_frame->T_f_w_;
-    ctx.current_range_pose_valid = true;
+    ref_patch_dump_range_img_ = range_img;
+    ref_patch_dump_range_T_f_w_ = ctx.new_frame->T_f_w_;
+    ref_patch_dump_range_pose_valid_ = true;
   }
 
   vector<VOXEL_LOCATION> delete_keys;
@@ -1855,8 +1892,27 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       continue;
     }
 
+    bool range_discontinuous = false;
     const double point_range = pt_c_seed.norm();
-    if (hasRangeDiscontinuity(ctx, range_img, raw_px, point_range))
+    const int center_col = static_cast<int>(raw_px[0]);
+    const int center_row = static_cast<int>(raw_px[1]);
+    for (int dv = -patch_size_half; dv <= patch_size_half && !range_discontinuous; ++dv)
+    {
+      for (int du = -patch_size_half; du <= patch_size_half; ++du)
+      {
+        if (du == 0 && dv == 0) continue;
+        const int col = center_col + du;
+        const int row = center_row + dv;
+        if (col < 0 || col >= ctx.width || row < 0 || row >= ctx.height) continue;
+        const float range = range_img.at<float>(row, col);
+        if (range > 0.0f && std::fabs(point_range - range) > 0.5)
+        {
+          range_discontinuous = true;
+          break;
+        }
+      }
+    }
+    if (range_discontinuous)
     {
       ++virtual_candidate_range_reject_count_;
       recordRejectedPoint(raw_px, REJECT_DRAW_RANGE);
@@ -2839,7 +2895,8 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
     pending.px = raw_px;
     pending.bearing = ctx.cam->cam2world(raw_px);
     pending.patch = std::move(patch);
-    maybeInitializeRefPatchDumpProbe(ctx, pt_var.point_w, pt_var.normal, raw_px, pending.bearing, pending.patch.data());
+    if (ref_patch_dump_en)
+      maybeInitializeRefPatchDumpProbe(ctx, pt_var.point_w, pt_var.normal, raw_px, pending.bearing, pending.patch.data());
     pending.img = virtual_support_img;
     pending.T_f_w = ctx.new_frame->T_f_w_;
     pending.T_v_w = T_v_w;
