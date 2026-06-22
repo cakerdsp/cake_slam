@@ -919,29 +919,22 @@ bool VIOManager::extractRefPatchDumpRawRoi(const PerCameraData &ctx, const cv::M
   double max_u = raw_px[0];
   double min_v = raw_px[1];
   double max_v = raw_px[1];
-  int valid_boundary_points = 0;
-  auto include_virtual_boundary = [&](int x, int y) {
-    const V3D ray_v = virtual_support_ray_lut_[y * virtual_support_size + x].cast<double>();
-    const V3D ray_c = R_c_from_v * ray_v;
-    const V2D boundary_px = ctx.cam->world2cam(ray_c);
-    if (!boundary_px.array().isFinite().all() || boundary_px[0] < -raw_img.cols || boundary_px[0] > 2 * raw_img.cols ||
-        boundary_px[1] < -raw_img.rows || boundary_px[1] > 2 * raw_img.rows)
-      return;
-    min_u = std::min(min_u, boundary_px[0]);
-    max_u = std::max(max_u, boundary_px[0]);
-    min_v = std::min(min_v, boundary_px[1]);
-    max_v = std::max(max_v, boundary_px[1]);
-    ++valid_boundary_points;
-  };
-
-  for (int coordinate = 0; coordinate < virtual_support_size; ++coordinate)
+  int valid_projected_points = 0;
+  for (const V3F &ray_v_float : virtual_support_ray_lut_)
   {
-    include_virtual_boundary(coordinate, 0);
-    include_virtual_boundary(coordinate, virtual_support_size - 1);
-    include_virtual_boundary(0, coordinate);
-    include_virtual_boundary(virtual_support_size - 1, coordinate);
+    const V3D ray_c = R_c_from_v * ray_v_float.cast<double>();
+    const V2D projected_px = ctx.cam->world2cam(ray_c);
+    if (!projected_px.array().isFinite().all() ||
+        projected_px[0] < -raw_img.cols || projected_px[0] > 2 * raw_img.cols ||
+        projected_px[1] < -raw_img.rows || projected_px[1] > 2 * raw_img.rows)
+      continue;
+    min_u = std::min(min_u, projected_px[0]);
+    max_u = std::max(max_u, projected_px[0]);
+    min_v = std::min(min_v, projected_px[1]);
+    max_v = std::max(max_v, projected_px[1]);
+    ++valid_projected_points;
   }
-  if (valid_boundary_points < 4) return false;
+  if (valid_projected_points < 4) return false;
 
   const int requested_x0 = static_cast<int>(std::floor(min_u));
   const int requested_y0 = static_cast<int>(std::floor(min_v));
@@ -957,38 +950,16 @@ bool VIOManager::extractRefPatchDumpRawRoi(const PerCameraData &ctx, const cv::M
   const int source_y1 = std::min(raw_img.rows, requested_y1);
   if (source_x0 >= source_x1 || source_y0 >= source_y1) return false;
 
+  raw_roi = cv::Mat::zeros(native_height, native_width, CV_8UC1);
   const cv::Rect source_rect(source_x0, source_y0, source_x1 - source_x0, source_y1 - source_y0);
-  // Preserve the raw image geometry while matching the virtual output dimensions.
-  const double display_scale = std::min(static_cast<double>(virtual_support_size) / native_width,
-                                        static_cast<double>(virtual_support_size) / native_height);
-  const int display_width = std::max(1, static_cast<int>(std::lround(native_width * display_scale)));
-  const int display_height = std::max(1, static_cast<int>(std::lround(native_height * display_scale)));
-  raw_roi = cv::Mat::zeros(virtual_support_size, virtual_support_size, CV_8UC1);
-  const int display_x0 = (virtual_support_size - display_width) / 2;
-  const int display_y0 = (virtual_support_size - display_height) / 2;
-  const int destination_x0 = std::clamp(display_x0 + static_cast<int>(std::lround((source_x0 - requested_x0) * display_scale)),
-                                        0, virtual_support_size);
-  const int destination_y0 = std::clamp(display_y0 + static_cast<int>(std::lround((source_y0 - requested_y0) * display_scale)),
-                                        0, virtual_support_size);
-  const int destination_x1 = std::clamp(display_x0 + static_cast<int>(std::lround((source_x1 - requested_x0) * display_scale)),
-                                        0, virtual_support_size);
-  const int destination_y1 = std::clamp(display_y0 + static_cast<int>(std::lround((source_y1 - requested_y0) * display_scale)),
-                                        0, virtual_support_size);
-  if (destination_x0 >= destination_x1 || destination_y0 >= destination_y1) return false;
-  const double scale_x = static_cast<double>(destination_x1 - destination_x0) / (source_x1 - source_x0);
-  const double scale_y = static_cast<double>(destination_y1 - destination_y0) / (source_y1 - source_y0);
-  const double translation_x =
-      destination_x0 - scale_x * source_x0 + 0.5 * scale_x - 0.5;
-  const double translation_y =
-      destination_y0 - scale_y * source_y0 + 0.5 * scale_y - 0.5;
-  raw_to_roi << scale_x, 0.0, translation_x,
-                0.0, scale_y, translation_y,
+  const cv::Rect destination_rect(source_x0 - requested_x0, source_y0 - requested_y0,
+                                  source_rect.width, source_rect.height);
+  raw_img(source_rect).copyTo(raw_roi(destination_rect));
+
+  // Preserve native raw pixels; map debug markers by removing only the crop origin.
+  raw_to_roi << 1.0, 0.0, -static_cast<double>(requested_x0),
+                0.0, 1.0, -static_cast<double>(requested_y0),
                 0.0, 0.0, 1.0;
-  cv::Mat resized_source;
-  cv::resize(raw_img(source_rect), resized_source,
-             cv::Size(destination_x1 - destination_x0, destination_y1 - destination_y0), 0.0, 0.0, cv::INTER_LINEAR);
-  resized_source.copyTo(raw_roi(cv::Rect(destination_x0, destination_y0,
-                                         destination_x1 - destination_x0, destination_y1 - destination_y0)));
   return true;
 }
 
