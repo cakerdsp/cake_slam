@@ -1994,16 +1994,6 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     result.track.T_vcur_w_seed = composeVirtualPose(result.track.R_vcur_from_ccur_seed, ctx.new_frame->T_f_w_);
     result.track.cur_support.T_v_w_seed = result.track.T_vcur_w_seed;
 
-    const double build_start = omp_get_wtime();
-    const bool supports_ok = buildVirtualSupportPatch(ctx, img, candidate.current_raw_center_px, result.track.R_vcur_from_ccur_seed,
-                                                      result.track.R_ccur_from_vcur_seed, result.track.cur_support);
-    result.build_time = omp_get_wtime() - build_start;
-    if (!supports_ok)
-    {
-      result.rejection = VIRTUAL_REJECT_SUPPORT_BUILD;
-      continue;
-    }
-
     const SE3<double> T_vcur_vref = result.track.T_vcur_w_seed * ref_ftr->T_v_w_.inverse();
     const V3D point_vref = ref_ftr->T_v_w_ * pt->pos_;
     const double affine_start = omp_get_wtime();
@@ -2041,6 +2031,21 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     }
     result.warp_time = omp_get_wtime() - warp_start;
     if (result.rejection != 0) continue;
+
+    // The affine warp and warped reference depend only on geometry and the
+    // immutable reference support. Reject them before constructing the more
+    // expensive current virtual support.
+    const double build_start = omp_get_wtime();
+    const bool supports_ok = buildVirtualSupportPatch(ctx, img, candidate.current_raw_center_px,
+                                                      result.track.R_vcur_from_ccur_seed,
+                                                      result.track.R_ccur_from_vcur_seed,
+                                                      result.track.cur_support);
+    result.build_time = omp_get_wtime() - build_start;
+    if (!supports_ok)
+    {
+      result.rejection = VIRTUAL_REJECT_SUPPORT_BUILD;
+      continue;
+    }
 
     const double current_core_start = omp_get_wtime();
     vector<float> current_core(patch_size_total);
