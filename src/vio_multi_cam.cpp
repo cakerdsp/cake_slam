@@ -164,8 +164,7 @@ void VIOManager::initializeVIO()
     }
 
     const int max_scale = 1 << ((patch_pyrimid_level - 1) + virtual_max_search_level);
-    // Gradients sample one pyramid step beyond the outermost core-patch pixel.
-    virtual_support_radius = (patch_size_half + 1) * max_scale + virtual_patch_margin + 2;
+    virtual_support_radius = patch_size_half * max_scale + virtual_patch_margin + 2;
     virtual_support_size = 2 * virtual_support_radius + 1;
     virtual_support_ray_lut_.resize(virtual_support_size * virtual_support_size);
     for (int y = 0; y < virtual_support_size; ++y)
