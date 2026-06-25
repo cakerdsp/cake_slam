@@ -164,7 +164,8 @@ void VIOManager::initializeVIO()
     }
 
     const int max_scale = 1 << ((patch_pyrimid_level - 1) + virtual_max_search_level);
-    virtual_support_radius = patch_size_half * max_scale + virtual_patch_margin + 2;
+    // Gradients sample one pyramid step beyond the outermost core-patch pixel.
+    virtual_support_radius = (patch_size_half + 1) * max_scale + virtual_patch_margin + 2;
     virtual_support_size = 2 * virtual_support_radius + 1;
     virtual_support_ray_lut_.resize(virtual_support_size * virtual_support_size);
     for (int y = 0; y < virtual_support_size; ++y)
@@ -2139,8 +2140,10 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
 
     ++virtual_valid_track_count_;
     ctx.visual_submap->voxel_points.push_back(candidates[candidate_index].point);
+    ctx.visual_submap->reference_features.push_back(candidates[candidate_index].reference);
     ctx.visual_submap->propa_errors.push_back(result.error);
     ctx.visual_submap->search_levels.push_back(result.track.search_level);
+    ctx.visual_submap->warp_affines.push_back(result.track.A_cur_ref);
     ctx.visual_submap->errors.push_back(result.error);
     ctx.visual_submap->warp_patch.push_back(std::move(result.warped_reference));
     ctx.visual_submap->inv_expo_list.push_back(result.inverse_reference_exposure);
@@ -2622,8 +2625,10 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       if (error > outlier_threshold * patch_size_total) continue;
 
       ctx.visual_submap->voxel_points.push_back(pt);
+      ctx.visual_submap->reference_features.push_back(ref_ftr);
       ctx.visual_submap->propa_errors.push_back(error);
       ctx.visual_submap->search_levels.push_back(search_level);
+      ctx.visual_submap->warp_affines.push_back(A_cur_ref_zero);
       ctx.visual_submap->errors.push_back(error);
       ctx.visual_submap->warp_patch.push_back(patch_wrap);
       ctx.visual_submap->inv_expo_list.push_back(ref_ftr->inv_expo_time_);
@@ -2640,6 +2645,91 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
   printf("[ VIO ] camera_id=%d retrieve %d points from visual sparse map\n", ctx.camera_id, ctx.total_points);
 }
 
+bool VIOManager::interpolateReferenceFeature(const Feature &reference, const V2D &px, float &value) const
+{
+  if (!px.array().isFinite().all() || reference.img_.empty()) return false;
+
+  if (reference.virtual_patch_valid_)
+    return interpolateStoredVirtualImage(reference.img_, static_cast<float>(px[0]), static_cast<float>(px[1]), value);
+
+  if (reference.img_.type() != CV_8UC1 || px[0] < 0.0 || px[1] < 0.0 ||
+      px[0] >= reference.img_.cols - 1 || px[1] >= reference.img_.rows - 1)
+    return false;
+
+  value = static_cast<float>(vk::interpolateMat_8u(reference.img_, px[0], px[1]));
+  return std::isfinite(value);
+}
+
+bool VIOManager::computeWarpedReferenceGradient(const Feature &reference, const Matrix2d &A_cur_ref,
+                                                int search_level, int level, int patch_index, V2D &gradient) const
+{
+  if (patch_index < 0 || patch_index >= patch_size_total || search_level < 0 || level < 0 ||
+      !A_cur_ref.array().isFinite().all() || std::fabs(A_cur_ref.determinant()) <= 1e-9)
+    return false;
+
+  const int pyramid_level = level + search_level;
+  if (pyramid_level >= 30) return false;
+  const double scale = static_cast<double>(1 << pyramid_level);
+  const Matrix2d A_ref_cur = A_cur_ref.inverse();
+  if (!A_ref_cur.array().isFinite().all()) return false;
+
+  const V2D center = reference.virtual_patch_valid_
+                         ? V2D(virtual_support_radius, virtual_support_radius)
+                         : reference.px_;
+  const V2D patch_offset = core_patch_offsets_[patch_index].cast<double>() * scale;
+  const V2D reference_px = center + A_ref_cur * patch_offset;
+  const V2D reference_du = A_ref_cur * V2D(scale, 0.0);
+  const V2D reference_dv = A_ref_cur * V2D(0.0, scale);
+
+  float left = 0.0f, right = 0.0f, up = 0.0f, down = 0.0f;
+  if (!interpolateReferenceFeature(reference, reference_px - reference_du, left) ||
+      !interpolateReferenceFeature(reference, reference_px + reference_du, right) ||
+      !interpolateReferenceFeature(reference, reference_px - reference_dv, up) ||
+      !interpolateReferenceFeature(reference, reference_px + reference_dv, down))
+    return false;
+
+  gradient << 0.5 * (right - left) / scale, 0.5 * (down - up) / scale;
+  return gradient.array().isFinite().all();
+}
+
+void VIOManager::buildFixedTemplateGradientCache(int level)
+{
+  for (PerCameraData &ctx : cameras_)
+  {
+    FixedTemplateGradientCache &cache = ctx.fixed_template_cache;
+    cache.reset(level, ctx.total_points, patch_size_total);
+    if (ctx.total_points == 0 || ctx.visual_submap == nullptr) continue;
+
+    const size_t point_count = static_cast<size_t>(ctx.total_points);
+    if (ctx.visual_submap->reference_features.size() != point_count ||
+        ctx.visual_submap->warp_affines.size() != point_count ||
+        ctx.visual_submap->search_levels.size() != point_count ||
+        ctx.visual_submap->inv_expo_list.size() != point_count)
+      throw std::runtime_error("fixed-template cache input vectors are not aligned for camera_id=" +
+                               std::to_string(ctx.camera_id));
+
+    for (int point_index = 0; point_index < ctx.total_points; ++point_index)
+    {
+      Feature *reference = ctx.visual_submap->reference_features[point_index];
+      if (reference == nullptr) continue;
+      const double reference_exposure = ctx.visual_submap->inv_expo_list[point_index];
+      if (!std::isfinite(reference_exposure)) continue;
+
+      for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
+      {
+        V2D gradient;
+        if (!computeWarpedReferenceGradient(*reference, ctx.visual_submap->warp_affines[point_index],
+                                            ctx.visual_submap->search_levels[point_index], level,
+                                            patch_index, gradient))
+          continue;
+        const int row = point_index * patch_size_total + patch_index;
+        cache.photometric_gradients.row(row) = (reference_exposure * gradient).transpose();
+        cache.valid[row] = 1;
+      }
+    }
+  }
+}
+
 void VIOManager::computeJacobianAndUpdateEKF()
 {
   compute_jacobian_time = update_ekf_time = 0.0;
@@ -2651,6 +2741,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
   for (int level = patch_pyrimid_level - 1; level >= 0; --level)
   {
     StatesGroup old_state = *state;
+    if (inverse_composition_en) buildFixedTemplateGradientCache(level);
     double last_error = std::numeric_limits<double>::max();
     for (int iteration = 0; iteration < max_iterations; ++iteration)
     {
@@ -2699,13 +2790,27 @@ void VIOManager::computeJacobianAndUpdateEKF()
             for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
             {
               const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
+              const int cache_row = point_index * patch_size_total + patch_index;
               float current_value = 0.0f;
-              V2D image_gradient;
-              if (!sampleVirtualValueAndGradient(track.cur_support, center + offset.cast<double>(), scale,
-                                                 current_value, image_gradient)) continue;
               MD(1, 2) Jimg;
-              Jimg << image_gradient[0], image_gradient[1];
-              Jimg *= current_exposure * inv_scale;
+              if (inverse_composition_en)
+              {
+                if (cache_row >= static_cast<int>(ctx.fixed_template_cache.valid.size()) ||
+                    !ctx.fixed_template_cache.valid[cache_row] ||
+                    !interpolateVirtualFloat(track.cur_support.values, track.cur_support.valid_mask,
+                                             center[0] + offset[0], center[1] + offset[1], current_value))
+                  continue;
+                Jimg = ctx.fixed_template_cache.photometric_gradients.row(cache_row);
+              }
+              else
+              {
+                V2D image_gradient;
+                if (!sampleVirtualValueAndGradient(track.cur_support, center + offset.cast<double>(), scale,
+                                                   current_value, image_gradient))
+                  continue;
+                Jimg << image_gradient[0], image_gradient[1];
+                Jimg *= current_exposure * inv_scale;
+              }
               const MD(1, 3) Jimg_Jpi_R = Jimg * Jdpi * track.R_vcur_from_ccur_seed;
               const MD(1, 3) Jdphi = Jimg_Jpi_R * point_c_hat;
               const MD(1, 3) Jdp = -Jimg_Jpi_R;
@@ -2747,26 +2852,37 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   (v_i + x * scale - patch_size_half * scale) * ctx.width + u_i - patch_size_half * scale;
               for (int y = 0; y < patch_size; ++y, img_ptr += scale)
               {
-                const double grad_u = 0.5 *
-                    ((w_tl * img_ptr[scale] + w_tr * img_ptr[2 * scale] + w_bl * img_ptr[ctx.width * scale + scale] +
-                      w_br * img_ptr[ctx.width * scale + 2 * scale]) -
-                     (w_tl * img_ptr[-scale] + w_tr * img_ptr[0] + w_bl * img_ptr[ctx.width * scale - scale] +
-                      w_br * img_ptr[ctx.width * scale]));
-                const double grad_v = 0.5 *
-                    ((w_tl * img_ptr[ctx.width * scale] + w_tr * img_ptr[ctx.width * scale + scale] +
-                      w_bl * img_ptr[2 * ctx.width * scale] + w_br * img_ptr[2 * ctx.width * scale + scale]) -
-                     (w_tl * img_ptr[-ctx.width * scale] + w_tr * img_ptr[-ctx.width * scale + scale] +
-                      w_bl * img_ptr[0] + w_br * img_ptr[scale]));
+                const int patch_index = x * patch_size + y;
+                const int cache_row = point_index * patch_size_total + patch_index;
+                const double current_value = w_tl * img_ptr[0] + w_tr * img_ptr[scale] +
+                                             w_bl * img_ptr[ctx.width * scale] + w_br * img_ptr[ctx.width * scale + scale];
                 MD(1, 2) Jimg;
-                Jimg << grad_u, grad_v;
-                Jimg *= current_exposure * inv_scale;
+                if (inverse_composition_en)
+                {
+                  if (cache_row >= static_cast<int>(ctx.fixed_template_cache.valid.size()) ||
+                      !ctx.fixed_template_cache.valid[cache_row])
+                    continue;
+                  Jimg = ctx.fixed_template_cache.photometric_gradients.row(cache_row);
+                }
+                else
+                {
+                  const double grad_u = 0.5 *
+                      ((w_tl * img_ptr[scale] + w_tr * img_ptr[2 * scale] + w_bl * img_ptr[ctx.width * scale + scale] +
+                        w_br * img_ptr[ctx.width * scale + 2 * scale]) -
+                       (w_tl * img_ptr[-scale] + w_tr * img_ptr[0] + w_bl * img_ptr[ctx.width * scale - scale] +
+                        w_br * img_ptr[ctx.width * scale]));
+                  const double grad_v = 0.5 *
+                      ((w_tl * img_ptr[ctx.width * scale] + w_tr * img_ptr[ctx.width * scale + scale] +
+                        w_bl * img_ptr[2 * ctx.width * scale] + w_br * img_ptr[2 * ctx.width * scale + scale]) -
+                       (w_tl * img_ptr[-ctx.width * scale] + w_tr * img_ptr[-ctx.width * scale + scale] +
+                        w_bl * img_ptr[0] + w_br * img_ptr[scale]));
+                  Jimg << grad_u, grad_v;
+                  Jimg *= current_exposure * inv_scale;
+                }
                 const MD(1, 3) Jdphi = Jimg * Jdpi * point_hat;
                 const MD(1, 3) Jdp = -Jimg * Jdpi;
                 const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
                 const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
-                const double current_value = w_tl * img_ptr[0] + w_tr * img_ptr[scale] +
-                                             w_bl * img_ptr[ctx.width * scale] + w_br * img_ptr[ctx.width * scale + scale];
-                const int patch_index = x * patch_size + y;
                 const double residual = current_exposure * current_value -
                                         reference_exposure * reference_patch[patch_size_total * level + patch_index];
                 Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);

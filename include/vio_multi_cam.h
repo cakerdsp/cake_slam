@@ -74,7 +74,9 @@ struct SubSparseMap
   vector<float> errors;
   vector<vector<float>> warp_patch;
   vector<int> search_levels;
+  vector<Matrix2d, Eigen::aligned_allocator<Matrix2d>> warp_affines;
   vector<VisualPoint *> voxel_points;
+  vector<Feature *> reference_features;
   vector<double> inv_expo_list;
   vector<pointWithVar> add_from_voxel_map;
   vector<VirtualTrackPatch> virtual_track_patches;
@@ -85,7 +87,9 @@ struct SubSparseMap
     errors.reserve(SIZE_LARGE);
     warp_patch.reserve(SIZE_LARGE);
     search_levels.reserve(SIZE_LARGE);
+    warp_affines.reserve(SIZE_LARGE);
     voxel_points.reserve(SIZE_LARGE);
+    reference_features.reserve(SIZE_LARGE);
     inv_expo_list.reserve(SIZE_LARGE);
     add_from_voxel_map.reserve(SIZE_SMALL);
     virtual_track_patches.reserve(SIZE_LARGE);
@@ -97,7 +101,9 @@ struct SubSparseMap
     errors.clear();
     warp_patch.clear();
     search_levels.clear();
+    warp_affines.clear();
     voxel_points.clear();
+    reference_features.clear();
     inv_expo_list.clear();
     add_from_voxel_map.clear();
     virtual_track_patches.clear();
@@ -180,6 +186,25 @@ struct PendingNewPointObservation
   double inv_expo_time = 1.0;
 };
 
+struct FixedTemplateGradientCache
+{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+  Eigen::Matrix<double, Eigen::Dynamic, 2> photometric_gradients;
+  std::vector<uint8_t> valid;
+  int level = -1;
+  int point_count = 0;
+
+  void reset(int new_level, int new_point_count, int patch_size_total)
+  {
+    level = new_level;
+    point_count = new_point_count;
+    const int row_count = new_point_count * patch_size_total;
+    photometric_gradients = Eigen::Matrix<double, Eigen::Dynamic, 2>::Zero(row_count, 2);
+    valid.assign(row_count, 0);
+  }
+};
+
 struct PerCameraData
 {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -236,6 +261,7 @@ struct PerCameraData
   cv::Mat img_rgb;
   cv::Mat img_test;
   std::vector<std::pair<cv::Point2f, int>> rejected_visual_points_for_draw;
+  FixedTemplateGradientCache fixed_template_cache;
 };
 
 class VIOManager
@@ -424,6 +450,10 @@ public:
   void computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J);
   void computeVirtualProjectionJacobian(const V3D &p_v, MD(2, 3) &J) const;
   void computeJacobianAndUpdateEKF();
+  bool interpolateReferenceFeature(const Feature &reference, const V2D &px, float &value) const;
+  bool computeWarpedReferenceGradient(const Feature &reference, const Matrix2d &A_cur_ref,
+                                      int search_level, int level, int patch_index, V2D &gradient) const;
+  void buildFixedTemplateGradientCache(int level);
   void resetGrid(PerCameraData &ctx);
   void updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img);
   void getWarpMatrixAffine(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const Vector2d &px_ref,
