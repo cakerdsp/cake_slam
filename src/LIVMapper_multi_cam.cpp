@@ -223,14 +223,17 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
     const std::string namespace_key = camera_cfg_ns + ".camera_ns";
     const std::string rotation_key = camera_cfg_ns + ".Rcl";
     const std::string translation_key = camera_cfg_ns + ".Pcl";
+    const std::string online_extrinsic_key = camera_cfg_ns + ".online_extrinsic_en";
     try_declare.template operator()<std::string>(topic_key, "");
     try_declare.template operator()<std::string>(namespace_key, "");
     try_declare.template operator()<vector<double>>(rotation_key, vector<double>{});
     try_declare.template operator()<vector<double>>(translation_key, vector<double>{});
+    try_declare.template operator()<bool>(online_extrinsic_key, true);
     node->get_parameter(topic_key, camera_configs[camera_id].img_topic);
     node->get_parameter(namespace_key, camera_configs[camera_id].camera_namespace);
     node->get_parameter(rotation_key, camera_configs[camera_id].Rcl);
     node->get_parameter(translation_key, camera_configs[camera_id].Pcl);
+    node->get_parameter(online_extrinsic_key, camera_configs[camera_id].online_extrinsic_en);
     if (camera_configs[camera_id].img_topic.empty())
       throw std::runtime_error("missing required parameter " + topic_key);
     if (camera_configs[camera_id].camera_namespace.empty())
@@ -341,6 +344,12 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   if (extrinR.size() != 9) throw std::runtime_error("extrin_calib.extrinsic_R must contain exactly 9 values");
   if (!online_extrinsic_camera_mask.empty() && static_cast<int>(online_extrinsic_camera_mask.size()) != num_cameras)
     throw std::runtime_error("vio.online_extrinsic_camera_mask must be empty or have common.num_cameras entries");
+  if (online_extrinsic_camera_mask.empty())
+  {
+    online_extrinsic_camera_mask.resize(num_cameras, 1);
+    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+      online_extrinsic_camera_mask[camera_id] = camera_configs[camera_id].online_extrinsic_en ? 1 : 0;
+  }
   if (online_extrinsic_start_frame < 0) throw std::runtime_error("vio.online_extrinsic_start_frame must be non-negative");
   if (online_extrinsic_min_tracks < 0) throw std::runtime_error("vio.online_extrinsic_min_tracks must be non-negative");
   if (online_extrinsic_prior_rot_std_deg <= 0.0 || online_extrinsic_prior_trans_std_m <= 0.0)

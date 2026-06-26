@@ -22,6 +22,7 @@
               0.0,  0.0, -1.0,
               1.0,  0.0,  0.0]
         Pcl: [0.16123, -0.16711, -0.24221]
+        online_extrinsic_en: true
 
       # # camera1: right 8828
       # camera1:
@@ -40,6 +41,7 @@
               0.0, 0.0, -1.0,
               0.0, 1.0,  0.0]
         Pcl: [-0.00109, -0.16718, -0.16004]
+        online_extrinsic_en: true
 
       # camera3: fourth / mid-right 8827
       camera2:
@@ -49,6 +51,7 @@
                0.0,  0.0, -1.0,
                0.0, -1.0,  0.0]
         Pcl: [0.00021, -0.16674, -0.16013]
+        online_extrinsic_en: true
 
       # camera4: fifth / back-left 6450
       camera4:
@@ -58,6 +61,7 @@
                0.0, 0.0, -1.0,
               -1.0, 0.0,  0.0]
         Pcl: [-0.16031, -0.16715, -0.24175]
+        online_extrinsic_en: true
 
       # camera5: sixth / back-right 6548
       camera5:
@@ -67,6 +71,7 @@
                0.0, 0.0, -1.0,
               -1.0, 0.0,  0.0]
         Pcl: [0.16037, -0.16689, -0.24313]
+        online_extrinsic_en: true
 
       # camera6: sky-pointing head 3199. Verify this official provisional extrinsic before use.
       camera6:
@@ -76,6 +81,7 @@
               -1.0,  0.0,  0.0,
                0.0,  0.0, -1.0]
         Pcl: [0.00127, 0.07410, 0.65608]
+        online_extrinsic_en: true
 
     extrin_calib:
       extrinsic_T: [0.27255, -0.00053, 0.17954]
@@ -130,7 +136,8 @@
       online_extrinsic_rot_en: true
       online_extrinsic_trans_en: true
       online_extrinsic_prior_factor_en: false
-      # Omit/empty mask means all cameras. Otherwise provide common.num_cameras entries, e.g. [1, 0].
+      # Per-camera cameras.camera{i}.online_extrinsic_en is preferred.
+      # Optional legacy override: provide common.num_cameras entries, e.g. [1, 0].
       # online_extrinsic_camera_mask: []
       online_extrinsic_start_frame: 100
       online_extrinsic_min_tracks: 20

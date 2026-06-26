@@ -19,6 +19,7 @@
               -0.02115, -0.01878, -0.99960,
                0.69585,  0.71763, -0.02821]
         Pcl: [-0.01710, 0.11155, -0.01546]
+        online_extrinsic_en: true
       camera1:
         img_topic: "/fisheye/right/image_raw"
         camera_ns: "camera1"
@@ -26,6 +27,7 @@
               -0.0343341177, -0.0335986769, -0.9988454714,
                0.7136620048, -0.7004856166, -0.0009589922]
         Pcl: [-0.0189238408, 0.1110594056, -0.0498532729]
+        online_extrinsic_en: true
 
     extrin_calib:
       # LiDAR to IMU: P_imu = R_imu_lidar * P_lidar + t_imu_lidar
@@ -90,7 +92,8 @@
       online_extrinsic_rot_en: true
       online_extrinsic_trans_en: true
       online_extrinsic_prior_factor_en: false
-      # Omit/empty mask means all cameras. Otherwise provide common.num_cameras entries, e.g. [1, 0].
+      # Per-camera cameras.camera{i}.online_extrinsic_en is preferred.
+      # Optional legacy override: provide common.num_cameras entries, e.g. [1, 0].
       # online_extrinsic_camera_mask: []
       online_extrinsic_start_frame: 100
       online_extrinsic_min_tracks: 20

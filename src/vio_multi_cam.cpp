@@ -184,7 +184,8 @@ void VIOManager::applyOnlineExtrinsicPriors(Eigen::MatrixXd &hessian, Eigen::Vec
     if (allow_rotation)
     {
       const int ridx = state->extrinsicRotIndex(camera_id);
-      const V3D rot_error = Log(state->Rcl_prior[camera_id].transpose() * state->Rcl[camera_id]);
+      const M3D dR_cl = state->Rcl_prior[camera_id].transpose() * state->Rcl[camera_id];
+      const V3D rot_error = Log(dR_cl);
       hessian.block<3, 3>(ridx, ridx).diagonal().array() += rot_info;
       gradient.segment<3>(ridx) += rot_info * rot_error;
     }
@@ -3342,7 +3343,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
     for (const PerCameraData &ctx : cameras_)
     {
       if (!isOnlineExtrinsicEnabledForCamera(ctx.camera_id)) continue;
-      const V3D dR_deg = Log(state->Rcl_prior[ctx.camera_id].transpose() * state->Rcl[ctx.camera_id]) * kRadiansToDegrees;
+      const M3D dR_cl = state->Rcl_prior[ctx.camera_id].transpose() * state->Rcl[ctx.camera_id];
+      const V3D dR_deg = Log(dR_cl) * kRadiansToDegrees;
       const V3D dP = state->Pcl[ctx.camera_id] - state->Pcl_prior[ctx.camera_id];
       printf("[ VIO Extrinsic ] frame=%d camera_id=%d dR_deg=(%.6f, %.6f, %.6f) dP_m=(%.6f, %.6f, %.6f) Pcl=(%.6f, %.6f, %.6f)\n",
              frame_count, ctx.camera_id, dR_deg[0], dR_deg[1], dR_deg[2], dP[0], dP[1], dP[2],

@@ -36,6 +36,7 @@ struct CameraInputConfig
   std::string camera_namespace;
   std::vector<double> Rcl;
   std::vector<double> Pcl;
+  bool online_extrinsic_en = true;
 };
 
 struct PendingImageGroup

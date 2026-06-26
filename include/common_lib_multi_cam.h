@@ -313,7 +313,8 @@ struct StatesGroup
     {
       const int ridx = extrinsicRotIndex(camera_id);
       const int tidx = extrinsicTransIndex(camera_id);
-      a.segment<3>(ridx) = Log(b.Rcl[camera_id].transpose() * this->Rcl[camera_id]);
+      const M3D dR_cl = b.Rcl[camera_id].transpose() * this->Rcl[camera_id];
+      a.segment<3>(ridx) = Log(dR_cl);
       a.segment<3>(tidx) = this->Pcl[camera_id] - b.Pcl[camera_id];
     }
     return a;
