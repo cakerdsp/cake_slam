@@ -32,7 +32,7 @@ using namespace Sophus;
 
 #define print_line std::cout << __FILE__ << ", " << __LINE__ << std::endl;
 #define G_m_s2 (9.81)   // Gravaty const in GuangDong/China
-#define BASE_STATE_DIM (18)  // State dimension excluding per-camera exposure states.
+#define BASE_STATE_DIM (18)  // State dimension excluding per-camera exposure/extrinsic states.
 #define INIT_COV (0.01)
 #define SIZE_LARGE (500)
 #define SIZE_SMALL (100)
@@ -142,6 +142,8 @@ typedef struct pointWithVar
 
 struct StatesGroup
 {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
   explicit StatesGroup(int camera_count = 1)
   {
     this->rot_end = M3D::Identity();
@@ -163,6 +165,10 @@ struct StatesGroup
     this->gravity = b.gravity;
     this->num_cameras = b.num_cameras;
     this->inv_expo_time = b.inv_expo_time;
+    this->Rcl = b.Rcl;
+    this->Pcl = b.Pcl;
+    this->Rcl_prior = b.Rcl_prior;
+    this->Pcl_prior = b.Pcl_prior;
     this->cov = b.cov;
   };
 
@@ -176,25 +182,67 @@ struct StatesGroup
     this->gravity = b.gravity;
     this->num_cameras = b.num_cameras;
     this->inv_expo_time = b.inv_expo_time;
+    this->Rcl = b.Rcl;
+    this->Pcl = b.Pcl;
+    this->Rcl_prior = b.Rcl_prior;
+    this->Pcl_prior = b.Pcl_prior;
     this->cov = b.cov;
     return *this;
   };
 
-  int stateDim() const { return BASE_STATE_DIM + num_cameras; }
+  int stateDim() const { return BASE_STATE_DIM + num_cameras + 6 * num_cameras; }
   int exposureIndex(int camera_id) const { return 6 + camera_id; }
   int velocityIndex() const { return 6 + num_cameras; }
   int gyroBiasIndex() const { return 9 + num_cameras; }
   int accelBiasIndex() const { return 12 + num_cameras; }
   int gravityIndex() const { return 15 + num_cameras; }
+  int extrinsicBaseIndex() const { return BASE_STATE_DIM + num_cameras; }
+  int extrinsicIndex(int camera_id) const { return extrinsicBaseIndex() + 6 * camera_id; }
+  int extrinsicRotIndex(int camera_id) const { return extrinsicIndex(camera_id); }
+  int extrinsicTransIndex(int camera_id) const { return extrinsicIndex(camera_id) + 3; }
 
   void configureCameras(int camera_count, double inv_expo_init = 1.0)
   {
     if (camera_count < 1) throw std::invalid_argument("StatesGroup requires at least one camera");
     num_cameras = camera_count;
     inv_expo_time = Eigen::VectorXd::Constant(num_cameras, inv_expo_init);
+    Rcl.assign(num_cameras, M3D::Identity());
+    Pcl.assign(num_cameras, V3D::Zero());
+    Rcl_prior = Rcl;
+    Pcl_prior = Pcl;
     cov = Eigen::MatrixXd::Identity(stateDim(), stateDim()) * INIT_COV;
     cov.block(6, 6, num_cameras, num_cameras) = Eigen::MatrixXd::Identity(num_cameras, num_cameras) * 0.00001;
     cov.block(gyroBiasIndex(), gyroBiasIndex(), 9, 9) = Eigen::MatrixXd::Identity(9, 9) * 0.00001;
+    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+    {
+      cov.block<3, 3>(extrinsicRotIndex(camera_id), extrinsicRotIndex(camera_id)).setIdentity();
+      cov.block<3, 3>(extrinsicRotIndex(camera_id), extrinsicRotIndex(camera_id)) *= 1.0e-6;
+      cov.block<3, 3>(extrinsicTransIndex(camera_id), extrinsicTransIndex(camera_id)).setIdentity();
+      cov.block<3, 3>(extrinsicTransIndex(camera_id), extrinsicTransIndex(camera_id)) *= 1.0e-6;
+    }
+  }
+
+  void setCameraExtrinsic(int camera_id, const M3D &R_cl, const V3D &P_cl, bool reset_prior = true)
+  {
+    if (camera_id < 0 || camera_id >= num_cameras) throw std::out_of_range("invalid camera extrinsic index");
+    Rcl[camera_id] = R_cl;
+    Pcl[camera_id] = P_cl;
+    if (reset_prior)
+    {
+      Rcl_prior[camera_id] = R_cl;
+      Pcl_prior[camera_id] = P_cl;
+    }
+  }
+
+  void setCameraExtrinsicCovariance(int camera_id, double rot_var, double trans_var)
+  {
+    if (camera_id < 0 || camera_id >= num_cameras) throw std::out_of_range("invalid camera extrinsic covariance index");
+    if (cov.rows() != stateDim() || cov.cols() != stateDim())
+      cov = Eigen::MatrixXd::Identity(stateDim(), stateDim()) * INIT_COV;
+    cov.block<3, 3>(extrinsicRotIndex(camera_id), extrinsicRotIndex(camera_id)).setIdentity();
+    cov.block<3, 3>(extrinsicRotIndex(camera_id), extrinsicRotIndex(camera_id)) *= rot_var;
+    cov.block<3, 3>(extrinsicTransIndex(camera_id), extrinsicTransIndex(camera_id)).setIdentity();
+    cov.block<3, 3>(extrinsicTransIndex(camera_id), extrinsicTransIndex(camera_id)) *= trans_var;
   }
 
   void validateIncrement(const Eigen::VectorXd &state_add) const
@@ -213,6 +261,17 @@ struct StatesGroup
     a.bias_g = this->bias_g + state_add.segment<3>(gyroBiasIndex());
     a.bias_a = this->bias_a + state_add.segment<3>(accelBiasIndex());
     a.gravity = this->gravity + state_add.segment<3>(gravityIndex());
+    a.Rcl = this->Rcl;
+    a.Pcl = this->Pcl;
+    a.Rcl_prior = this->Rcl_prior;
+    a.Pcl_prior = this->Pcl_prior;
+    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+    {
+      const int ridx = extrinsicRotIndex(camera_id);
+      const int tidx = extrinsicTransIndex(camera_id);
+      a.Rcl[camera_id] = this->Rcl[camera_id] * Exp(state_add(ridx, 0), state_add(ridx + 1, 0), state_add(ridx + 2, 0));
+      a.Pcl[camera_id] = this->Pcl[camera_id] + state_add.segment<3>(tidx);
+    }
 
     a.cov = this->cov;
     return a;
@@ -228,6 +287,13 @@ struct StatesGroup
     this->bias_g += state_add.segment<3>(gyroBiasIndex());
     this->bias_a += state_add.segment<3>(accelBiasIndex());
     this->gravity += state_add.segment<3>(gravityIndex());
+    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+    {
+      const int ridx = extrinsicRotIndex(camera_id);
+      const int tidx = extrinsicTransIndex(camera_id);
+      this->Rcl[camera_id] = this->Rcl[camera_id] * Exp(state_add(ridx, 0), state_add(ridx + 1, 0), state_add(ridx + 2, 0));
+      this->Pcl[camera_id] += state_add.segment<3>(tidx);
+    }
     return *this;
   };
 
@@ -243,6 +309,13 @@ struct StatesGroup
     a.segment<3>(gyroBiasIndex()) = this->bias_g - b.bias_g;
     a.segment<3>(accelBiasIndex()) = this->bias_a - b.bias_a;
     a.segment<3>(gravityIndex()) = this->gravity - b.gravity;
+    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+    {
+      const int ridx = extrinsicRotIndex(camera_id);
+      const int tidx = extrinsicTransIndex(camera_id);
+      a.segment<3>(ridx) = Log(b.Rcl[camera_id].transpose() * this->Rcl[camera_id]);
+      a.segment<3>(tidx) = this->Pcl[camera_id] - b.Pcl[camera_id];
+    }
     return a;
   };
 
@@ -258,10 +331,14 @@ struct StatesGroup
   V3D vel_end;                              // the estimated velocity at the end lidar point (world frame)
   int num_cameras = 1;
   Eigen::VectorXd inv_expo_time;             // Per-camera estimated inverse exposure time.
+  std::vector<M3D> Rcl;                      // Per-camera camera<-lidar rotation.
+  std::vector<V3D> Pcl;                      // Per-camera camera<-lidar translation.
+  std::vector<M3D> Rcl_prior;                // Initial/prior camera<-lidar rotation.
+  std::vector<V3D> Pcl_prior;                // Initial/prior camera<-lidar translation.
   V3D bias_g;                               // gyroscope bias
   V3D bias_a;                               // accelerator bias
   V3D gravity;                              // the estimated gravity acceleration
-  Eigen::MatrixXd cov;                       // Dynamic covariance, size 18 + num_cameras.
+  Eigen::MatrixXd cov;                       // Dynamic covariance.
 };
 
 template <typename T>

@@ -135,6 +135,106 @@ void VIOManager::setImuToLidarExtrinsic(const V3D &transl, const M3D &rot)
   Rli = rot.transpose();
 }
 
+void VIOManager::updateCameraExtrinsicDerived(PerCameraData &ctx)
+{
+  ctx.Rci = ctx.Rcl * Rli;
+  ctx.Pci = ctx.Rcl * Pli + ctx.Pcl;
+  ctx.Jdphi_dR = ctx.Rci;
+  const V3D Pic = -ctx.Rci.transpose() * ctx.Pci;
+  M3D pic_hat;
+  pic_hat << SKEW_SYM_MATRX(Pic);
+  ctx.Jdp_dR = -ctx.Rci * pic_hat;
+}
+
+void VIOManager::syncCameraExtrinsicsFromState(const StatesGroup &state_value)
+{
+  if (state_value.num_cameras != numCameras())
+    throw std::runtime_error("state/camera count mismatch while syncing camera extrinsics");
+  for (PerCameraData &ctx : cameras_)
+  {
+    if (ctx.camera_id < 0 || ctx.camera_id >= state_value.num_cameras) continue;
+    ctx.Rcl = state_value.Rcl[ctx.camera_id];
+    ctx.Pcl = state_value.Pcl[ctx.camera_id];
+    updateCameraExtrinsicDerived(ctx);
+  }
+}
+
+bool VIOManager::isOnlineExtrinsicEnabledForCamera(int camera_id) const
+{
+  if (!online_extrinsic_en || camera_id < 0 || camera_id >= numCameras()) return false;
+  if (online_extrinsic_camera_mask.empty()) return true;
+  if (camera_id >= static_cast<int>(online_extrinsic_camera_mask.size())) return false;
+  return online_extrinsic_camera_mask[camera_id] != 0;
+}
+
+void VIOManager::applyOnlineExtrinsicPriors(Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient,
+                                            bool allow_rotation, bool allow_translation) const
+{
+  if (state == nullptr || !online_extrinsic_en) return;
+  constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+  const double rot_std = online_extrinsic_prior_rot_std_deg * kDegToRad;
+  const double trans_std = online_extrinsic_prior_trans_std_m;
+  if (rot_std <= 0.0 || trans_std <= 0.0) return;
+  const double rot_info = img_point_cov / (rot_std * rot_std);
+  const double trans_info = img_point_cov / (trans_std * trans_std);
+
+  for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+  {
+    if (!isOnlineExtrinsicEnabledForCamera(camera_id)) continue;
+    if (allow_rotation)
+    {
+      const int ridx = state->extrinsicRotIndex(camera_id);
+      const V3D rot_error = Log(state->Rcl_prior[camera_id].transpose() * state->Rcl[camera_id]);
+      hessian.block<3, 3>(ridx, ridx).diagonal().array() += rot_info;
+      gradient.segment<3>(ridx) += rot_info * rot_error;
+    }
+    if (allow_translation)
+    {
+      const int tidx = state->extrinsicTransIndex(camera_id);
+      const V3D trans_error = state->Pcl[camera_id] - state->Pcl_prior[camera_id];
+      hessian.block<3, 3>(tidx, tidx).diagonal().array() += trans_info;
+      gradient.segment<3>(tidx) += trans_info * trans_error;
+    }
+  }
+}
+
+void VIOManager::limitOnlineExtrinsicUpdate(Eigen::VectorXd &solution, bool allow_rotation, bool allow_translation) const
+{
+  if (state == nullptr) return;
+  constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+  const double max_rot = std::max(0.0, online_extrinsic_max_rot_update_deg) * kDegToRad;
+  const double max_trans = std::max(0.0, online_extrinsic_max_trans_update_m);
+
+  for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+  {
+    const int ridx = state->extrinsicRotIndex(camera_id);
+    const int tidx = state->extrinsicTransIndex(camera_id);
+    const bool camera_enabled = isOnlineExtrinsicEnabledForCamera(camera_id);
+
+    if (!camera_enabled || !allow_rotation || max_rot == 0.0)
+    {
+      solution.segment<3>(ridx).setZero();
+    }
+    else
+    {
+      V3D delta = solution.segment<3>(ridx);
+      const double norm = delta.norm();
+      if (norm > max_rot) solution.segment<3>(ridx) = delta * (max_rot / norm);
+    }
+
+    if (!camera_enabled || !allow_translation || max_trans == 0.0)
+    {
+      solution.segment<3>(tidx).setZero();
+    }
+    else
+    {
+      V3D delta = solution.segment<3>(tidx);
+      const double norm = delta.norm();
+      if (norm > max_trans) solution.segment<3>(tidx) = delta * (max_trans / norm);
+    }
+  }
+}
+
 void VIOManager::initializeVIO()
 {
   if (cameras_.empty()) throw std::runtime_error("VIOManager cameras were not configured");
@@ -231,13 +331,12 @@ void VIOManager::initializeVIO()
     ctx.image_resize_factor = ctx.cam->scale();
     ctx.width = ctx.cam->width();
     ctx.height = ctx.cam->height();
-    ctx.Rci = ctx.Rcl * Rli;
-    ctx.Pci = ctx.Rcl * Pli + ctx.Pcl;
-    ctx.Jdphi_dR = ctx.Rci;
-    const V3D Pic = -ctx.Rci.transpose() * ctx.Pci;
-    M3D pic_hat;
-    pic_hat << SKEW_SYM_MATRX(Pic);
-    ctx.Jdp_dR = -ctx.Rci * pic_hat;
+    if (state != nullptr && state->num_cameras == numCameras())
+    {
+      ctx.Rcl = state->Rcl[ctx.camera_id];
+      ctx.Pcl = state->Pcl[ctx.camera_id];
+    }
+    updateCameraExtrinsicDerived(ctx);
 
     ctx.grid_size = grid_size;
     if (ctx.grid_size > 10)
@@ -340,7 +439,7 @@ void VIOManager::initializeVIO()
       fout_camera.close();
     }
   }
-  const int state_dim = state != nullptr ? state->stateDim() : BASE_STATE_DIM + numCameras();
+  const int state_dim = state != nullptr ? state->stateDim() : BASE_STATE_DIM + numCameras() + 6 * numCameras();
   G = Eigen::MatrixXd::Zero(state_dim, state_dim);
   H_T_H = Eigen::MatrixXd::Zero(state_dim, state_dim);
 }
@@ -2998,6 +3097,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
   for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
   if (total_observations == 0) return;
   G = Eigen::MatrixXd::Zero(state->stateDim(), state->stateDim());
+  const bool online_extrinsic_active = online_extrinsic_en &&
+      frame_count >= online_extrinsic_start_frame &&
+      total_observations >= online_extrinsic_min_tracks;
+  const bool allow_extrinsic_rotation = online_extrinsic_active && online_extrinsic_rot_en;
+  const bool allow_extrinsic_translation = online_extrinsic_active && online_extrinsic_trans_en;
 
   for (int level = patch_pyrimid_level - 1; level >= 0; --level)
   {
@@ -3019,6 +3123,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
         const cv::Mat &img = ctx.new_frame->img_;
         const M3D Rwi = state->rot_end;
         const V3D Pwi = state->pos_end;
+        const bool estimate_extrinsic = isOnlineExtrinsicEnabledForCamera(ctx.camera_id) &&
+                                        (allow_extrinsic_rotation || allow_extrinsic_translation);
         ctx.Rcw = ctx.Rci * Rwi.transpose();
         ctx.Pcw = -ctx.Rci * Rwi.transpose() * Pwi + ctx.Pci;
         ctx.Jdp_dt = ctx.Rci * Rwi.transpose();
@@ -3040,6 +3146,15 @@ void VIOManager::computeJacobianAndUpdateEKF()
           {
             if (point_index >= static_cast<int>(ctx.visual_submap->virtual_track_patches.size())) continue;
             const VirtualTrackPatch &track = ctx.visual_submap->virtual_track_patches[point_index];
+            M3D Jpc_dRcl = M3D::Zero();
+            if (estimate_extrinsic)
+            {
+              const V3D point_i = Rwi.transpose() * (point->pos_ - Pwi);
+              const V3D point_l = Rli * point_i + Pli;
+              M3D point_l_hat;
+              point_l_hat << SKEW_SYM_MATRX(point_l);
+              Jpc_dRcl = -ctx.Rcl * point_l_hat;
+            }
             const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
             const V3D point_v = track.R_vcur_from_ccur_seed * point_c;
             if (point_v[2] <= virtual_min_z) continue;
@@ -3090,6 +3205,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
               jacobian.segment<3>(0) = JdR.transpose();
               jacobian.segment<3>(3) = Jdt.transpose();
               if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
+              if (estimate_extrinsic)
+              {
+                if (allow_extrinsic_rotation)
+                  jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) =
+                      (Jimg_Jpi_R * Jpc_dRcl).transpose();
+                if (allow_extrinsic_translation)
+                  jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = Jimg_Jpi_R.transpose();
+              }
               hessian.noalias() += jacobian * jacobian.transpose();
               gradient.noalias() += jacobian * residual;
               patch_error += residual * residual;
@@ -3098,6 +3221,15 @@ void VIOManager::computeJacobianAndUpdateEKF()
           }
           else
           {
+            M3D Jpc_dRcl = M3D::Zero();
+            if (estimate_extrinsic)
+            {
+              const V3D point_i = Rwi.transpose() * (point->pos_ - Pwi);
+              const V3D point_l = Rli * point_i + Pli;
+              M3D point_l_hat;
+              point_l_hat << SKEW_SYM_MATRX(point_l);
+              Jpc_dRcl = -ctx.Rcl * point_l_hat;
+            }
             const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
             const V2D pixel = ctx.cam->world2cam(point_c);
             const int required_border = (patch_size_half + 1) * scale + 1;
@@ -3157,6 +3289,15 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 jacobian.segment<3>(0) = JdR.transpose();
                 jacobian.segment<3>(3) = Jdt.transpose();
                 if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
+                if (estimate_extrinsic)
+                {
+                  const MD(1, 3) Jimg_Jpi = Jimg * Jdpi;
+                  if (allow_extrinsic_rotation)
+                    jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) =
+                        (Jimg_Jpi * Jpc_dRcl).transpose();
+                  if (allow_extrinsic_translation)
+                    jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = Jimg_Jpi.transpose();
+                }
                 hessian.noalias() += jacobian * jacobian.transpose();
                 gradient.noalias() += jacobian * residual;
                 patch_error += residual * residual;
@@ -3169,12 +3310,15 @@ void VIOManager::computeJacobianAndUpdateEKF()
         }
       }
 
+      if (online_extrinsic_active && online_extrinsic_prior_factor_en)
+        applyOnlineExtrinsicPriors(hessian, gradient, allow_extrinsic_rotation, allow_extrinsic_translation);
       compute_jacobian_time += omp_get_wtime() - linearize_start;
       if (measurement_count == 0) break;
       error /= measurement_count;
       if (error > last_error)
       {
         *state = old_state;
+        syncCameraExtrinsicsFromState(*state);
         break;
       }
 
@@ -3184,13 +3328,27 @@ void VIOManager::computeJacobianAndUpdateEKF()
       const Eigen::MatrixXd K1 = (hessian + (state->cov / img_point_cov).inverse()).inverse();
       const Eigen::VectorXd prior_delta = *state_propagat - *state;
       G = K1 * hessian;
-      const Eigen::VectorXd solution = -K1 * gradient + prior_delta - G * prior_delta;
+      Eigen::VectorXd solution = -K1 * gradient + prior_delta - G * prior_delta;
+      limitOnlineExtrinsicUpdate(solution, allow_extrinsic_rotation, allow_extrinsic_translation);
       *state += solution;
+      syncCameraExtrinsicsFromState(*state);
       update_ekf_time += omp_get_wtime() - update_start;
       if (solution.segment<3>(0).norm() * 57.3 < 0.001 && solution.segment<3>(3).norm() * 100.0 < 0.001) break;
     }
   }
   state->cov -= G * state->cov;
+  if (online_extrinsic_active && frame_count % 20 == 0)
+  {
+    for (const PerCameraData &ctx : cameras_)
+    {
+      if (!isOnlineExtrinsicEnabledForCamera(ctx.camera_id)) continue;
+      const V3D dR_deg = Log(state->Rcl_prior[ctx.camera_id].transpose() * state->Rcl[ctx.camera_id]) * kRadiansToDegrees;
+      const V3D dP = state->Pcl[ctx.camera_id] - state->Pcl_prior[ctx.camera_id];
+      printf("[ VIO Extrinsic ] frame=%d camera_id=%d dR_deg=(%.6f, %.6f, %.6f) dP_m=(%.6f, %.6f, %.6f) Pcl=(%.6f, %.6f, %.6f)\n",
+             frame_count, ctx.camera_id, dR_deg[0], dR_deg[1], dR_deg[2], dP[0], dP[1], dP[2],
+             state->Pcl[ctx.camera_id][0], state->Pcl[ctx.camera_id][1], state->Pcl[ctx.camera_id][2]);
+    }
+  }
   for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
 }
 
@@ -4658,6 +4816,12 @@ void VIOManager::updateState(cv::Mat img, int level)
 
 void VIOManager::updateFrameState(PerCameraData &ctx, const StatesGroup &state_value)
 {
+  if (ctx.camera_id >= 0 && ctx.camera_id < state_value.num_cameras)
+  {
+    ctx.Rcl = state_value.Rcl[ctx.camera_id];
+    ctx.Pcl = state_value.Pcl[ctx.camera_id];
+    updateCameraExtrinsicDerived(ctx);
+  }
   M3D Rwi(state_value.rot_end);
   V3D Pwi(state_value.pos_end);
   ctx.Rcw = ctx.Rci * Rwi.transpose();

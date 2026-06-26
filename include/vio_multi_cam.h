@@ -17,6 +17,7 @@ which is included as part of this source code package.
 #include "feature_multi_cam.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <limits>
 #include <map>
@@ -280,6 +281,17 @@ public:
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
   bool cross_camera_reference_en = false;
+  bool online_extrinsic_en = false;
+  bool online_extrinsic_rot_en = true;
+  bool online_extrinsic_trans_en = true;
+  bool online_extrinsic_prior_factor_en = false;
+  std::vector<int64_t> online_extrinsic_camera_mask;
+  int online_extrinsic_start_frame = 100;
+  int online_extrinsic_min_tracks = 20;
+  double online_extrinsic_prior_rot_std_deg = 0.5;
+  double online_extrinsic_prior_trans_std_m = 0.02;
+  double online_extrinsic_max_rot_update_deg = 0.02;
+  double online_extrinsic_max_trans_update_m = 0.0001;
 
   int grid_n_width, grid_n_height;
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
@@ -450,6 +462,11 @@ public:
                                    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg);
   void setImuToLidarExtrinsic(const V3D &transl, const M3D &rot);
+  void syncCameraExtrinsicsFromState(const StatesGroup &state_value);
+  void updateCameraExtrinsicDerived(PerCameraData &ctx);
+  bool isOnlineExtrinsicEnabledForCamera(int camera_id) const;
+  void applyOnlineExtrinsicPriors(Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient, bool allow_rotation, bool allow_translation) const;
+  void limitOnlineExtrinsicUpdate(Eigen::VectorXd &solution, bool allow_rotation, bool allow_translation) const;
   void initializeVIO();
   void getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D pc, float *patch_tmp, int level);
   void computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J);

@@ -86,6 +86,18 @@
       raycast_en: false
       inverse_composition_en: false
       exposure_estimate_en: true
+      online_extrinsic_en: false
+      online_extrinsic_rot_en: true
+      online_extrinsic_trans_en: true
+      online_extrinsic_prior_factor_en: false
+      # Omit/empty mask means all cameras. Otherwise provide common.num_cameras entries, e.g. [1, 0].
+      # online_extrinsic_camera_mask: []
+      online_extrinsic_start_frame: 100
+      online_extrinsic_min_tracks: 20
+      online_extrinsic_prior_rot_std_deg: 0.5
+      online_extrinsic_prior_trans_std_m: 0.02
+      online_extrinsic_max_rot_update_deg: 0.02
+      online_extrinsic_max_trans_update_m: 0.0001
       inv_expo_time_init: 1.0
       inv_expo_cov: 0.1
 

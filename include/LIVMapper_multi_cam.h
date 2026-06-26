@@ -27,6 +27,7 @@ which is included as part of this source code package.
 #include <nav_msgs/msg/path.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <vikit/camera_loader.h>
+#include <cstdint>
 #include <map>
 
 struct CameraInputConfig
@@ -163,6 +164,17 @@ public:
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
   bool cross_camera_reference_en = false;
+  bool online_extrinsic_en = false;
+  bool online_extrinsic_rot_en = true;
+  bool online_extrinsic_trans_en = true;
+  bool online_extrinsic_prior_factor_en = false;
+  std::vector<int64_t> online_extrinsic_camera_mask;
+  int online_extrinsic_start_frame = 100;
+  int online_extrinsic_min_tracks = 20;
+  double online_extrinsic_prior_rot_std_deg = 0.5;
+  double online_extrinsic_prior_trans_std_m = 0.02;
+  double online_extrinsic_max_rot_update_deg = 0.02;
+  double online_extrinsic_max_trans_update_m = 0.0001;
   double virtual_focal_length = 300.0;
   int virtual_patch_margin = 4;
   int virtual_max_search_level = 1;

@@ -20,6 +20,8 @@ using namespace Sophus;
 
 namespace
 {
+constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+
 bool hasLaterCompleteImageGroupLocked(const std::map<uint64_t, PendingImageGroup> &pending_images,
                                       uint64_t stamp_ns)
 {
@@ -132,6 +134,17 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("vio.virtual_splat_debug_compare_pull_exact", false);
   try_declare.template operator()<bool>("vio.draw_rejected_points_en", false);
   try_declare.template operator()<bool>("vio.cross_camera_reference_en", false);
+  try_declare.template operator()<bool>("vio.online_extrinsic_en", false);
+  try_declare.template operator()<bool>("vio.online_extrinsic_rot_en", true);
+  try_declare.template operator()<bool>("vio.online_extrinsic_trans_en", true);
+  try_declare.template operator()<bool>("vio.online_extrinsic_prior_factor_en", false);
+  try_declare.template operator()<std::vector<int64_t>>("vio.online_extrinsic_camera_mask", std::vector<int64_t>{});
+  try_declare.template operator()<int>("vio.online_extrinsic_start_frame", 100);
+  try_declare.template operator()<int>("vio.online_extrinsic_min_tracks", 20);
+  try_declare.template operator()<double>("vio.online_extrinsic_prior_rot_std_deg", 0.5);
+  try_declare.template operator()<double>("vio.online_extrinsic_prior_trans_std_m", 0.02);
+  try_declare.template operator()<double>("vio.online_extrinsic_max_rot_update_deg", 0.02);
+  try_declare.template operator()<double>("vio.online_extrinsic_max_trans_update_m", 0.0001);
   try_declare.template operator()<int>("vio.outlier_threshold", 100);
   try_declare.template operator()<int>("vio.frontend_mode", 0);
   try_declare.template operator()<int>("vio.opticalflow.max_cnt", 250);
@@ -252,6 +265,17 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.virtual_splat_debug_compare_pull_exact", virtual_splat_debug_compare_pull_exact);
   this->node->get_parameter("vio.draw_rejected_points_en", draw_rejected_points_en);
   this->node->get_parameter("vio.cross_camera_reference_en", cross_camera_reference_en);
+  this->node->get_parameter("vio.online_extrinsic_en", online_extrinsic_en);
+  this->node->get_parameter("vio.online_extrinsic_rot_en", online_extrinsic_rot_en);
+  this->node->get_parameter("vio.online_extrinsic_trans_en", online_extrinsic_trans_en);
+  this->node->get_parameter("vio.online_extrinsic_prior_factor_en", online_extrinsic_prior_factor_en);
+  this->node->get_parameter("vio.online_extrinsic_camera_mask", online_extrinsic_camera_mask);
+  this->node->get_parameter("vio.online_extrinsic_start_frame", online_extrinsic_start_frame);
+  this->node->get_parameter("vio.online_extrinsic_min_tracks", online_extrinsic_min_tracks);
+  this->node->get_parameter("vio.online_extrinsic_prior_rot_std_deg", online_extrinsic_prior_rot_std_deg);
+  this->node->get_parameter("vio.online_extrinsic_prior_trans_std_m", online_extrinsic_prior_trans_std_m);
+  this->node->get_parameter("vio.online_extrinsic_max_rot_update_deg", online_extrinsic_max_rot_update_deg);
+  this->node->get_parameter("vio.online_extrinsic_max_trans_update_m", online_extrinsic_max_trans_update_m);
   this->node->get_parameter("vio.outlier_threshold", outlier_threshold);
   this->node->get_parameter("vio.frontend_mode", frontend_mode);
   this->node->get_parameter("vio.opticalflow.max_cnt", optical_flow_max_cnt);
@@ -315,6 +339,14 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
 
   if (extrinT.size() != 3) throw std::runtime_error("extrin_calib.extrinsic_T must contain exactly 3 values");
   if (extrinR.size() != 9) throw std::runtime_error("extrin_calib.extrinsic_R must contain exactly 9 values");
+  if (!online_extrinsic_camera_mask.empty() && static_cast<int>(online_extrinsic_camera_mask.size()) != num_cameras)
+    throw std::runtime_error("vio.online_extrinsic_camera_mask must be empty or have common.num_cameras entries");
+  if (online_extrinsic_start_frame < 0) throw std::runtime_error("vio.online_extrinsic_start_frame must be non-negative");
+  if (online_extrinsic_min_tracks < 0) throw std::runtime_error("vio.online_extrinsic_min_tracks must be non-negative");
+  if (online_extrinsic_prior_rot_std_deg <= 0.0 || online_extrinsic_prior_trans_std_m <= 0.0)
+    throw std::runtime_error("vio.online_extrinsic prior std values must be positive");
+  if (online_extrinsic_max_rot_update_deg < 0.0 || online_extrinsic_max_trans_update_m < 0.0)
+    throw std::runtime_error("vio.online_extrinsic max update limits must be non-negative");
 
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
@@ -343,6 +375,19 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
       throw std::runtime_error("failed to load camera model for camera_id=" + std::to_string(camera_id) +
                                " camera_ns=" + config.camera_namespace);
     vio_manager->setCameraCalibration(camera_id, config.img_topic, config.camera_namespace, config.Rcl, config.Pcl);
+    const M3D Rcl = vio_manager->cameras_[camera_id].Rcl;
+    const V3D Pcl = vio_manager->cameras_[camera_id].Pcl;
+    const double rot_std_rad = online_extrinsic_prior_rot_std_deg * kDegToRad;
+    const double rot_var = rot_std_rad * rot_std_rad;
+    const double trans_var = online_extrinsic_prior_trans_std_m * online_extrinsic_prior_trans_std_m;
+    _state.setCameraExtrinsic(camera_id, Rcl, Pcl);
+    state_propagat.setCameraExtrinsic(camera_id, Rcl, Pcl);
+    imu_propagate.setCameraExtrinsic(camera_id, Rcl, Pcl);
+    latest_ekf_state.setCameraExtrinsic(camera_id, Rcl, Pcl);
+    _state.setCameraExtrinsicCovariance(camera_id, rot_var, trans_var);
+    state_propagat.setCameraExtrinsicCovariance(camera_id, rot_var, trans_var);
+    imu_propagate.setCameraExtrinsicCovariance(camera_id, rot_var, trans_var);
+    latest_ekf_state.setCameraExtrinsicCovariance(camera_id, rot_var, trans_var);
   }
   vio_manager->grid_size = grid_size;
   vio_manager->patch_size = patch_size;
@@ -361,6 +406,17 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->virtual_fisheye_patch_en = virtual_fisheye_patch_en;
   vio_manager->virtual_sparse_patch_en = virtual_sparse_patch_en;
   vio_manager->cross_camera_reference_en = cross_camera_reference_en;
+  vio_manager->online_extrinsic_en = online_extrinsic_en;
+  vio_manager->online_extrinsic_rot_en = online_extrinsic_rot_en;
+  vio_manager->online_extrinsic_trans_en = online_extrinsic_trans_en;
+  vio_manager->online_extrinsic_prior_factor_en = online_extrinsic_prior_factor_en;
+  vio_manager->online_extrinsic_camera_mask = online_extrinsic_camera_mask;
+  vio_manager->online_extrinsic_start_frame = online_extrinsic_start_frame;
+  vio_manager->online_extrinsic_min_tracks = online_extrinsic_min_tracks;
+  vio_manager->online_extrinsic_prior_rot_std_deg = online_extrinsic_prior_rot_std_deg;
+  vio_manager->online_extrinsic_prior_trans_std_m = online_extrinsic_prior_trans_std_m;
+  vio_manager->online_extrinsic_max_rot_update_deg = online_extrinsic_max_rot_update_deg;
+  vio_manager->online_extrinsic_max_trans_update_m = online_extrinsic_max_trans_update_m;
   vio_manager->virtual_focal_length = virtual_focal_length;
   vio_manager->virtual_patch_margin = virtual_patch_margin;
   vio_manager->virtual_max_search_level = virtual_max_search_level;
