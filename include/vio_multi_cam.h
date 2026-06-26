@@ -177,6 +177,7 @@ struct PendingNewPointObservation
   V3D bearing = V3D::Zero();
   std::vector<float> patch;
   cv::Mat img;
+  cv::Point virtual_source_origin;
   SE3<double> T_f_w;
   SE3<double> T_v_w;
   M3D R_v_from_c = M3D::Identity();
@@ -277,6 +278,7 @@ public:
   bool normal_en, inverse_composition_en, exposure_estimate_en, raycast_en;
   bool ncc_en = false, colmap_output_en = false;
   bool virtual_fisheye_patch_en = false;
+  bool virtual_sparse_patch_en = false;
   bool cross_camera_reference_en = false;
 
   int grid_n_width, grid_n_height;
@@ -302,6 +304,9 @@ public:
   double ref_patch_dump_ncc_threshold = 0.6;
   int virtual_support_radius = 0;
   int virtual_support_size = 0;
+  int virtual_ref_support_materialized_count_ = 0;
+  int virtual_ref_support_materialize_fail_count_ = 0;
+  double virtual_ref_support_materialize_time_ = 0.0;
   std::vector<V3F> virtual_support_ray_lut_;
   std::vector<V2F> core_patch_offsets_;
 
@@ -469,20 +474,28 @@ public:
   bool projectRawFisheyeIfValid(const PerCameraData &ctx, const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const;
   bool hasRangeDiscontinuity(const PerCameraData &ctx, const cv::Mat &range_img,
                              const V2D &raw_px, double point_range) const;
-  bool buildVirtualSupportPatchPullExact(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v, VirtualPatchImage &output) const;
+  bool buildVirtualSupportPatchPullExact(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v,
+                                         VirtualPatchImage &output, const cv::Point &raw_origin = cv::Point()) const;
   void splatRawPixelToVirtualPatch(const PerCameraData &ctx, const cv::Mat &raw_img, int raw_x, int raw_y, const M3D &R_v_from_c, cv::Mat &value_sum,
                                    cv::Mat &weight_sum) const;
   bool hasFullVirtualCoreCoverage(const cv::Mat &valid_mask) const;
-  bool buildVirtualSupportPatchForwardSplat(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c,
-                                            VirtualPatchImage &output) const;
-  bool buildVirtualSupportPatch(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px, const M3D &R_v_from_c, const M3D &R_c_from_v,
-                                VirtualPatchImage &output) const;
+  bool buildVirtualSupportPatchForwardSplat(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px,
+                                            const M3D &R_v_from_c, VirtualPatchImage &output,
+                                            const cv::Point &raw_origin = cv::Point()) const;
+  bool buildVirtualSupportPatch(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px,
+                                const M3D &R_v_from_c, const M3D &R_c_from_v, VirtualPatchImage &output,
+                                const cv::Point &raw_origin = cv::Point()) const;
+  bool captureVirtualReferenceSource(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px,
+                                     const M3D &R_c_from_v, cv::Mat &raw_roi, cv::Point &raw_origin) const;
+  bool materializeVirtualReferenceSupport(Feature &feature, bool &materialized_now);
   bool interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value) const;
   bool interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value) const;
   V2D virtualProject(const V3D &p_v) const;
   V3D virtualCam2World(const V2D &px_v) const;
-  bool createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img, const SE3<double> &T_c_w, const V3D &point_w, float *core_patch,
-                                 cv::Mat &virtual_support_img, SE3<double> &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const;
+  bool createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img, const SE3<double> &T_c_w,
+                                 const V3D &point_w, float *core_patch, cv::Mat &virtual_support_img,
+                                 cv::Point &virtual_source_origin, SE3<double> &T_v_w,
+                                 M3D &R_v_from_c, M3D &R_c_from_v) const;
   bool extractRefPatchDumpRawRoi(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px,
                                  const M3D &R_c_from_v, cv::Mat &raw_roi, M3D &raw_to_roi) const;
   void maybeInitializeRefPatchDumpProbe(const PerCameraData &ctx, const V3D &point_w, const V3D &normal_w,
@@ -506,6 +519,16 @@ public:
   bool warpAffineVirtual(const Matrix2d &A_cur_ref, const cv::Mat &virtual_ref_img, int level_ref, int search_level,
                          int pyramid_level, int halfpatch_size, float *patch) const;
   bool sampleVirtualCorePatch(const VirtualPatchImage &support, const V2D &center, int scale, float *patch) const;
+  bool sampleSparseVirtualValue(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v,
+                                const V2D &px, float &value) const;
+  bool sampleSparseVirtualCorePatch(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v,
+                                    const V2D &center, int scale, float *patch) const;
+  bool buildSparseVirtualReferenceCorePatch(const PerCameraData &ctx, const cv::Mat &raw_img,
+                                            const V2D &raw_center_px, const M3D &R_v_from_c,
+                                            const M3D &R_c_from_v, float *patch) const;
+  bool sampleSparseVirtualValueAndGradient(const PerCameraData &ctx, const cv::Mat &raw_img,
+                                           const M3D &R_c_from_v, const V2D &px, int scale,
+                                           float &value, V2D &gradient) const;
   bool sampleVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px, int scale, float &value, V2D &gradient) const;
   bool sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V2D &px, int scale, float &value, V2D &gradient) const;
   SE3<double> composeVirtualPose(const M3D &R_v_from_c, const SE3<double> &T_c_w) const;

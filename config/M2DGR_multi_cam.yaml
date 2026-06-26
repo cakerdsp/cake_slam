@@ -112,6 +112,7 @@
 
 
       virtual_fisheye_patch_en: true
+      virtual_sparse_patch_en: false
       virtual_focal_length: 300.0
       virtual_patch_margin: 8
       virtual_max_search_level: 1

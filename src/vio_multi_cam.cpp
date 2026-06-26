@@ -188,6 +188,11 @@ void VIOManager::initializeVIO()
 
   }
 
+  if (virtual_sparse_patch_en && !virtual_fisheye_patch_en)
+    throw std::runtime_error("virtual_sparse_patch_en requires virtual_fisheye_patch_en");
+  if (virtual_sparse_patch_en)
+    printf("[ VIO Virtual Sparse ] enabled: sparse current sampling and lazy reference support\n");
+
   if (ref_patch_dump_en && !virtual_fisheye_patch_en)
   {
     printf("[ VIO Ref Patch Dump ] Disabled because virtual_fisheye_patch_en is false.\n");
@@ -544,7 +549,7 @@ bool VIOManager::hasRangeDiscontinuity(const PerCameraData &ctx, const cv::Mat &
 }
 
 bool VIOManager::buildVirtualSupportPatchPullExact(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v,
-                                                   VirtualPatchImage &output) const
+                                                    VirtualPatchImage &output, const cv::Point &raw_origin) const
 {
   if (!virtual_fisheye_patch_en || raw_img.empty() || raw_img.type() != CV_8UC1 || virtual_support_size <= 0) return false;
 
@@ -565,7 +570,10 @@ bool VIOManager::buildVirtualSupportPatchPullExact(const PerCameraData &ctx, con
       const V3D ray_c = R_c_from_v * ray_v;
       V2D raw_px;
       if (!projectRawFisheyeIfValid(ctx, ray_c, 1, raw_px)) continue;
-      values[x] = static_cast<float>(vk::interpolateMat_8u(raw_img, raw_px[0], raw_px[1]));
+      const double local_u = raw_px[0] - raw_origin.x;
+      const double local_v = raw_px[1] - raw_origin.y;
+      if (local_u < 0.0 || local_v < 0.0 || local_u >= raw_img.cols - 1 || local_v >= raw_img.rows - 1) continue;
+      values[x] = static_cast<float>(vk::interpolateMat_8u(raw_img, local_u, local_v));
       mask[x] = 255;
     }
   }
@@ -631,9 +639,9 @@ bool VIOManager::hasFullVirtualCoreCoverage(const cv::Mat &valid_mask) const
   return true;
 }
 
-bool VIOManager::buildVirtualSupportPatchForwardSplat(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px,
-                                                      const M3D &R_v_from_c,
-                                                      VirtualPatchImage &output) const
+bool VIOManager::buildVirtualSupportPatchForwardSplat(const PerCameraData &ctx, const cv::Mat &raw_img,
+                                                       const V2D &raw_center_px, const M3D &R_v_from_c,
+                                                       VirtualPatchImage &output, const cv::Point &raw_origin) const
 {
   if (!virtual_fisheye_patch_en || raw_img.empty() || raw_img.type() != CV_8UC1 || virtual_support_size <= 0) return false;
   if (ctx.raw_pixel_to_unit_ray_lut.size() != static_cast<size_t>(ctx.width * ctx.height) ||
@@ -672,10 +680,14 @@ bool VIOManager::buildVirtualSupportPatchForwardSplat(const PerCameraData &ctx, 
   for (int raw_y = raw_center_y - virtual_raw_window_half_size; raw_y <= raw_center_y + virtual_raw_window_half_size; ++raw_y)
   {
     if (raw_y < 0 || raw_y >= ctx.height) continue;
-    const uint8_t *raw_row = raw_img.ptr<uint8_t>(raw_y);
+    const int local_y = raw_y - raw_origin.y;
+    if (local_y < 0 || local_y >= raw_img.rows) continue;
+    const uint8_t *raw_row = raw_img.ptr<uint8_t>(local_y);
     for (int raw_x = raw_center_x - virtual_raw_window_half_size; raw_x <= raw_center_x + virtual_raw_window_half_size; ++raw_x)
     {
       if (raw_x < 0 || raw_x >= ctx.width) continue;
+      const int local_x = raw_x - raw_origin.x;
+      if (local_x < 0 || local_x >= raw_img.cols) continue;
       const int raw_idx = raw_y * ctx.width + raw_x;
       if (!ctx.raw_pixel_unit_ray_valid_mask[raw_idx]) continue;
 
@@ -695,7 +707,7 @@ bool VIOManager::buildVirtualSupportPatchForwardSplat(const PerCameraData &ctx, 
       const float w10 = dx * (1.0f - dy);
       const float w01 = (1.0f - dx) * dy;
       const float w11 = dx * dy;
-      const float intensity = static_cast<float>(raw_row[raw_x]);
+      const float intensity = static_cast<float>(raw_row[local_x]);
       const int idx00 = y0 * virtual_support_size + x0;
       const int idx10 = idx00 + 1;
       const int idx01 = idx00 + virtual_support_size;
@@ -729,20 +741,20 @@ bool VIOManager::buildVirtualSupportPatchForwardSplat(const PerCameraData &ctx, 
 
 bool VIOManager::buildVirtualSupportPatch(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px,
                                           const M3D &R_v_from_c, const M3D &R_c_from_v,
-                                          VirtualPatchImage &output) const
+                                          VirtualPatchImage &output, const cv::Point &raw_origin) const
 {
   if (virtual_patch_resampling_mode_enum == VirtualPatchResamplingMode::PULL_EXACT)
-    return buildVirtualSupportPatchPullExact(ctx, raw_img, R_c_from_v, output);
+    return buildVirtualSupportPatchPullExact(ctx, raw_img, R_c_from_v, output, raw_origin);
 
   const double splat_start = omp_get_wtime();
-  const bool splat_valid = buildVirtualSupportPatchForwardSplat(ctx, raw_img, raw_center_px, R_v_from_c, output);
+  const bool splat_valid = buildVirtualSupportPatchForwardSplat(ctx, raw_img, raw_center_px, R_v_from_c, output, raw_origin);
   const double splat_time = omp_get_wtime() - splat_start;
 
   if (virtual_splat_debug_compare_pull_exact)
   {
     VirtualPatchImage pull_exact_patch;
     const double pull_start = omp_get_wtime();
-    const bool pull_valid = buildVirtualSupportPatchPullExact(ctx, raw_img, R_c_from_v, pull_exact_patch);
+    const bool pull_valid = buildVirtualSupportPatchPullExact(ctx, raw_img, R_c_from_v, pull_exact_patch, raw_origin);
     const double pull_time = omp_get_wtime() - pull_start;
 
     std::vector<float> absolute_errors;
@@ -778,6 +790,96 @@ bool VIOManager::buildVirtualSupportPatch(const PerCameraData &ctx, const cv::Ma
   }
 
   return splat_valid;
+}
+
+bool VIOManager::captureVirtualReferenceSource(const PerCameraData &ctx, const cv::Mat &raw_img,
+                                               const V2D &raw_center_px, const M3D &R_c_from_v,
+                                               cv::Mat &raw_roi, cv::Point &raw_origin) const
+{
+  raw_roi.release();
+  raw_origin = cv::Point();
+  if (ctx.cam == nullptr || raw_img.empty() || raw_img.type() != CV_8UC1 ||
+      !raw_center_px.array().isFinite().all() || !R_c_from_v.array().isFinite().all())
+    return false;
+
+  double min_u = raw_center_px[0];
+  double max_u = raw_center_px[0];
+  double min_v = raw_center_px[1];
+  double max_v = raw_center_px[1];
+  if (virtual_patch_resampling_mode_enum == VirtualPatchResamplingMode::FORWARD_SPLAT)
+  {
+    min_u = std::min(min_u, std::floor(raw_center_px[0]) - virtual_raw_window_half_size);
+    max_u = std::max(max_u, std::floor(raw_center_px[0]) + virtual_raw_window_half_size);
+    min_v = std::min(min_v, std::floor(raw_center_px[1]) - virtual_raw_window_half_size);
+    max_v = std::max(max_v, std::floor(raw_center_px[1]) + virtual_raw_window_half_size);
+  }
+
+  if (virtual_patch_resampling_mode_enum == VirtualPatchResamplingMode::PULL_EXACT ||
+      virtual_splat_debug_compare_pull_exact)
+  {
+    auto include_virtual_pixel = [&](int x, int y) {
+      const V3D ray_v = virtual_support_ray_lut_[y * virtual_support_size + x].cast<double>();
+      const V2D raw_px = ctx.cam->world2cam(R_c_from_v * ray_v);
+      if (!raw_px.array().isFinite().all()) return;
+      min_u = std::min(min_u, raw_px[0]);
+      max_u = std::max(max_u, raw_px[0]);
+      min_v = std::min(min_v, raw_px[1]);
+      max_v = std::max(max_v, raw_px[1]);
+    };
+    for (int x = 0; x < virtual_support_size; ++x)
+    {
+      include_virtual_pixel(x, 0);
+      include_virtual_pixel(x, virtual_support_size - 1);
+    }
+    for (int y = 1; y + 1 < virtual_support_size; ++y)
+    {
+      include_virtual_pixel(0, y);
+      include_virtual_pixel(virtual_support_size - 1, y);
+    }
+  }
+
+  const int x0 = std::max(0, static_cast<int>(std::floor(min_u)) - 2);
+  const int y0 = std::max(0, static_cast<int>(std::floor(min_v)) - 2);
+  const int x1 = std::min(raw_img.cols, static_cast<int>(std::ceil(max_u)) + 3);
+  const int y1 = std::min(raw_img.rows, static_cast<int>(std::ceil(max_v)) + 3);
+  if (x0 >= x1 || y0 >= y1) return false;
+
+  raw_origin = cv::Point(x0, y0);
+  raw_roi = raw_img(cv::Rect(x0, y0, x1 - x0, y1 - y0)).clone();
+  return !raw_roi.empty();
+}
+
+bool VIOManager::materializeVirtualReferenceSupport(Feature &feature, bool &materialized_now)
+{
+  materialized_now = false;
+  std::lock_guard<std::mutex> lock(feature.virtual_support_mutex_);
+  if (!feature.virtual_patch_valid_ || feature.virtual_support_materialization_failed_) return false;
+  if (feature.virtual_support_materialized_)
+    return !feature.img_.empty() && feature.img_.type() == CV_32FC1;
+  if (feature.camera_id_ < 0 || feature.camera_id_ >= numCameras() || feature.virtual_source_roi_.empty())
+  {
+    feature.virtual_support_materialization_failed_ = true;
+    return false;
+  }
+
+  const PerCameraData &source_ctx = cameras_[feature.camera_id_];
+  VirtualPatchImage support;
+  const bool ok = buildVirtualSupportPatch(source_ctx, feature.virtual_source_roi_, feature.px_,
+                                           feature.R_v_from_c_, feature.R_c_from_v_, support,
+                                           feature.virtual_source_origin_);
+  if (!ok)
+  {
+    feature.virtual_support_materialization_failed_ = true;
+    feature.virtual_patch_valid_ = false;
+    feature.virtual_source_roi_.release();
+    return false;
+  }
+
+  feature.img_ = support.values;
+  feature.virtual_source_roi_.release();
+  feature.virtual_support_materialized_ = true;
+  materialized_now = true;
+  return true;
 }
 
 bool VIOManager::interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value) const
@@ -859,6 +961,114 @@ bool VIOManager::sampleVirtualCorePatch(const VirtualPatchImage &support, const 
   return true;
 }
 
+bool VIOManager::sampleSparseVirtualValue(const PerCameraData &ctx, const cv::Mat &raw_img,
+                                          const M3D &R_c_from_v, const V2D &px, float &value) const
+{
+  if (raw_img.empty() || raw_img.type() != CV_8UC1 || !px.array().isFinite().all()) return false;
+  const V3D ray_c = R_c_from_v * virtualCam2World(px);
+  V2D raw_px;
+  if (!projectRawFisheyeIfValid(ctx, ray_c, 1, raw_px)) return false;
+  value = static_cast<float>(vk::interpolateMat_8u(raw_img, raw_px[0], raw_px[1]));
+  return std::isfinite(value);
+}
+
+bool VIOManager::sampleSparseVirtualCorePatch(const PerCameraData &ctx, const cv::Mat &raw_img,
+                                              const M3D &R_c_from_v, const V2D &center,
+                                              int scale, float *patch) const
+{
+  if (patch == nullptr) return false;
+  for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
+  {
+    const V2D px = center + (core_patch_offsets_[patch_index] * static_cast<float>(scale)).cast<double>();
+    if (!sampleSparseVirtualValue(ctx, raw_img, R_c_from_v, px, patch[patch_index])) return false;
+  }
+  return true;
+}
+
+bool VIOManager::buildSparseVirtualReferenceCorePatch(const PerCameraData &ctx, const cv::Mat &raw_img,
+                                                       const V2D &raw_center_px, const M3D &R_v_from_c,
+                                                       const M3D &R_c_from_v, float *patch) const
+{
+  if (virtual_patch_resampling_mode_enum == VirtualPatchResamplingMode::PULL_EXACT)
+    return sampleSparseVirtualCorePatch(ctx, raw_img, R_c_from_v,
+                                        V2D(virtual_support_radius, virtual_support_radius), 1, patch);
+  if (patch == nullptr || raw_img.empty() || raw_img.type() != CV_8UC1 ||
+      ctx.raw_pixel_to_unit_ray_lut.size() != static_cast<size_t>(ctx.width * ctx.height) ||
+      ctx.raw_pixel_unit_ray_valid_mask.size() != static_cast<size_t>(ctx.width * ctx.height))
+    return false;
+
+  const int node_size = patch_size + 1;
+  const int min_offset = -patch_size_half;
+  std::vector<float> value_sum(node_size * node_size, 0.0f);
+  std::vector<float> weight_sum(node_size * node_size, 0.0f);
+  auto add_value = [&](int virtual_x, int virtual_y, float weight, float intensity) {
+    const int local_x = virtual_x - (virtual_support_radius + min_offset);
+    const int local_y = virtual_y - (virtual_support_radius + min_offset);
+    if (local_x < 0 || local_y < 0 || local_x >= node_size || local_y >= node_size || weight == 0.0f) return;
+    const int index = local_y * node_size + local_x;
+    value_sum[index] += weight * intensity;
+    weight_sum[index] += weight;
+  };
+
+  const int raw_center_x = static_cast<int>(std::lround(raw_center_px[0]));
+  const int raw_center_y = static_cast<int>(std::lround(raw_center_px[1]));
+  for (int raw_y = raw_center_y - virtual_raw_window_half_size;
+       raw_y <= raw_center_y + virtual_raw_window_half_size; ++raw_y)
+  {
+    if (raw_y < 0 || raw_y >= ctx.height) continue;
+    const uint8_t *raw_row = raw_img.ptr<uint8_t>(raw_y);
+    for (int raw_x = raw_center_x - virtual_raw_window_half_size;
+         raw_x <= raw_center_x + virtual_raw_window_half_size; ++raw_x)
+    {
+      if (raw_x < 0 || raw_x >= ctx.width) continue;
+      const int raw_index = raw_y * ctx.width + raw_x;
+      if (raw_index < 0 || raw_index >= static_cast<int>(ctx.raw_pixel_unit_ray_valid_mask.size()) ||
+          !ctx.raw_pixel_unit_ray_valid_mask[raw_index])
+        continue;
+      const V3D ray_v = R_v_from_c * ctx.raw_pixel_to_unit_ray_lut[raw_index].cast<double>();
+      if (!ray_v.array().isFinite().all() || ray_v[2] <= virtual_min_z) continue;
+      const float u = static_cast<float>(virtual_focal_length * ray_v[0] / ray_v[2] + virtual_support_radius);
+      const float v = static_cast<float>(virtual_focal_length * ray_v[1] / ray_v[2] + virtual_support_radius);
+      const int x0 = static_cast<int>(std::floor(u));
+      const int y0 = static_cast<int>(std::floor(v));
+      const float dx = u - x0;
+      const float dy = v - y0;
+      const float intensity = static_cast<float>(raw_row[raw_x]);
+      add_value(x0, y0, (1.0f - dx) * (1.0f - dy), intensity);
+      add_value(x0 + 1, y0, dx * (1.0f - dy), intensity);
+      add_value(x0, y0 + 1, (1.0f - dx) * dy, intensity);
+      add_value(x0 + 1, y0 + 1, dx * dy, intensity);
+    }
+  }
+
+  for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
+  {
+    const int local_x = static_cast<int>(std::lround(core_patch_offsets_[patch_index][0])) - min_offset;
+    const int local_y = static_cast<int>(std::lround(core_patch_offsets_[patch_index][1])) - min_offset;
+    const int indices[4] = {local_y * node_size + local_x, local_y * node_size + local_x + 1,
+                            (local_y + 1) * node_size + local_x, (local_y + 1) * node_size + local_x + 1};
+    for (const int index : indices)
+      if (weight_sum[index] <= virtual_splat_min_weight) return false;
+    patch[patch_index] = value_sum[indices[0]] / weight_sum[indices[0]];
+  }
+  return true;
+}
+
+bool VIOManager::sampleSparseVirtualValueAndGradient(const PerCameraData &ctx, const cv::Mat &raw_img,
+                                                     const M3D &R_c_from_v, const V2D &px, int scale,
+                                                     float &value, V2D &gradient) const
+{
+  float left, right, up, down;
+  if (!sampleSparseVirtualValue(ctx, raw_img, R_c_from_v, px, value) ||
+      !sampleSparseVirtualValue(ctx, raw_img, R_c_from_v, px - V2D(scale, 0.0), left) ||
+      !sampleSparseVirtualValue(ctx, raw_img, R_c_from_v, px + V2D(scale, 0.0), right) ||
+      !sampleSparseVirtualValue(ctx, raw_img, R_c_from_v, px - V2D(0.0, scale), up) ||
+      !sampleSparseVirtualValue(ctx, raw_img, R_c_from_v, px + V2D(0.0, scale), down))
+    return false;
+  gradient << 0.5 * (right - left), 0.5 * (down - up);
+  return true;
+}
+
 bool VIOManager::sampleVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px, int scale, float &value, V2D &gradient) const
 {
   float left, right, up, down;
@@ -885,23 +1095,32 @@ bool VIOManager::sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V
   return true;
 }
 
-bool VIOManager::createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img, const SE3<double> &T_c_w,
-                                           const V3D &point_w, float *core_patch,
-                                           cv::Mat &virtual_support_img, SE3<double> &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const
+bool VIOManager::createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img,
+                                            const SE3<double> &T_c_w, const V3D &point_w,
+                                            float *core_patch, cv::Mat &virtual_support_img,
+                                            cv::Point &virtual_source_origin, SE3<double> &T_v_w,
+                                            M3D &R_v_from_c, M3D &R_c_from_v) const
 {
+  virtual_support_img.release();
+  virtual_source_origin = cv::Point();
   const V3D point_c = T_c_w * point_w;
   V2D raw_center_px;
   if (!projectRawFisheyeIfValid(ctx, point_c, 1, raw_center_px)) return false;
   if (!buildVirtualFrameRotation(ctx, point_c, raw_center_px, R_v_from_c, R_c_from_v)) return false;
   T_v_w = composeVirtualPose(R_v_from_c, T_c_w);
+  const V2D center(virtual_support_radius, virtual_support_radius);
+
+  if (virtual_sparse_patch_en)
+  {
+    if (!buildSparseVirtualReferenceCorePatch(ctx, raw_img, raw_center_px, R_v_from_c, R_c_from_v, core_patch)) return false;
+    return captureVirtualReferenceSource(ctx, raw_img, raw_center_px, R_c_from_v,
+                                         virtual_support_img, virtual_source_origin);
+  }
+
   VirtualPatchImage support;
   support.T_v_w_seed = T_v_w;
   if (!buildVirtualSupportPatch(ctx, raw_img, raw_center_px, R_v_from_c, R_c_from_v, support)) return false;
-  const V2D center(virtual_support_radius, virtual_support_radius);
   if (!sampleVirtualCorePatch(support, center, 1, core_patch)) return false;
-
-  // Keep the complete immutable local virtual image for future warpAffineVirtual().
-  // cv::Mat assignment keeps the underlying storage alive through reference counting.
   virtual_support_img = support.values;
   return true;
 }
@@ -1625,6 +1844,9 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
   virtual_result_collect_time_ = 0.0;
   virtual_warp_time_ = 0.0;
   virtual_current_core_time_ = 0.0;
+  virtual_ref_support_materialized_count_ = 0;
+  virtual_ref_support_materialize_fail_count_ = 0;
+  virtual_ref_support_materialize_time_ = 0.0;
   virtual_map_grid_count_ = 0;
   virtual_candidate_null_count_ = 0;
   virtual_candidate_normal_uninit_count_ = 0;
@@ -1778,6 +2000,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     VIRTUAL_REJECT_ROTATION,
     VIRTUAL_REJECT_SUPPORT_BUILD,
     VIRTUAL_REJECT_AFFINE_MATRIX,
+    VIRTUAL_REJECT_REFERENCE_SUPPORT,
     VIRTUAL_REJECT_REFERENCE_WARP,
     VIRTUAL_REJECT_CURRENT_Z,
     VIRTUAL_REJECT_CURRENT_CORE,
@@ -1793,11 +2016,13 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     double inverse_reference_exposure = 0.0;
     double build_time = 0.0;
     double affine_time = 0.0;
+    double ref_materialize_time = 0.0;
     double warp_time = 0.0;
     double current_core_time = 0.0;
     int search_level = -1;
     int warp_fail_pyramid_level = -1;
     int rejection = 0;
+    bool ref_materialized = false;
     bool valid = false;
   };
   auto recordRejectedPoint = [&](const V2D &raw_px, int reason) {
@@ -1816,6 +2041,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       return VIOManager::REJECT_DRAW_SUPPORT_BUILD;
     case VIRTUAL_REJECT_AFFINE_MATRIX:
       return VIOManager::REJECT_DRAW_AFFINE;
+    case VIRTUAL_REJECT_REFERENCE_SUPPORT:
+      return VIOManager::REJECT_DRAW_REF_INVALID;
     case VIRTUAL_REJECT_REFERENCE_WARP:
       return VIOManager::REJECT_DRAW_WARP_REF;
     case VIRTUAL_REJECT_CURRENT_Z:
@@ -2015,6 +2242,18 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     result.track.search_level = getBestSearchLevel(result.track.A_cur_ref, virtual_max_search_level);
     result.search_level = result.track.search_level;
 
+    if (virtual_sparse_patch_en)
+    {
+      const double materialize_start = omp_get_wtime();
+      if (!materializeVirtualReferenceSupport(*ref_ftr, result.ref_materialized))
+      {
+        result.ref_materialize_time = omp_get_wtime() - materialize_start;
+        result.rejection = VIRTUAL_REJECT_REFERENCE_SUPPORT;
+        continue;
+      }
+      result.ref_materialize_time = omp_get_wtime() - materialize_start;
+    }
+
     const double warp_start = omp_get_wtime();
     result.warped_reference.assign(warp_len, 0.0f);
     for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
@@ -2031,19 +2270,22 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     result.warp_time = omp_get_wtime() - warp_start;
     if (result.rejection != 0) continue;
 
-    // The affine warp and warped reference depend only on geometry and the
-    // immutable reference support. Reject them before constructing the more
-    // expensive current virtual support.
-    const double build_start = omp_get_wtime();
-    const bool supports_ok = buildVirtualSupportPatch(ctx, img, candidate.current_raw_center_px,
-                                                      result.track.R_vcur_from_ccur_seed,
-                                                      result.track.R_ccur_from_vcur_seed,
-                                                      result.track.cur_support);
-    result.build_time = omp_get_wtime() - build_start;
-    if (!supports_ok)
+    if (!virtual_sparse_patch_en)
     {
-      result.rejection = VIRTUAL_REJECT_SUPPORT_BUILD;
-      continue;
+      // The affine warp and warped reference depend only on geometry and the
+      // immutable reference support. Reject them before constructing the more
+      // expensive current virtual support.
+      const double build_start = omp_get_wtime();
+      const bool supports_ok = buildVirtualSupportPatch(ctx, img, candidate.current_raw_center_px,
+                                                        result.track.R_vcur_from_ccur_seed,
+                                                        result.track.R_ccur_from_vcur_seed,
+                                                        result.track.cur_support);
+      result.build_time = omp_get_wtime() - build_start;
+      if (!supports_ok)
+      {
+        result.rejection = VIRTUAL_REJECT_SUPPORT_BUILD;
+        continue;
+      }
     }
 
     const double current_core_start = omp_get_wtime();
@@ -2055,7 +2297,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       result.rejection = VIRTUAL_REJECT_CURRENT_Z;
       continue;
     }
-    if (!sampleVirtualCorePatch(result.track.cur_support, virtualProject(point_vcur), 1, current_core.data()))
+    const bool current_core_ok = virtual_sparse_patch_en
+        ? sampleSparseVirtualCorePatch(ctx, img, result.track.R_ccur_from_vcur_seed,
+                                       virtualProject(point_vcur), 1, current_core.data())
+        : sampleVirtualCorePatch(result.track.cur_support, virtualProject(point_vcur), 1, current_core.data());
+    if (!current_core_ok)
     {
       result.current_core_time = omp_get_wtime() - current_core_start;
       result.rejection = VIRTUAL_REJECT_CURRENT_CORE;
@@ -2097,6 +2343,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     VirtualCandidateResult &result = results[candidate_index];
     build_virtual_support_time_ += result.build_time;
     virtual_affine_time_ += result.affine_time;
+    virtual_ref_support_materialize_time_ += result.ref_materialize_time;
+    if (result.ref_materialized) ++virtual_ref_support_materialized_count_;
     virtual_warp_time_ += result.warp_time;
     virtual_current_core_time_ += result.current_core_time;
     if (result.search_level >= 0 && result.search_level < static_cast<int>(virtual_search_level_count.size()))
@@ -2115,6 +2363,9 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
         break;
       case VIRTUAL_REJECT_AFFINE_MATRIX:
         ++virtual_track_affine_fail_count_;
+        break;
+      case VIRTUAL_REJECT_REFERENCE_SUPPORT:
+        ++virtual_ref_support_materialize_fail_count_;
         break;
       case VIRTUAL_REJECT_REFERENCE_WARP:
         ++virtual_track_warp_fail_count_;
@@ -2156,7 +2407,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
   virtual_result_collect_time_ = omp_get_wtime() - result_collect_start;
 
   ctx.total_points = static_cast<int>(ctx.visual_submap->voxel_points.size());
-  rejected_virtual_support_oob_ = virtual_track_support_fail_count_ + virtual_track_current_core_fail_count_;
+  rejected_virtual_support_oob_ = virtual_track_support_fail_count_ + virtual_track_current_core_fail_count_ + virtual_ref_support_materialize_fail_count_;
   rejected_virtual_projection_invalid_ = virtual_candidate_projection_fail_count_;
   rejected_virtual_z_ = virtual_track_rotation_fail_count_ + virtual_track_current_z_fail_count_;
   rejected_virtual_affine_oob_ = virtual_track_affine_fail_count_ + virtual_track_warp_fail_count_;
@@ -2180,9 +2431,10 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
          virtual_candidate_null_count_, virtual_candidate_normal_uninit_count_, virtual_candidate_projection_fail_count_,
          virtual_candidate_range_reject_count_, virtual_candidate_close_view_fail_count_, virtual_candidate_ref_missing_count_,
          virtual_candidate_ref_invalid_count_, virtual_candidate_select_time_);
-  printf("[ VIO Virtual Reject ] rotation=%d support_build=%d affine_matrix=%d warp_ref=%d current_z=%d current_core=%d ncc=%d photometric=%d\n",
+  printf("[ VIO Virtual Reject ] rotation=%d support_build=%d affine_matrix=%d ref_support=%d warp_ref=%d current_z=%d current_core=%d ncc=%d photometric=%d\n",
          virtual_track_rotation_fail_count_, virtual_track_support_fail_count_, virtual_track_affine_fail_count_,
-         virtual_track_warp_fail_count_, virtual_track_current_z_fail_count_, virtual_track_current_core_fail_count_,
+         virtual_ref_support_materialize_fail_count_, virtual_track_warp_fail_count_,
+         virtual_track_current_z_fail_count_, virtual_track_current_core_fail_count_,
          virtual_track_ncc_reject_count_, virtual_track_photometric_reject_count_);
   printf("[ VIO Virtual Warp ] search_level{%s} warp_fail_search{%s} warp_fail_pyramid{%s}\n",
          search_level_text.c_str(), warp_fail_search_text.c_str(), warp_fail_pyramid_text.c_str());
@@ -2191,6 +2443,10 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
          virtual_parallel_track_time_, build_virtual_support_time_, virtual_affine_time_, virtual_warp_time_,
          virtual_current_core_time_, virtual_result_collect_time_);
   printf("[ VIO Virtual Timing Note ] *_sum accumulates per-candidate time across OpenMP workers; wall fields are real elapsed time.\n");
+  if (virtual_sparse_patch_en)
+    printf("[ VIO Virtual Sparse ] ref_materialized=%d ref_fail=%d ref_materialize_sum=%.6f s\n",
+           virtual_ref_support_materialized_count_, virtual_ref_support_materialize_fail_count_,
+           virtual_ref_support_materialize_time_);
 }
 
 void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
@@ -2799,19 +3055,26 @@ void VIOManager::computeJacobianAndUpdateEKF()
               MD(1, 2) Jimg;
               if (inverse_composition_en)
               {
+                const bool current_value_ok = virtual_sparse_patch_en
+                    ? sampleSparseVirtualValue(ctx, img, track.R_ccur_from_vcur_seed,
+                                               center + offset.cast<double>(), current_value)
+                    : interpolateVirtualFloat(track.cur_support.values, track.cur_support.valid_mask,
+                                              center[0] + offset[0], center[1] + offset[1], current_value);
                 if (cache_row >= static_cast<int>(ctx.fixed_template_cache.valid.size()) ||
-                    !ctx.fixed_template_cache.valid[cache_row] ||
-                    !interpolateVirtualFloat(track.cur_support.values, track.cur_support.valid_mask,
-                                             center[0] + offset[0], center[1] + offset[1], current_value))
+                    !ctx.fixed_template_cache.valid[cache_row] || !current_value_ok)
                   continue;
                 Jimg = ctx.fixed_template_cache.photometric_gradients.row(cache_row);
               }
               else
               {
                 V2D image_gradient;
-                if (!sampleVirtualValueAndGradient(track.cur_support, center + offset.cast<double>(), scale,
-                                                   current_value, image_gradient))
-                  continue;
+                const bool current_gradient_ok = virtual_sparse_patch_en
+                    ? sampleSparseVirtualValueAndGradient(ctx, img, track.R_ccur_from_vcur_seed,
+                                                          center + offset.cast<double>(), scale,
+                                                          current_value, image_gradient)
+                    : sampleVirtualValueAndGradient(track.cur_support, center + offset.cast<double>(), scale,
+                                                    current_value, image_gradient);
+                if (!current_gradient_ok) continue;
                 Jimg << image_gradient[0], image_gradient[1];
                 Jimg *= current_exposure * inv_scale;
               }
@@ -2969,10 +3232,11 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
 
     std::vector<float> patch(patch_size_total);
     cv::Mat virtual_support_img;
+    cv::Point virtual_source_origin;
     SE3<double> T_v_w;
     M3D R_v_from_c, R_c_from_v;
-    if (!createVirtualFeaturePatch(ctx, img, ctx.new_frame->T_f_w_, pt_var.point_w, patch.data(), virtual_support_img, T_v_w, R_v_from_c,
-                                   R_c_from_v))
+    if (!createVirtualFeaturePatch(ctx, img, ctx.new_frame->T_f_w_, pt_var.point_w, patch.data(),
+                                   virtual_support_img, virtual_source_origin, T_v_w, R_v_from_c, R_c_from_v))
     {
       ++rejected_virtual_support_oob_;
       continue;
@@ -2989,6 +3253,7 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
     if (ref_patch_dump_en)
       maybeInitializeRefPatchDumpProbe(ctx, pt_var.point_w, pt_var.normal, raw_px, pending.bearing, pending.patch.data());
     pending.img = virtual_support_img;
+    pending.virtual_source_origin = virtual_source_origin;
     pending.T_f_w = ctx.new_frame->T_f_w_;
     pending.T_v_w = T_v_w;
     pending.R_v_from_c = R_v_from_c;
@@ -3135,7 +3400,17 @@ void VIOManager::commitPendingNewPoints()
       std::copy(pending.patch.begin(), pending.patch.end(), patch);
       Feature *feature = new Feature(point, patch, pending.px, pending.bearing, pending.T_f_w, pending.level,
                                      pending.camera_id, ctx.new_frame->timestamp_);
-      feature->img_ = pending.img;
+      if (pending.virtual_patch_valid && virtual_sparse_patch_en)
+      {
+        feature->virtual_source_roi_ = pending.img;
+        feature->virtual_source_origin_ = pending.virtual_source_origin;
+        feature->virtual_support_materialized_ = false;
+      }
+      else
+      {
+        feature->img_ = pending.img;
+        feature->virtual_support_materialized_ = pending.virtual_patch_valid;
+      }
       feature->id_ = ctx.new_frame->id_;
       feature->inv_expo_time_ = pending.inv_expo_time;
       feature->T_v_w_ = pending.T_v_w;
@@ -3203,9 +3478,11 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
 
     std::unique_ptr<float[]> patch(new float[patch_size_total]);
     cv::Mat virtual_support_img;
+    cv::Point virtual_source_origin;
     SE3<double> T_v_w;
     M3D R_v_from_c, R_c_from_v;
-    if (!createVirtualFeaturePatch(ctx, img, ctx.new_frame->T_f_w_, pt->pos_, patch.get(), virtual_support_img, T_v_w, R_v_from_c, R_c_from_v))
+    if (!createVirtualFeaturePatch(ctx, img, ctx.new_frame->T_f_w_, pt->pos_, patch.get(),
+                                   virtual_support_img, virtual_source_origin, T_v_w, R_v_from_c, R_c_from_v))
     {
       ++rejected_virtual_support_oob_;
       continue;
@@ -3214,8 +3491,17 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
     const V3D bearing = ctx.cam->cam2world(raw_px);
     Feature *ftr_new = new Feature(pt, patch.release(), raw_px, bearing, ctx.new_frame->T_f_w_,
                                    ctx.visual_submap->search_levels[i], ctx.camera_id, ctx.new_frame->timestamp_);
-    // [MODIFY] 使用第一次生成的参考 patch，不再每帧重构
-    ftr_new->img_ = virtual_support_img;
+    if (virtual_sparse_patch_en)
+    {
+      ftr_new->virtual_source_roi_ = virtual_support_img;
+      ftr_new->virtual_source_origin_ = virtual_source_origin;
+      ftr_new->virtual_support_materialized_ = false;
+    }
+    else
+    {
+      ftr_new->img_ = virtual_support_img;
+      ftr_new->virtual_support_materialized_ = true;
+    }
     ftr_new->id_ = ctx.new_frame->id_;
     ftr_new->inv_expo_time_ = state->inv_expo_time[ctx.camera_id];
     ftr_new->T_v_w_ = T_v_w;

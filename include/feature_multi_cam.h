@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #define LIVO_FEATURE_MULTI_CAM_H_
 
 #include "visual_point_multi_cam.h"
+#include <mutex>
 
 // A salient image region tracked using either a raw image patch or a local
 // virtual pinhole patch. The existing raw-camera fields keep their semantics.
@@ -52,12 +53,18 @@ struct Feature
   Matrix3d R_v_from_c_;          //!< {}^V R_C.
   Matrix3d R_c_from_v_;          //!< {}^C R_V = ({}^V R_C)^T.
   bool virtual_patch_valid_;
+  cv::Mat virtual_source_roi_;   //!< Raw grayscale source retained until lazy support materialization.
+  cv::Point virtual_source_origin_;
+  bool virtual_support_materialized_;
+  bool virtual_support_materialization_failed_;
+  mutable std::mutex virtual_support_mutex_;
   
   Feature(VisualPoint *_point, float *_patch, const Vector2d &_px, const Vector3d &_f, const SE3<double> &_T_f_w, int _level,
           int _camera_id = 0, double _timestamp = 0.0)
       : id_(-1), camera_id_(_camera_id), timestamp_(_timestamp), type_(CORNER), px_(_px), f_(_f), level_(_level), point_(_point), T_f_w_(_T_f_w), patch_(_patch), score_(0), mean_(0),
         inv_expo_time_(0), T_v_w_(_T_f_w), R_v_from_c_(Matrix3d::Identity()), R_c_from_v_(Matrix3d::Identity()),
-        virtual_patch_valid_(false)
+        virtual_patch_valid_(false), virtual_source_origin_(0, 0), virtual_support_materialized_(false),
+        virtual_support_materialization_failed_(false)
   {
   }
 

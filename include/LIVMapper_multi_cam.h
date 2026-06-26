@@ -161,6 +161,7 @@ public:
   bool is_first_frame = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;
   bool virtual_fisheye_patch_en = false;
+  bool virtual_sparse_patch_en = false;
   bool cross_camera_reference_en = false;
   double virtual_focal_length = 300.0;
   int virtual_patch_margin = 4;
