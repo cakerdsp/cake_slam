@@ -819,7 +819,8 @@ bool VIOManager::captureVirtualReferenceSource(const PerCameraData &ctx, const c
   {
     auto include_virtual_pixel = [&](int x, int y) {
       const V3D ray_v = virtual_support_ray_lut_[y * virtual_support_size + x].cast<double>();
-      const V2D raw_px = ctx.cam->world2cam(R_c_from_v * ray_v);
+      const V3D ray_c = R_c_from_v * ray_v;
+      const V2D raw_px = ctx.cam->world2cam(ray_c);
       if (!raw_px.array().isFinite().all()) return;
       min_u = std::min(min_u, raw_px[0]);
       max_u = std::max(max_u, raw_px[0]);
