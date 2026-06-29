@@ -71,6 +71,7 @@
       # virtual_width/height and sphere LUT fields are not read by this project;
       # ax/ay=120 maps to the current virtual_focal_length parameter.
       virtual_fisheye_patch_en: true
+      virtual_s2_optimize_en: false
       virtual_focal_length: 120.0
       virtual_patch_margin: 8
       virtual_max_search_level: 1

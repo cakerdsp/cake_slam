@@ -124,6 +124,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<int>("vio.patch_size", 8);
   try_declare.template operator()<bool>("vio.virtual_fisheye_patch_en", false);
   try_declare.template operator()<bool>("vio.virtual_sparse_patch_en", false);
+  try_declare.template operator()<bool>("vio.virtual_s2_optimize_en", false);
   try_declare.template operator()<double>("vio.virtual_focal_length", 300.0);
   try_declare.template operator()<int>("vio.virtual_patch_margin", 4);
   try_declare.template operator()<int>("vio.virtual_max_search_level", 1);
@@ -258,6 +259,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.patch_size", patch_size);
   this->node->get_parameter("vio.virtual_fisheye_patch_en", virtual_fisheye_patch_en);
   this->node->get_parameter("vio.virtual_sparse_patch_en", virtual_sparse_patch_en);
+  this->node->get_parameter("vio.virtual_s2_optimize_en", virtual_s2_optimize_en);
   this->node->get_parameter("vio.virtual_focal_length", virtual_focal_length);
   this->node->get_parameter("vio.virtual_patch_margin", virtual_patch_margin);
   this->node->get_parameter("vio.virtual_max_search_level", virtual_max_search_level);
@@ -414,6 +416,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
   vio_manager->virtual_fisheye_patch_en = virtual_fisheye_patch_en;
   vio_manager->virtual_sparse_patch_en = virtual_sparse_patch_en;
+  vio_manager->virtual_s2_optimize_en = virtual_s2_optimize_en;
   vio_manager->cross_camera_reference_en = cross_camera_reference_en;
   vio_manager->online_extrinsic_en = online_extrinsic_en;
   vio_manager->online_extrinsic_rot_en = online_extrinsic_rot_en;

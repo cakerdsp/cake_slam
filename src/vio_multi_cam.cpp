@@ -31,6 +31,7 @@ constexpr double kRefPatchDumpMinAngleChangeDeg = 8.0;
 constexpr double kRefPatchDumpMinStdDev = 12.0;
 constexpr double kRadiansToDegrees = 57.29577951308232;
 constexpr int kRefPatchDumpWarpDisplaySize = 128;
+constexpr double kS2Eps = 1.0e-12;
 
 struct VirtualPatchWorkspace
 {
@@ -287,6 +288,14 @@ void VIOManager::initializeVIO()
       }
     }
 
+  }
+
+  if (virtual_s2_optimize_en)
+  {
+    if (virtual_fisheye_patch_en)
+      printf("[ VIO Virtual S2 ] enabled: S2/raw-fisheye photometric optimization branch is active.\n");
+    else
+      printf("[ VIO Virtual S2 ] virtual_s2_optimize_en is true but virtual_fisheye_patch_en is false; S2 branch is ignored.\n");
   }
 
   if (virtual_sparse_patch_en && !virtual_fisheye_patch_en)
@@ -621,6 +630,205 @@ bool VIOManager::projectRawFisheyeIfValid(const PerCameraData &ctx, const V3D &r
       raw_px[1] >= ctx.height - required_border - 1)
     return false;
   return ctx.cam->isInFrame(raw_px.cast<int>(), required_border);
+}
+
+bool VIOManager::computeS2SamplePointAndJacobian(const V3D &point_c, const M3D &R_v_from_c,
+                                                  const M3D &R_c_from_v, const V2D &offset,
+                                                  V3D &p_sample_c, M3D &J_sample_pc) const
+{
+  p_sample_c.setZero();
+  J_sample_pc.setZero();
+  if (!point_c.array().isFinite().all() || !offset.array().isFinite().all()) return false;
+  if (!R_v_from_c.array().isFinite().all() || !R_c_from_v.array().isFinite().all()) return false;
+  if (!std::isfinite(virtual_focal_length) || virtual_focal_length <= kS2Eps) return false;
+
+  const double rho = point_c.norm();
+  if (!std::isfinite(rho) || rho <= kS2Eps) return false;
+  const V3D d_c = point_c / rho;
+  if (!d_c.array().isFinite().all()) return false;
+
+  const V3D d_v = R_v_from_c * d_c;
+  if (!d_v.array().isFinite().all()) return false;
+
+  const double alpha = offset.x() / virtual_focal_length;
+  const double beta = offset.y() / virtual_focal_length;
+  if (!std::isfinite(alpha) || !std::isfinite(beta)) return false;
+
+  V3D q_v = d_v;
+  q_v.x() += alpha;
+  q_v.y() += beta;
+  const double q_norm = q_v.norm();
+  if (!std::isfinite(q_norm) || q_norm <= kS2Eps) return false;
+
+  const V3D s_v = q_v / q_norm;
+  if (!s_v.array().isFinite().all()) return false;
+  const V3D s_c = R_c_from_v * s_v;
+  if (!s_c.array().isFinite().all()) return false;
+
+  p_sample_c = rho * s_c;
+  if (!p_sample_c.array().isFinite().all()) return false;
+
+  const M3D I = M3D::Identity();
+  const M3D J_dc_pc = (I - d_c * d_c.transpose()) / rho;
+  const M3D J_dv_pc = R_v_from_c * J_dc_pc;
+  const M3D J_sv_q = (I - s_v * s_v.transpose()) / q_norm;
+  const M3D J_sv_pc = J_sv_q * J_dv_pc;
+  const M3D J_sc_pc = R_c_from_v * J_sv_pc;
+  J_sample_pc = s_c * d_c.transpose() + rho * J_sc_pc;
+  return J_sample_pc.array().isFinite().all();
+}
+
+bool VIOManager::projectEquidistantFisheyeWithJacobian(const PerCameraData &ctx, const V3D &p_c,
+                                                        int required_border, V2D &raw_px,
+                                                        MD(2, 3) &J_raw_pc) const
+{
+  raw_px.setZero();
+  J_raw_pc.setZero();
+  if (ctx.width <= 0 || ctx.height <= 0) return false;
+  if (!std::isfinite(ctx.fx) || !std::isfinite(ctx.fy) || !std::isfinite(ctx.cx) || !std::isfinite(ctx.cy)) return false;
+
+  auto project_value = [&](const V3D &p, V2D &px) -> bool {
+    if (!p.array().isFinite().all()) return false;
+    const double norm = p.norm();
+    if (!std::isfinite(norm) || norm <= kS2Eps) return false;
+    const double x = p.x();
+    const double y = p.y();
+    const double z = p.z();
+    const double a = std::hypot(x, y);
+    if (!std::isfinite(a)) return false;
+
+    double k = 0.0;
+    if (a <= kS2Eps)
+    {
+      if (z <= kS2Eps) return false;
+      k = 1.0 / z;
+    }
+    else
+    {
+      const double theta = std::atan2(a, z);
+      k = theta / a;
+    }
+    if (!std::isfinite(k)) return false;
+    px << ctx.cx + ctx.fx * k * x, ctx.cy + ctx.fy * k * y;
+    return px.array().isFinite().all();
+  };
+
+  if (!project_value(p_c, raw_px)) return false;
+  const int border_req = std::max(0, required_border);
+  if (raw_px[0] < border_req || raw_px[1] < border_req ||
+      raw_px[0] >= ctx.width - border_req || raw_px[1] >= ctx.height - border_req)
+    return false;
+
+  const double x = p_c.x();
+  const double y = p_c.y();
+  const double z = p_c.z();
+  const double a = std::hypot(x, y);
+  const double r2 = a * a + z * z;
+  if (!std::isfinite(a) || !std::isfinite(r2) || r2 <= kS2Eps) return false;
+
+  if (a > kS2Eps)
+  {
+    const double theta = std::atan2(a, z);
+    const double k = theta / a;
+    const double dtheta_dx = z * x / (a * r2);
+    const double dtheta_dy = z * y / (a * r2);
+    const double dtheta_dz = -a / r2;
+    const double da_dx = x / a;
+    const double da_dy = y / a;
+    const double a2 = a * a;
+    const double dk_dx = (a * dtheta_dx - theta * da_dx) / a2;
+    const double dk_dy = (a * dtheta_dy - theta * da_dy) / a2;
+    const double dk_dz = dtheta_dz / a;
+
+    J_raw_pc << ctx.fx * (k + x * dk_dx), ctx.fx * (x * dk_dy), ctx.fx * (x * dk_dz),
+                ctx.fy * (y * dk_dx), ctx.fy * (k + y * dk_dy), ctx.fy * (y * dk_dz);
+  }
+  else
+  {
+    const double eps_fd = 1.0e-6 * std::max(1.0, p_c.norm());
+    for (int col = 0; col < 3; ++col)
+    {
+      V3D step = V3D::Zero();
+      step[col] = eps_fd;
+      V2D uv_plus, uv_minus;
+      if (!project_value(p_c + step, uv_plus) || !project_value(p_c - step, uv_minus)) return false;
+      J_raw_pc.col(col) = (uv_plus - uv_minus) / (2.0 * eps_fd);
+    }
+  }
+
+  return J_raw_pc.array().isFinite().all();
+}
+
+bool VIOManager::projectRawCameraWithJacobian(const PerCameraData &ctx, const V3D &p_c,
+                                              int required_border, V2D &raw_px,
+                                              MD(2, 3) &J_raw_pc) const
+{
+  return projectEquidistantFisheyeWithJacobian(ctx, p_c, required_border, raw_px, J_raw_pc);
+}
+
+bool VIOManager::sampleRawImageValueAndGradient(const cv::Mat &raw_img, const V2D &raw_px,
+                                                int scale, float &value, V2D &gradient) const
+{
+  value = 0.0f;
+  gradient.setZero();
+  if (raw_img.empty() || raw_img.type() != CV_8UC1 || scale <= 0 || !raw_px.array().isFinite().all()) return false;
+
+  auto sample = [&](double u, double v, float &sampled) -> bool {
+    if (!std::isfinite(u) || !std::isfinite(v) || u < 0.0 || v < 0.0 ||
+        u >= raw_img.cols - 1 || v >= raw_img.rows - 1)
+      return false;
+    sampled = static_cast<float>(vk::interpolateMat_8u(raw_img, u, v));
+    return std::isfinite(sampled);
+  };
+
+  if (raw_px[0] - scale < 0.0 || raw_px[1] - scale < 0.0 ||
+      raw_px[0] + scale >= raw_img.cols - 1 || raw_px[1] + scale >= raw_img.rows - 1)
+    return false;
+
+  float left = 0.0f;
+  float right = 0.0f;
+  float up = 0.0f;
+  float down = 0.0f;
+  if (!sample(raw_px[0], raw_px[1], value) ||
+      !sample(raw_px[0] - scale, raw_px[1], left) ||
+      !sample(raw_px[0] + scale, raw_px[1], right) ||
+      !sample(raw_px[0], raw_px[1] - scale, up) ||
+      !sample(raw_px[0], raw_px[1] + scale, down))
+    return false;
+
+  gradient << 0.5 * (right - left), 0.5 * (down - up);
+  return gradient.array().isFinite().all();
+}
+
+bool VIOManager::linearizeVirtualS2Sample(const PerCameraData &ctx, const cv::Mat &raw_img,
+                                          const V3D &point_c, const VirtualTrackPatch &track,
+                                          const V2D &offset, int scale, double current_exposure,
+                                          float &current_value, MD(1, 3) &J_photo_center) const
+{
+  current_value = 0.0f;
+  J_photo_center.setZero();
+  if (scale <= 0 || !std::isfinite(current_exposure)) return false;
+
+  V3D p_sample_c;
+  M3D J_sample_pc;
+  if (!computeS2SamplePointAndJacobian(point_c, track.R_vcur_from_ccur_seed,
+                                       track.R_ccur_from_vcur_seed, offset,
+                                       p_sample_c, J_sample_pc))
+    return false;
+
+  V2D raw_px;
+  MD(2, 3) J_raw_sample;
+  const int required_border = scale + 1;
+  if (!projectRawCameraWithJacobian(ctx, p_sample_c, required_border, raw_px, J_raw_sample)) return false;
+
+  V2D raw_gradient;
+  if (!sampleRawImageValueAndGradient(raw_img, raw_px, scale, current_value, raw_gradient)) return false;
+
+  MD(1, 2) Jimg;
+  Jimg << raw_gradient[0], raw_gradient[1];
+  Jimg *= current_exposure * (1.0 / scale);
+  J_photo_center = Jimg * J_raw_sample * J_sample_pc;
+  return J_photo_center.array().isFinite().all();
 }
 
 bool VIOManager::hasRangeDiscontinuity(const PerCameraData &ctx, const cv::Mat &range_img,
@@ -3157,67 +3365,112 @@ void VIOManager::computeJacobianAndUpdateEKF()
               Jpc_dRcl = -ctx.Rcl * point_l_hat;
             }
             const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
-            const V3D point_v = track.R_vcur_from_ccur_seed * point_c;
-            if (point_v[2] <= virtual_min_z) continue;
-            const V2D center = virtualProject(point_v);
-            MD(2, 3) Jdpi;
-            computeVirtualProjectionJacobian(point_v, Jdpi);
-            M3D point_c_hat;
-            point_c_hat << SKEW_SYM_MATRX(point_c);
-            for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
+
+            if (virtual_s2_optimize_en)
             {
-              const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
-              const int cache_row = point_index * patch_size_total + patch_index;
-              float current_value = 0.0f;
-              MD(1, 2) Jimg;
-              if (inverse_composition_en)
+              if (!point_c.array().isFinite().all()) continue;
+              const double point_c_norm = point_c.norm();
+              if (!std::isfinite(point_c_norm) || point_c_norm <= kS2Eps) continue;
+              M3D point_c_hat;
+              point_c_hat << SKEW_SYM_MATRX(point_c);
+              for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
               {
-                const bool current_value_ok = virtual_sparse_patch_en
-                    ? sampleSparseVirtualValue(ctx, img, track.R_ccur_from_vcur_seed,
-                                               center + offset.cast<double>(), current_value)
-                    : interpolateVirtualFloat(track.cur_support.values, track.cur_support.valid_mask,
-                                              center[0] + offset[0], center[1] + offset[1], current_value);
-                if (cache_row >= static_cast<int>(ctx.fixed_template_cache.valid.size()) ||
-                    !ctx.fixed_template_cache.valid[cache_row] || !current_value_ok)
+                const V2F offset_f = core_patch_offsets_[patch_index] * static_cast<float>(scale);
+                const V2D offset = offset_f.cast<double>();
+                float current_value = 0.0f;
+                MD(1, 3) J_photo_center;
+                if (!linearizeVirtualS2Sample(ctx, img, point_c, track, offset, scale,
+                                              current_exposure, current_value, J_photo_center))
                   continue;
-                Jimg = ctx.fixed_template_cache.photometric_gradients.row(cache_row);
+
+                const MD(1, 3) Jdphi = J_photo_center * point_c_hat;
+                const MD(1, 3) Jdp = -J_photo_center;
+                const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
+                const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
+                const double residual = current_exposure * current_value -
+                                        reference_exposure * reference_patch[patch_size_total * level + patch_index];
+                Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
+                jacobian.segment<3>(0) = JdR.transpose();
+                jacobian.segment<3>(3) = Jdt.transpose();
+                if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
+                if (estimate_extrinsic)
+                {
+                  if (allow_extrinsic_rotation)
+                    jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) =
+                        (J_photo_center * Jpc_dRcl).transpose();
+                  if (allow_extrinsic_translation)
+                    jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = J_photo_center.transpose();
+                }
+                hessian.noalias() += jacobian * jacobian.transpose();
+                gradient.noalias() += jacobian * residual;
+                patch_error += residual * residual;
+                ++measurement_count;
               }
-              else
+            }
+            else
+            {
+              const V3D point_v = track.R_vcur_from_ccur_seed * point_c;
+              if (point_v[2] <= virtual_min_z) continue;
+              const V2D center = virtualProject(point_v);
+              MD(2, 3) Jdpi;
+              computeVirtualProjectionJacobian(point_v, Jdpi);
+              M3D point_c_hat;
+              point_c_hat << SKEW_SYM_MATRX(point_c);
+              for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
               {
-                V2D image_gradient;
-                const bool current_gradient_ok = virtual_sparse_patch_en
-                    ? sampleSparseVirtualValueAndGradient(ctx, img, track.R_ccur_from_vcur_seed,
-                                                          center + offset.cast<double>(), scale,
-                                                          current_value, image_gradient)
-                    : sampleVirtualValueAndGradient(track.cur_support, center + offset.cast<double>(), scale,
-                                                    current_value, image_gradient);
-                if (!current_gradient_ok) continue;
-                Jimg << image_gradient[0], image_gradient[1];
-                Jimg *= current_exposure * inv_scale;
+                const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
+                const int cache_row = point_index * patch_size_total + patch_index;
+                float current_value = 0.0f;
+                MD(1, 2) Jimg;
+                if (inverse_composition_en)
+                {
+                  const bool current_value_ok = virtual_sparse_patch_en
+                      ? sampleSparseVirtualValue(ctx, img, track.R_ccur_from_vcur_seed,
+                                                 center + offset.cast<double>(), current_value)
+                      : interpolateVirtualFloat(track.cur_support.values, track.cur_support.valid_mask,
+                                                center[0] + offset[0], center[1] + offset[1], current_value);
+                  if (cache_row >= static_cast<int>(ctx.fixed_template_cache.valid.size()) ||
+                      !ctx.fixed_template_cache.valid[cache_row] || !current_value_ok)
+                    continue;
+                  Jimg = ctx.fixed_template_cache.photometric_gradients.row(cache_row);
+                }
+                else
+                {
+                  V2D image_gradient;
+                  const bool current_gradient_ok = virtual_sparse_patch_en
+                      ? sampleSparseVirtualValueAndGradient(ctx, img, track.R_ccur_from_vcur_seed,
+                                                            center + offset.cast<double>(), scale,
+                                                            current_value, image_gradient)
+                      : sampleVirtualValueAndGradient(track.cur_support, center + offset.cast<double>(), scale,
+                                                      current_value, image_gradient);
+                  if (!current_gradient_ok) continue;
+                  Jimg << image_gradient[0], image_gradient[1];
+                  Jimg *= current_exposure * inv_scale;
+                }
+                const MD(1, 3) Jimg_Jpi_R = Jimg * Jdpi * track.R_vcur_from_ccur_seed;
+                const MD(1, 3) Jdphi = Jimg_Jpi_R * point_c_hat;
+                const MD(1, 3) Jdp = -Jimg_Jpi_R;
+                const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
+                const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
+                const double residual = current_exposure * current_value -
+                                        reference_exposure * reference_patch[patch_size_total * level + patch_index];
+                Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
+                jacobian.segment<3>(0) = JdR.transpose();
+                jacobian.segment<3>(3) = Jdt.transpose();
+                if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
+                if (estimate_extrinsic)
+                {
+                  if (allow_extrinsic_rotation)
+                    jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) =
+                        (Jimg_Jpi_R * Jpc_dRcl).transpose();
+                  if (allow_extrinsic_translation)
+                    jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = Jimg_Jpi_R.transpose();
+                }
+                hessian.noalias() += jacobian * jacobian.transpose();
+                gradient.noalias() += jacobian * residual;
+                patch_error += residual * residual;
+                ++measurement_count;
               }
-              const MD(1, 3) Jimg_Jpi_R = Jimg * Jdpi * track.R_vcur_from_ccur_seed;
-              const MD(1, 3) Jdphi = Jimg_Jpi_R * point_c_hat;
-              const MD(1, 3) Jdp = -Jimg_Jpi_R;
-              const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
-              const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
-              const double residual = current_exposure * current_value -
-                                      reference_exposure * reference_patch[patch_size_total * level + patch_index];
-              Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
-              jacobian.segment<3>(0) = JdR.transpose();
-              jacobian.segment<3>(3) = Jdt.transpose();
-              if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
-              if (estimate_extrinsic)
-              {
-                if (allow_extrinsic_rotation)
-                  jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) =
-                      (Jimg_Jpi_R * Jpc_dRcl).transpose();
-                if (allow_extrinsic_translation)
-                  jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = Jimg_Jpi_R.transpose();
-              }
-              hessian.noalias() += jacobian * jacobian.transpose();
-              gradient.noalias() += jacobian * residual;
-              patch_error += residual * residual;
-              ++measurement_count;
             }
           }
           else
@@ -3351,6 +3604,142 @@ void VIOManager::computeJacobianAndUpdateEKF()
              state->Pcl[ctx.camera_id][0], state->Pcl[ctx.camera_id][1], state->Pcl[ctx.camera_id][2]);
     }
   }
+  for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
+}
+
+void VIOManager::updateStateVirtualS2(cv::Mat img, int level)
+{
+  if (!virtual_fisheye_patch_en || !virtual_s2_optimize_en) return;
+  if (level < 0 || level >= patch_pyrimid_level) return;
+
+  int total_observations = 0;
+  for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
+  if (total_observations == 0) return;
+
+  G = Eigen::MatrixXd::Zero(state->stateDim(), state->stateDim());
+  StatesGroup old_state = *state;
+  double last_error = std::numeric_limits<double>::max();
+  const bool online_extrinsic_active = online_extrinsic_en &&
+      frame_count >= online_extrinsic_start_frame &&
+      total_observations >= online_extrinsic_min_tracks;
+  const bool allow_extrinsic_rotation = online_extrinsic_active && online_extrinsic_rot_en;
+  const bool allow_extrinsic_translation = online_extrinsic_active && online_extrinsic_trans_en;
+
+  for (int iteration = 0; iteration < max_iterations; ++iteration)
+  {
+    const double linearize_start = omp_get_wtime();
+    const int state_dim = state->stateDim();
+    Eigen::MatrixXd hessian = Eigen::MatrixXd::Zero(state_dim, state_dim);
+    Eigen::VectorXd gradient = Eigen::VectorXd::Zero(state_dim);
+    double error = 0.0;
+    int measurement_count = 0;
+
+    for (PerCameraData &ctx : cameras_)
+    {
+      if (ctx.total_points == 0 || ctx.visual_submap == nullptr) continue;
+      const cv::Mat &raw_img = (ctx.new_frame != nullptr) ? ctx.new_frame->img_ : img;
+      if (raw_img.empty()) continue;
+      const M3D Rwi = state->rot_end;
+      const V3D Pwi = state->pos_end;
+      const bool estimate_extrinsic = isOnlineExtrinsicEnabledForCamera(ctx.camera_id) &&
+                                      (allow_extrinsic_rotation || allow_extrinsic_translation);
+      ctx.Rcw = ctx.Rci * Rwi.transpose();
+      ctx.Pcw = -ctx.Rci * Rwi.transpose() * Pwi + ctx.Pci;
+      ctx.Jdp_dt = ctx.Rci * Rwi.transpose();
+      const double current_exposure = state->inv_expo_time[ctx.camera_id];
+
+      for (int point_index = 0; point_index < ctx.total_points; ++point_index)
+      {
+        VisualPoint *point = ctx.visual_submap->voxel_points[point_index];
+        if (point == nullptr || point_index >= static_cast<int>(ctx.visual_submap->virtual_track_patches.size())) continue;
+        const int search_level = ctx.visual_submap->search_levels[point_index];
+        const int pyramid_level = level + search_level;
+        const int scale = 1 << pyramid_level;
+        const std::vector<float> &reference_patch = ctx.visual_submap->warp_patch[point_index];
+        const double reference_exposure = ctx.visual_submap->inv_expo_list[point_index];
+        const VirtualTrackPatch &track = ctx.visual_submap->virtual_track_patches[point_index];
+        const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
+        if (!point_c.array().isFinite().all()) continue;
+        const double point_c_norm = point_c.norm();
+        if (!std::isfinite(point_c_norm) || point_c_norm <= kS2Eps) continue;
+
+        M3D Jpc_dRcl = M3D::Zero();
+        if (estimate_extrinsic)
+        {
+          const V3D point_i = Rwi.transpose() * (point->pos_ - Pwi);
+          const V3D point_l = Rli * point_i + Pli;
+          M3D point_l_hat;
+          point_l_hat << SKEW_SYM_MATRX(point_l);
+          Jpc_dRcl = -ctx.Rcl * point_l_hat;
+        }
+
+        M3D point_c_hat;
+        point_c_hat << SKEW_SYM_MATRX(point_c);
+        double patch_error = 0.0;
+        for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
+        {
+          const V2D offset = (core_patch_offsets_[patch_index] * static_cast<float>(scale)).cast<double>();
+          float current_value = 0.0f;
+          MD(1, 3) J_photo_center;
+          if (!linearizeVirtualS2Sample(ctx, raw_img, point_c, track, offset, scale,
+                                        current_exposure, current_value, J_photo_center))
+            continue;
+
+          const MD(1, 3) Jdphi = J_photo_center * point_c_hat;
+          const MD(1, 3) Jdp = -J_photo_center;
+          const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
+          const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
+          const double residual = current_exposure * current_value -
+                                  reference_exposure * reference_patch[patch_size_total * level + patch_index];
+
+          Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
+          jacobian.segment<3>(0) = JdR.transpose();
+          jacobian.segment<3>(3) = Jdt.transpose();
+          if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
+          if (estimate_extrinsic)
+          {
+            if (allow_extrinsic_rotation)
+              jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) =
+                  (J_photo_center * Jpc_dRcl).transpose();
+            if (allow_extrinsic_translation)
+              jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = J_photo_center.transpose();
+          }
+          hessian.noalias() += jacobian * jacobian.transpose();
+          gradient.noalias() += jacobian * residual;
+          patch_error += residual * residual;
+          ++measurement_count;
+        }
+        ctx.visual_submap->errors[point_index] = patch_error;
+        error += patch_error;
+      }
+    }
+
+    if (online_extrinsic_active && online_extrinsic_prior_factor_en)
+      applyOnlineExtrinsicPriors(hessian, gradient, allow_extrinsic_rotation, allow_extrinsic_translation);
+    compute_jacobian_time += omp_get_wtime() - linearize_start;
+    if (measurement_count == 0) return;
+    error /= measurement_count;
+    if (error > last_error)
+    {
+      *state = old_state;
+      syncCameraExtrinsicsFromState(*state);
+      break;
+    }
+
+    old_state = *state;
+    last_error = error;
+    const double update_start = omp_get_wtime();
+    const Eigen::MatrixXd K1 = (hessian + (state->cov / img_point_cov).inverse()).inverse();
+    const Eigen::VectorXd prior_delta = *state_propagat - *state;
+    G = K1 * hessian;
+    Eigen::VectorXd solution = -K1 * gradient + prior_delta - G * prior_delta;
+    limitOnlineExtrinsicUpdate(solution, allow_extrinsic_rotation, allow_extrinsic_translation);
+    *state += solution;
+    syncCameraExtrinsicsFromState(*state);
+    update_ekf_time += omp_get_wtime() - update_start;
+    if (solution.segment<3>(0).norm() * 57.3 < 0.001 && solution.segment<3>(3).norm() * 100.0 < 0.001) break;
+  }
+  state->cov -= G * state->cov;
   for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
 }
 
@@ -4643,7 +5032,10 @@ void VIOManager::updateState(cv::Mat img, int level)
 {
   if (virtual_fisheye_patch_en)
   {
-    updateStateVirtual(img, level);
+    if (virtual_s2_optimize_en)
+      updateStateVirtualS2(img, level);
+    else
+      updateStateVirtual(img, level);
     return;
   }
   if (total_points == 0) return;

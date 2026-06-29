@@ -280,6 +280,7 @@ public:
   bool ncc_en = false, colmap_output_en = false;
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
+  bool virtual_s2_optimize_en = false;
   bool cross_camera_reference_en = false;
   bool online_extrinsic_en = false;
   bool online_extrinsic_rot_en = true;
@@ -489,6 +490,18 @@ public:
   bool buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &point_in_raw_camera, const V2D &raw_center_px,
                                  M3D &R_v_from_c, M3D &R_c_from_v) const;
   bool projectRawFisheyeIfValid(const PerCameraData &ctx, const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const;
+  bool computeS2SamplePointAndJacobian(const V3D &point_c, const M3D &R_v_from_c, const M3D &R_c_from_v,
+                                       const V2D &offset, V3D &p_sample_c, M3D &J_sample_pc) const;
+  bool projectEquidistantFisheyeWithJacobian(const PerCameraData &ctx, const V3D &p_c, int required_border,
+                                             V2D &raw_px, MD(2, 3) &J_raw_pc) const;
+  bool projectRawCameraWithJacobian(const PerCameraData &ctx, const V3D &p_c, int required_border,
+                                    V2D &raw_px, MD(2, 3) &J_raw_pc) const;
+  bool sampleRawImageValueAndGradient(const cv::Mat &raw_img, const V2D &raw_px, int scale,
+                                      float &value, V2D &gradient) const;
+  bool linearizeVirtualS2Sample(const PerCameraData &ctx, const cv::Mat &raw_img, const V3D &point_c,
+                                const VirtualTrackPatch &track, const V2D &offset, int scale,
+                                double current_exposure, float &current_value,
+                                MD(1, 3) &J_photo_center) const;
   bool hasRangeDiscontinuity(const PerCameraData &ctx, const cv::Mat &range_img,
                              const V2D &raw_px, double point_range) const;
   bool buildVirtualSupportPatchPullExact(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v,
@@ -553,6 +566,7 @@ public:
                                           const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg);
   void updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img);
+  void updateStateVirtualS2(cv::Mat img, int level);
   void insertPointIntoVoxelMap(VisualPoint *pt_new);
   void commitPendingNewPoints();
   void plotTrackedPoints(PerCameraData &ctx);

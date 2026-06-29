@@ -118,6 +118,7 @@
 
 
       virtual_fisheye_patch_en: true
+      virtual_s2_optimize_en: false
       virtual_sparse_patch_en: false
       virtual_focal_length: 300.0
       virtual_patch_margin: 8

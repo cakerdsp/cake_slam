@@ -164,6 +164,7 @@ public:
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
+  bool virtual_s2_optimize_en = false;
   bool cross_camera_reference_en = false;
   bool online_extrinsic_en = false;
   bool online_extrinsic_rot_en = true;
