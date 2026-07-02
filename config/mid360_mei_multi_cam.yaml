@@ -15,6 +15,9 @@
       camera0:
         img_topic: "/fisheye/left/image_raw"
         camera_ns: "camera0"
+        # Undistort baseline: set camera_ns to "camera0_undistort" and image_undistort_en to true.
+        image_undistort_en: false
+        raw_camera_ns: "camera0"
         Rcl: [0.71787, -0.69617, -0.00210,
               -0.02115, -0.01878, -0.99960,
                0.69585,  0.71763, -0.02821]
@@ -23,6 +26,8 @@
       camera1:
         img_topic: "/fisheye/right/image_raw"
         camera_ns: "camera1"
+        image_undistort_en: false
+        raw_camera_ns: "camera1"
         Rcl: [-0.6996424752, -0.7128739047,  0.0480331004,
               -0.0343341177, -0.0335986769, -0.9988454714,
                0.7136620048, -0.7004856166, -0.0009589922]

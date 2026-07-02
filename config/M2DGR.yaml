@@ -2,6 +2,10 @@
   ros__parameters:
     common:
       img_topic: "/camera/left/image_raw"
+
+      # Input-only remap. Enable only when the camera YAML also contains the raw model.
+      image_undistort_en: false
+      raw_camera_ns: "camera"
       lid_topic: "/velodyne_points"
       imu_topic: "/handsfree/imu"
       img_en: 1

@@ -18,6 +18,10 @@
       camera0:
         img_topic: "/camera/left/image_raw"
         camera_ns: "camera0"
+        # Input-only remap. When true, camera_ns should name the undistorted pinhole model,
+        # and raw_camera_ns should name the raw fisheye model in the camera YAML.
+        image_undistort_en: false
+        raw_camera_ns: "camera0"
         Rcl: [0.0, -1.0,  0.0,
               0.0,  0.0, -1.0,
               1.0,  0.0,  0.0]
@@ -37,6 +41,8 @@
       camera1:
         img_topic: "/camera/third/image_raw"
         camera_ns: "camera1"
+        image_undistort_en: false
+        raw_camera_ns: "camera1"
         Rcl: [1.0, 0.0,  0.0,
               0.0, 0.0, -1.0,
               0.0, 1.0,  0.0]
@@ -47,6 +53,8 @@
       camera2:
         img_topic: "/camera/fourth/image_raw"
         camera_ns: "camera2"
+        image_undistort_en: false
+        raw_camera_ns: "camera2"
         Rcl: [-1.0,  0.0,  0.0,
                0.0,  0.0, -1.0,
                0.0, -1.0,  0.0]
@@ -57,6 +65,8 @@
       camera4:
         img_topic: "/camera/fifth/image_raw/compressed"
         camera_ns: "camera4"
+        image_undistort_en: false
+        raw_camera_ns: "camera4"
         Rcl: [ 0.0, 1.0,  0.0,
                0.0, 0.0, -1.0,
               -1.0, 0.0,  0.0]
@@ -67,6 +77,8 @@
       camera5:
         img_topic: "/camera/sixth/image_raw/compressed"
         camera_ns: "camera5"
+        image_undistort_en: false
+        raw_camera_ns: "camera5"
         Rcl: [ 0.0, 1.0,  0.0,
                0.0, 0.0, -1.0,
               -1.0, 0.0,  0.0]
@@ -77,6 +89,8 @@
       camera6:
         img_topic: "/camera/head/image_raw/compressed"
         camera_ns: "camera6"
+        image_undistort_en: false
+        raw_camera_ns: "camera6"
         Rcl: [ 0.0, -1.0,  0.0,
               -1.0,  0.0,  0.0,
                0.0,  0.0, -1.0]

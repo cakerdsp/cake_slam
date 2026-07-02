@@ -25,6 +25,23 @@
       # cx: 535.124575
       # cy: 646.963644
 
+    # Generated undistort-baseline output model for camera0.
+    # Policy: output_size=1088x1280, target_hfov=120deg, centered principal point.
+    # Distortion is zero because this namespace represents the already-undistorted pinhole image.
+    camera0_undistort:
+      model: Pinhole
+      width: 1088
+      height: 1280
+      scale: 1.0
+      fx: 314.078546
+      fy: 314.078546
+      cx: 543.5
+      cy: 639.5
+      d0: 0.0
+      d1: 0.0
+      d2: 0.0
+      d3: 0.0
+
     camera1:
       model: MEI
       width: 1088

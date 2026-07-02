@@ -219,5 +219,9 @@ public:
   double aver_time_map_inre = 0;
   bool colmap_output_en = false;
   bool image_downclock_en = false;
+  bool image_undistort_en = false;
+  std::string raw_camera_namespace;
+  cv::Mat undistort_map_x;
+  cv::Mat undistort_map_y;
 };
 #endif

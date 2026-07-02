@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <vikit/abstract_camera.h>
 #include <vikit/camera_loader.h>
 
 using namespace Sophus;
@@ -42,6 +43,60 @@ std::string formatMissingCameraIdsLocked(const PendingImageGroup &group)
     missing_camera_ids += std::to_string(camera_id);
   }
   return missing_camera_ids.empty() ? "unknown" : missing_camera_ids;
+}
+
+bool buildImageUndistortMaps(vk::AbstractCamera &raw_camera,
+                             vk::AbstractCamera &undistorted_camera,
+                             cv::Mat &map_x, cv::Mat &map_y,
+                             std::string &error_message)
+{
+  const int width = undistorted_camera.width();
+  const int height = undistorted_camera.height();
+  if (width <= 0 || height <= 0)
+  {
+    error_message = "undistorted camera width/height must be positive";
+    return false;
+  }
+
+  map_x.create(height, width, CV_32FC1);
+  map_y.create(height, width, CV_32FC1);
+  int valid_samples = 0;
+  constexpr double kMinRayNorm = 1.0e-12;
+  for (int y = 0; y < height; ++y)
+  {
+    float *map_x_row = map_x.ptr<float>(y);
+    float *map_y_row = map_y.ptr<float>(y);
+    for (int x = 0; x < width; ++x)
+    {
+      const V3D ray = undistorted_camera.cam2world(static_cast<double>(x), static_cast<double>(y));
+      const double ray_norm = ray.norm();
+      if (!ray.array().isFinite().all() || !std::isfinite(ray_norm) || ray_norm <= kMinRayNorm)
+      {
+        map_x_row[x] = -1.0f;
+        map_y_row[x] = -1.0f;
+        continue;
+      }
+
+      const V2D raw_px = raw_camera.world2cam(ray);
+      if (!raw_px.array().isFinite().all())
+      {
+        map_x_row[x] = -1.0f;
+        map_y_row[x] = -1.0f;
+        continue;
+      }
+
+      map_x_row[x] = static_cast<float>(raw_px[0]);
+      map_y_row[x] = static_cast<float>(raw_px[1]);
+      ++valid_samples;
+    }
+  }
+
+  if (valid_samples == 0)
+  {
+    error_message = "undistort remap has no valid samples";
+    return false;
+  }
+  return true;
 }
 } // namespace
 
@@ -222,16 +277,22 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
     const std::string camera_cfg_ns = "cameras.camera" + std::to_string(camera_id);
     const std::string topic_key = camera_cfg_ns + ".img_topic";
     const std::string namespace_key = camera_cfg_ns + ".camera_ns";
+    const std::string image_undistort_key = camera_cfg_ns + ".image_undistort_en";
+    const std::string raw_namespace_key = camera_cfg_ns + ".raw_camera_ns";
     const std::string rotation_key = camera_cfg_ns + ".Rcl";
     const std::string translation_key = camera_cfg_ns + ".Pcl";
     const std::string online_extrinsic_key = camera_cfg_ns + ".online_extrinsic_en";
     try_declare.template operator()<std::string>(topic_key, "");
     try_declare.template operator()<std::string>(namespace_key, "");
+    try_declare.template operator()<bool>(image_undistort_key, false);
+    try_declare.template operator()<std::string>(raw_namespace_key, "");
     try_declare.template operator()<vector<double>>(rotation_key, vector<double>{});
     try_declare.template operator()<vector<double>>(translation_key, vector<double>{});
     try_declare.template operator()<bool>(online_extrinsic_key, true);
     node->get_parameter(topic_key, camera_configs[camera_id].img_topic);
     node->get_parameter(namespace_key, camera_configs[camera_id].camera_namespace);
+    node->get_parameter(image_undistort_key, camera_configs[camera_id].image_undistort_en);
+    node->get_parameter(raw_namespace_key, camera_configs[camera_id].raw_camera_namespace);
     node->get_parameter(rotation_key, camera_configs[camera_id].Rcl);
     node->get_parameter(translation_key, camera_configs[camera_id].Pcl);
     node->get_parameter(online_extrinsic_key, camera_configs[camera_id].online_extrinsic_en);
@@ -239,6 +300,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
       throw std::runtime_error("missing required parameter " + topic_key);
     if (camera_configs[camera_id].camera_namespace.empty())
       throw std::runtime_error("missing required parameter " + namespace_key);
+    if (camera_configs[camera_id].image_undistort_en && camera_configs[camera_id].raw_camera_namespace.empty())
+      throw std::runtime_error("missing required parameter " + raw_namespace_key + " when " + image_undistort_key + " is true");
     if (camera_configs[camera_id].Rcl.size() != 9)
       throw std::runtime_error(rotation_key + " must contain exactly 9 values");
     if (camera_configs[camera_id].Pcl.size() != 3)
@@ -385,6 +448,21 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
     if (!vk::camera_loader::loadFromRosNs(this->node, config.camera_namespace, ctx.cam))
       throw std::runtime_error("failed to load camera model for camera_id=" + std::to_string(camera_id) +
                                " camera_ns=" + config.camera_namespace);
+    if (config.image_undistort_en)
+    {
+      vk::AbstractCamera *raw_camera = nullptr;
+      if (!vk::camera_loader::loadFromRosNs(this->node, config.raw_camera_namespace, raw_camera))
+        throw std::runtime_error("failed to load raw camera model for input undistort, camera_id=" +
+                                 std::to_string(camera_id) + " raw_camera_ns=" + config.raw_camera_namespace);
+      std::string remap_error;
+      if (!buildImageUndistortMaps(*raw_camera, *ctx.cam, config.undistort_map_x,
+                                   config.undistort_map_y, remap_error))
+        throw std::runtime_error("failed to build input undistort remap for camera_id=" +
+                                 std::to_string(camera_id) + ": " + remap_error);
+      printf("[ Input Undistort ] camera_id=%d raw_ns=%s output_ns=%s output_size=%dx%d\n",
+             camera_id, config.raw_camera_namespace.c_str(), config.camera_namespace.c_str(),
+             config.undistort_map_x.cols, config.undistort_map_x.rows);
+    }
     vio_manager->setCameraCalibration(camera_id, config.img_topic, config.camera_namespace, config.Rcl, config.Pcl);
     const M3D Rcl = vio_manager->cameras_[camera_id].Rcl;
     const V3D Pcl = vio_manager->cameras_[camera_id].Pcl;
@@ -1254,6 +1332,20 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
     return;
   }
 
+  const CameraInputConfig &camera_config = camera_configs[camera_id];
+  cv::Mat image_for_sync = img_cur;
+  if (camera_config.image_undistort_en)
+  {
+    if (camera_config.undistort_map_x.empty() || camera_config.undistort_map_y.empty())
+    {
+      RCLCPP_ERROR(this->node->get_logger(), "camera_id=%d input undistort map is not initialized", camera_id);
+      return;
+    }
+    cv::Mat image_undistorted;
+    cv::remap(img_cur, image_undistorted, camera_config.undistort_map_x, camera_config.undistort_map_y,
+              cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar());
+    image_for_sync = image_undistorted;
+  }
   const uint64_t sync_tolerance_ns =
       static_cast<uint64_t>(std::llround(multi_cam_sync_tolerance_ms * 1.0e6));
 
@@ -1290,7 +1382,7 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
 
       anchor.stamp_ns = stamp_ns;
       anchor.timestamp = image_time;
-      anchor.images[0] = img_cur.clone();
+      anchor.images[0] = image_for_sync.clone();
       anchor.arrived[0] = 1;
       anchor.image_stamp_ns[0] = stamp_ns;
 
@@ -1374,7 +1466,7 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
       PendingImageGroup &group = group_it->second;
       initializeGroup(group, group_it->first, image_time);
       if (group.arrived[camera_id]) return;
-      group.images[camera_id] = img_cur.clone();
+      group.images[camera_id] = image_for_sync.clone();
       group.arrived[camera_id] = 1;
       group.image_stamp_ns[camera_id] = stamp_ns;
     }

@@ -2,6 +2,10 @@
   ros__parameters:
     common:
       img_topic: "/left_camera/image"
+
+      # Input-only remap. Enable only when the camera YAML also contains the raw model.
+      image_undistort_en: false
+      raw_camera_ns: "camera"
       lid_topic: "/livox/lidar"
       imu_topic: "/livox/imu"
       img_en: 1

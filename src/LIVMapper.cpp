@@ -11,10 +11,68 @@ which is included as part of this source code package.
 */
 
 #include "LIVMapper.h"
+#include <cmath>
 #include <filesystem>
+#include <vikit/abstract_camera.h>
 #include <vikit/camera_loader.h>
 
 using namespace Sophus;
+namespace
+{
+bool buildImageUndistortMaps(vk::AbstractCamera &raw_camera,
+                             vk::AbstractCamera &undistorted_camera,
+                             cv::Mat &map_x, cv::Mat &map_y,
+                             std::string &error_message)
+{
+  const int width = undistorted_camera.width();
+  const int height = undistorted_camera.height();
+  if (width <= 0 || height <= 0)
+  {
+    error_message = "undistorted camera width/height must be positive";
+    return false;
+  }
+
+  map_x.create(height, width, CV_32FC1);
+  map_y.create(height, width, CV_32FC1);
+  int valid_samples = 0;
+  constexpr double kMinRayNorm = 1.0e-12;
+  for (int y = 0; y < height; ++y)
+  {
+    float *map_x_row = map_x.ptr<float>(y);
+    float *map_y_row = map_y.ptr<float>(y);
+    for (int x = 0; x < width; ++x)
+    {
+      const V3D ray = undistorted_camera.cam2world(static_cast<double>(x), static_cast<double>(y));
+      const double ray_norm = ray.norm();
+      if (!ray.array().isFinite().all() || !std::isfinite(ray_norm) || ray_norm <= kMinRayNorm)
+      {
+        map_x_row[x] = -1.0f;
+        map_y_row[x] = -1.0f;
+        continue;
+      }
+
+      const V2D raw_px = raw_camera.world2cam(ray);
+      if (!raw_px.array().isFinite().all())
+      {
+        map_x_row[x] = -1.0f;
+        map_y_row[x] = -1.0f;
+        continue;
+      }
+
+      map_x_row[x] = static_cast<float>(raw_px[0]);
+      map_y_row[x] = static_cast<float>(raw_px[1]);
+      ++valid_samples;
+    }
+  }
+
+  if (valid_samples == 0)
+  {
+    error_message = "undistort remap has no valid samples";
+    return false;
+  }
+  return true;
+}
+} // namespace
 LIVMapper::LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name, const rclcpp::NodeOptions & options)
     : node(std::make_shared<rclcpp::Node>(node_name, options)),
       extT(0, 0, 0),
@@ -74,6 +132,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<int>("common.img_en", 1);
   try_declare.template operator()<int>("common.lidar_en", 1);
   try_declare.template operator()<std::string>("common.img_topic", "/left_camera/image");
+  try_declare.template operator()<bool>("common.image_undistort_en", false);
+  try_declare.template operator()<std::string>("common.raw_camera_ns", "camera");
 
   try_declare.template operator()<bool>("vio.normal_en", true);
   try_declare.template operator()<bool>("vio.inverse_composition_en", false);
@@ -153,6 +213,10 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("common.img_en", img_en);
   this->node->get_parameter("common.lidar_en", lidar_en);
   this->node->get_parameter("common.img_topic", img_topic);
+  this->node->get_parameter("common.image_undistort_en", image_undistort_en);
+  this->node->get_parameter("common.raw_camera_ns", raw_camera_namespace);
+  if (image_undistort_en && raw_camera_namespace.empty())
+    throw std::runtime_error("common.raw_camera_ns is required when common.image_undistort_en is true");
 
   this->node->get_parameter("vio.normal_en", normal_en);
   this->node->get_parameter("vio.inverse_composition_en", inverse_composition_en);
@@ -244,6 +308,18 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   voxelmap_manager->extR_ << MAT_FROM_ARRAY(extrinR);
 
   if (!vk::camera_loader::loadFromRosNs(this->node, "camera", vio_manager->cam)) throw std::runtime_error("Camera model not correctly specified.");
+  if (image_undistort_en)
+  {
+    vk::AbstractCamera *raw_camera = nullptr;
+    if (!vk::camera_loader::loadFromRosNs(this->node, raw_camera_namespace, raw_camera))
+      throw std::runtime_error("failed to load raw camera model for single camera input undistort, raw_camera_ns=" +
+                               raw_camera_namespace);
+    std::string remap_error;
+    if (!buildImageUndistortMaps(*raw_camera, *vio_manager->cam, undistort_map_x, undistort_map_y, remap_error))
+      throw std::runtime_error("failed to build single camera input undistort remap: " + remap_error);
+    printf("[ Input Undistort ] raw_ns=%s output_ns=camera output_size=%dx%d\n",
+           raw_camera_namespace.c_str(), undistort_map_x.cols, undistort_map_x.rows);
+  }
 
   vio_manager->grid_size = grid_size;
   vio_manager->patch_size = patch_size;
@@ -1035,6 +1111,20 @@ void LIVMapper::handleImageFrame(const builtin_interfaces::msg::Time &stamp, con
     return;
   }
 
+  cv::Mat image_for_sync = img_cur;
+  if (image_undistort_en)
+  {
+    if (undistort_map_x.empty() || undistort_map_y.empty())
+    {
+      RCLCPP_ERROR(this->node->get_logger(), "single camera input undistort map is not initialized");
+      return;
+    }
+    cv::Mat image_undistorted;
+    cv::remap(img_cur, image_undistorted, undistort_map_x, undistort_map_y,
+              cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar());
+    image_for_sync = image_undistorted;
+  }
+
   mtx_buffer.lock();
 
   double img_time_correct = msg_header_time; // last_timestamp_lidar + 0.105;
@@ -1047,7 +1137,7 @@ void LIVMapper::handleImageFrame(const builtin_interfaces::msg::Time &stamp, con
     return;
   }
 
-  img_buffer.push_back(img_cur);
+  img_buffer.push_back(image_for_sync);
   img_time_buffer.push_back(img_time_correct);
 
   // ROS_INFO("Correct Image time: %.6f", img_time_correct);

@@ -34,6 +34,10 @@ struct CameraInputConfig
 {
   std::string img_topic;
   std::string camera_namespace;
+  bool image_undistort_en = false;
+  std::string raw_camera_namespace;
+  cv::Mat undistort_map_x;
+  cv::Mat undistort_map_y;
   std::vector<double> Rcl;
   std::vector<double> Pcl;
   bool online_extrinsic_en = true;
