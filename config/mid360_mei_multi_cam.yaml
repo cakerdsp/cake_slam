@@ -14,9 +14,9 @@
     cameras:
       camera0:
         img_topic: "/fisheye/left/image_raw"
-        camera_ns: "camera0"
+        camera_ns: "camera0_undistort"
         # Undistort baseline: set camera_ns to "camera0_undistort" and image_undistort_en to true.
-        image_undistort_en: false
+        image_undistort_en: true
         raw_camera_ns: "camera0"
         Rcl: [0.71787, -0.69617, -0.00210,
               -0.02115, -0.01878, -0.99960,
@@ -75,7 +75,7 @@
       # Adapted from the original cam0 virtual-patch values:
       # virtual_width/height and sphere LUT fields are not read by this project;
       # ax/ay=120 maps to the current virtual_focal_length parameter.
-      virtual_fisheye_patch_en: true
+      virtual_fisheye_patch_en: false
       virtual_s2_optimize_en: false
       virtual_focal_length: 120.0
       virtual_patch_margin: 8
