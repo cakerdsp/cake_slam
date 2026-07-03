@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     common:
-      # The first N camera entries below are enabled. Valid range: 1..7.
+      # The first N camera entries below are enabled. Valid range: 1..8.
       # camera6 is excluded by default because its official extrinsic is marked "to be changed".
       num_cameras: 3
       require_all_cameras: true
@@ -15,18 +15,18 @@
 
     cameras:
       # camera0: left 8823
-      camera0:
-        img_topic: "/camera/left/image_raw"
-        camera_ns: "camera0_undistort"
-        # Input-only remap. When true, camera_ns should name the undistorted pinhole model,
-        # and raw_camera_ns should name the raw fisheye model in the camera YAML.
-        image_undistort_en: true
-        raw_camera_ns: "camera0"
-        Rcl: [0.0, -1.0,  0.0,
-              0.0,  0.0, -1.0,
-              1.0,  0.0,  0.0]
-        Pcl: [0.16123, -0.16711, -0.24221]
-        online_extrinsic_en: true
+      # camera0:
+      #   img_topic: "/camera/left/image_raw"
+      #   camera_ns: "camera0"
+      #   # Input-only remap. When true, camera_ns should name the undistorted pinhole model,
+      #   # and raw_camera_ns should name the raw fisheye model in the camera YAML.
+      #   image_undistort_en: false
+      #   raw_camera_ns: "camera0"
+      #   Rcl: [0.0, -1.0,  0.0,
+      #         0.0,  0.0, -1.0,
+      #         1.0,  0.0,  0.0]
+      #   Pcl: [0.16123, -0.16711, -0.24221]
+      #   online_extrinsic_en: true
 
       # # camera1: right 8828
       # camera1:
@@ -37,11 +37,11 @@
       #         1.0,  0.0,  0.0]
       #   Pcl: [-0.16025, -0.16724, -0.242013]
 
-      # camera2: third / mid-left 8830
+      camera1: third / mid-left 8830 (dataset camera2)
       camera1:
         img_topic: "/camera/third/image_raw"
-        camera_ns: "camera1_undistort"
-        image_undistort_en: true
+        camera_ns: "camera1"
+        image_undistort_en: false
         raw_camera_ns: "camera1"
         Rcl: [1.0, 0.0,  0.0,
               0.0, 0.0, -1.0,
@@ -49,16 +49,29 @@
         Pcl: [-0.00109, -0.16718, -0.16004]
         online_extrinsic_en: true
 
-      # camera3: fourth / mid-right 8827
+      # camera2: fourth / mid-right 8827 (dataset camera3)
       camera2:
         img_topic: "/camera/fourth/image_raw"
-        camera_ns: "camera2_undistort"
-        image_undistort_en: true
+        camera_ns: "camera2"
+        image_undistort_en: false
         raw_camera_ns: "camera2"
         Rcl: [-1.0,  0.0,  0.0,
                0.0,  0.0, -1.0,
                0.0, -1.0,  0.0]
         Pcl: [0.00021, -0.16674, -0.16013]
+        online_extrinsic_en: true
+
+
+      # camera3: Realsense D435i color pinhole
+      camera0:
+        img_topic: "/camera/color/image_raw/compressed"
+        camera_ns: "camera0"
+        image_undistort_en: false
+        raw_camera_ns: "camera0"
+        Rcl: [0.0, -1.0,  0.0,
+              0.0,  0.0, -1.0,
+              1.0,  0.0,  0.0]
+        Pcl: [0.00065, 0.65376, -0.30456]
         online_extrinsic_en: true
 
       # camera4: fifth / back-left 6450
@@ -110,7 +123,7 @@
 
     preprocess:
       image_downclock_en: false
-      point_filter_num: 15
+      point_filter_num: 20
       filter_size_surf: 0.1
       lidar_type: 2
       scan_line: 32
@@ -120,7 +133,7 @@
 
     vio:
       frontend_mode: 0
-      cross_camera_reference_en: false
+      cross_camera_reference_en: true
       max_iterations: 5
       outlier_threshold: 500
       img_point_cov: 1000
@@ -131,7 +144,7 @@
       patch_pyrimid_level: 3
 
 
-      virtual_fisheye_patch_en: false
+      virtual_fisheye_patch_en: true
       virtual_s2_optimize_en: false
       virtual_sparse_patch_en: false
       virtual_focal_length: 300.0

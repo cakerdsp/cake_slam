@@ -723,6 +723,13 @@ void LIVMapper::handleVIO()
     printf("[ VIO ] No lidar points, continue frontend_mode=%d image frontend.\n", current_frontend_mode);
   }
 
+  const size_t vio_raw_points = pcl_w_wait_pub != nullptr ? pcl_w_wait_pub->points.size() : 0;
+  printf("[ VIO Debug ] dispatch frontend_mode=%d raw_points=%zu cameras=%d virtual=%d cross_ref=%d normal=%d inverse=%d raycast=%d\n",
+         current_frontend_mode, vio_raw_points, vio_manager->numCameras(), vio_manager->virtual_fisheye_patch_en ? 1 : 0,
+         vio_manager->cross_camera_reference_en ? 1 : 0, vio_manager->normal_en ? 1 : 0,
+         vio_manager->inverse_composition_en ? 1 : 0, vio_manager->raycast_en ? 1 : 0);
+  fflush(stdout);
+
   if (fabs((LidarMeasures.last_lio_update_time - _first_lidar_time) - plot_time) < (frame_cnt / 2 * 0.1)) 
   {
     vio_manager->plot_flag = true;

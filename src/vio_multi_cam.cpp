@@ -1776,9 +1776,11 @@ bool VIOManager::buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv
     if (raw_affine_valid && A_anchor_source.array().isFinite().all() && std::fabs(A_anchor_source.determinant()) > 1.0e-9)
     {
       std::vector<float> raw_patch(patch_size_total, 0.0f);
-      warpAffine(A_anchor_source, raw_img, raw_px, 0, 0, 0, patch_size_half, raw_patch.data());
-      collect_sample_pixels(A_anchor_source, raw_px, raw_sample_pixels);
-      raw_valid = make_display(raw_patch, raw_patch_display);
+      if (warpAffine(A_anchor_source, raw_img, raw_px, 0, 0, 0, patch_size_half, raw_patch.data()))
+      {
+        collect_sample_pixels(A_anchor_source, raw_px, raw_sample_pixels);
+        raw_valid = make_display(raw_patch, raw_patch_display);
+      }
     }
   }
 
@@ -2072,15 +2074,30 @@ void VIOManager::getWarpMatrixAffine(const PerCameraData &ref_ctx, const PerCame
   A_cur_ref.col(1) = (px_dv - px_cur) / halfpatch_size;
 }
 
-void VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
+bool VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                             const int pyramid_level, const int halfpatch_size, float *patch)
 {
   const int patch_size = halfpatch_size * 2;
-  const Matrix2f A_ref_cur = A_cur_ref.inverse().cast<float>();
-  if (isnan(A_ref_cur(0, 0)))
+  const double debug_affine_det = A_cur_ref.determinant();
+  const bool debug_warp_input_ok = !img_ref.empty() && img_ref.type() == CV_8UC1 && patch != nullptr &&
+                                   halfpatch_size > 0 && search_level >= 0 && pyramid_level >= 0 &&
+                                   A_cur_ref.array().isFinite().all() && std::isfinite(debug_affine_det) &&
+                                   std::fabs(debug_affine_det) > 1e-9 && px_ref.array().isFinite().all();
+  if (!debug_warp_input_ok)
   {
-    printf("Affine warp is NaN, probably camera has no translation\n"); // TODO
-    return;
+    printf("[ VIO Debug ] warpAffine reject det=%.6e finite=%d px=(%.2f,%.2f) img=%dx%d type=%d level_ref=%d search=%d pyramid=%d half=%d patch_null=%d\n",
+           debug_affine_det, A_cur_ref.array().isFinite().all() ? 1 : 0, px_ref[0], px_ref[1], img_ref.cols, img_ref.rows, img_ref.type(),
+           level_ref, search_level, pyramid_level, halfpatch_size, patch == nullptr ? 1 : 0);
+    fflush(stdout);
+    return false;
+  }
+
+  const Matrix2f A_ref_cur = A_cur_ref.inverse().cast<float>();
+  if (!A_ref_cur.array().isFinite().all())
+  {
+    printf("[ VIO Debug ] warpAffine reject inverse_nonfinite det=%.6e\n", debug_affine_det);
+    fflush(stdout);
+    return false;
   }
 
   float *patch_ptr = patch;
@@ -2092,12 +2109,14 @@ void VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, c
       px_patch *= (1 << search_level);
       px_patch *= (1 << pyramid_level);
       const Vector2f px(A_ref_cur * px_patch + px_ref.cast<float>());
+      if (!px.array().isFinite().all()) return false;
       if (px[0] < 0 || px[1] < 0 || px[0] >= img_ref.cols - 1 || px[1] >= img_ref.rows - 1)
         patch_ptr[patch_size_total * pyramid_level + y * patch_size + x] = 0;
       else
         patch_ptr[patch_size_total * pyramid_level + y * patch_size + x] = (float)vk::interpolateMat_8u(img_ref, px[0], px[1]);
     }
   }
+  return true;
 }
 
 int VIOManager::getBestSearchLevel(const Matrix2d &A_cur_ref, const int max_level)
@@ -2766,7 +2785,17 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
     retrieveFromVisualSparseMapVirtual(ctx, img, pg, plane_map);
     return;
   }
-  if (feat_map.size() <= 0) return;
+  if (feat_map.size() <= 0)
+  {
+    printf("[ VIO Debug ] retrieve skip camera_id=%d reason=empty_feat_map pg=%zu img=%dx%d\n",
+           ctx.camera_id, pg.size(), img.cols, img.rows);
+    fflush(stdout);
+    return;
+  }
+  printf("[ VIO Debug ] retrieve start camera_id=%d img=%dx%d pg=%zu feat_map=%zu cross_ref=%d normal=%d raycast=%d border=%d grid=%d\n",
+         ctx.camera_id, img.cols, img.rows, pg.size(), feat_map.size(), cross_camera_reference_en ? 1 : 0,
+         normal_en ? 1 : 0, raycast_en ? 1 : 0, border, ctx.length);
+  fflush(stdout);
   double ts0 = omp_get_wtime();
 
   // pg_down->reserve(feat_map.size());
@@ -2796,6 +2825,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
   // t_insert=t_depth=t_position=0;
 
   int loc_xyz[3];
+  int debug_depth_samples = 0;
 
   // printf("A0. initial depthmap: %.6lf \n", omp_get_wtime() - ts0);
   // double ts1 = omp_get_wtime();
@@ -2841,10 +2871,15 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
         int col = int(px[0]);
         int row = int(px[1]);
         it[ctx.width * row + col] = depth;
+        ++debug_depth_samples;
       }
     }
     // t_depth += omp_get_wtime()-t2;
   }
+
+  printf("[ VIO Debug ] retrieve depth camera_id=%d depth_samples=%d sub_voxels=%zu elapsed=%.6f\n",
+         ctx.camera_id, debug_depth_samples, ctx.sub_feat_map.size(), omp_get_wtime() - ts0);
+  fflush(stdout);
 
   // imshow("depth_img", depth_img);
   // printf("A1: %.6lf \n", omp_get_wtime() - ts1);
@@ -3014,6 +3049,17 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
     ctx.sub_feat_map.erase(key);
   }
 
+  printf("[ VIO Debug ] retrieve map camera_id=%d sub_voxels=%zu deleted_voxels=%zu raycast=%d\n",
+         ctx.camera_id, ctx.sub_feat_map.size(), DeleteKeyList.size(), raycast_en ? 1 : 0);
+  fflush(stdout);
+  int debug_grid_candidates = 0;
+  int debug_ref_invalid = 0;
+  int debug_cross_refs = 0;
+  int debug_warp_attempts = 0;
+  int debug_warp_logs = 0;
+  int debug_affine_bad = 0;
+  int debug_accepted = 0;
+
   // double t2 = omp_get_wtime();
 
   // cout<<"B. feat_map.find: "<<t2-t1<<endl;
@@ -3025,6 +3071,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
   {
     if (ctx.grid_num[i] == TYPE_MAP)
     {
+      ++debug_grid_candidates;
       // double t_1 = omp_get_wtime();
 
       VisualPoint *pt = ctx.retrieve_voxel_points[i];
@@ -3123,8 +3170,13 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
         if (!pt->getCloseViewObs(ctx.new_frame->pos(), ref_ftr, pc,
                                  cross_camera_reference_en ? -1 : ctx.camera_id)) continue;
       }
-      if (ref_ftr == nullptr || ref_ftr->camera_id_ < 0 || ref_ftr->camera_id_ >= numCameras()) continue;
+      if (ref_ftr == nullptr || ref_ftr->camera_id_ < 0 || ref_ftr->camera_id_ >= numCameras())
+      {
+        ++debug_ref_invalid;
+        continue;
+      }
       const PerCameraData &ref_ctx = cameras_[ref_ftr->camera_id_];
+      if (ref_ftr->camera_id_ != ctx.camera_id) ++debug_cross_refs;
 
       if (normal_en)
       {
@@ -3167,10 +3219,39 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
 
       // t_1 = omp_get_wtime();
 
+      const double debug_affine_det = A_cur_ref_zero.determinant();
+      const bool debug_affine_ok = A_cur_ref_zero.array().isFinite().all() && std::isfinite(debug_affine_det) && std::fabs(debug_affine_det) > 1e-9;
+      if (!debug_affine_ok)
+      {
+        ++debug_affine_bad;
+        if (debug_affine_bad <= 5)
+        {
+          printf("[ VIO Debug ] retrieve affine suspicious camera_id=%d ref_camera_id=%d det=%.6e search_level=%d finite=%d\n",
+                 ctx.camera_id, ref_ftr->camera_id_, debug_affine_det, search_level, debug_affine_ok ? 1 : 0);
+          fflush(stdout);
+        }
+      }
+      if (debug_warp_logs < 8)
+      {
+        printf("[ VIO Debug ] retrieve warp camera_id=%d ref_camera_id=%d search_level=%d det=%.6e finite=%d ref_px=(%.2f,%.2f) ref_img=%dx%d ref_level=%d\n",
+               ctx.camera_id, ref_ftr->camera_id_, search_level, debug_affine_det, debug_affine_ok ? 1 : 0,
+               ref_ftr->px_[0], ref_ftr->px_[1], ref_ftr->img_.cols, ref_ftr->img_.rows, ref_ftr->level_);
+        fflush(stdout);
+        ++debug_warp_logs;
+      }
+      ++debug_warp_attempts;
+
+      bool warp_ok = true;
       for (int pyramid_level = 0; pyramid_level <= patch_pyrimid_level - 1; pyramid_level++)
       {
-        warpAffine(A_cur_ref_zero, ref_ftr->img_, ref_ftr->px_, ref_ftr->level_, search_level, pyramid_level, patch_size_half, patch_wrap.data());
+        if (!warpAffine(A_cur_ref_zero, ref_ftr->img_, ref_ftr->px_, ref_ftr->level_, search_level, pyramid_level,
+                        patch_size_half, patch_wrap.data()))
+        {
+          warp_ok = false;
+          break;
+        }
       }
+      if (!warp_ok) continue;
 
       getImagePatch(ctx, img, pc, patch_buffer.data(), 0);
 
@@ -3202,6 +3283,8 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       ctx.visual_submap->warp_patch.push_back(patch_wrap);
       ctx.visual_submap->inv_expo_list.push_back(ref_ftr->inv_expo_time_);
 
+      ++debug_accepted;
+
       // t_5 += omp_get_wtime() - t_1;
     }
   }
@@ -3212,6 +3295,10 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
   // cout<<"depthcontinuous: C1 "<<t_2<<" C2 "<<t_3<<" C3 "<<t_4<<" C4
   // "<<t_5<<endl;
   printf("[ VIO ] camera_id=%d retrieve %d points from visual sparse map\n", ctx.camera_id, ctx.total_points);
+  printf("[ VIO Debug ] retrieve summary camera_id=%d grid_candidates=%d ref_invalid=%d cross_refs=%d warp_attempts=%d affine_bad=%d accepted=%d elapsed=%.6f\n",
+         ctx.camera_id, debug_grid_candidates, debug_ref_invalid, debug_cross_refs, debug_warp_attempts, debug_affine_bad, debug_accepted,
+         omp_get_wtime() - ts0);
+  fflush(stdout);
 }
 
 bool VIOManager::interpolateReferenceFeature(const Feature &reference, const V2D &px, float &value) const
@@ -5805,6 +5892,10 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     throw std::runtime_error("MultiCameraFrame image count does not match VIOManager camera count");
 
   const double frame_start = omp_get_wtime();
+  printf("[ VIO Debug ] processMultiCameraFrame begin frame=%d cameras=%d pg=%zu feat_map=%zu plane_map=%zu virtual=%d cross_ref=%d normal=%d inverse=%d raycast=%d\n",
+         mf.frame_id, numCameras(), pg.size(), feat_map.size(), plane_map.size(), virtual_fisheye_patch_en ? 1 : 0,
+         cross_camera_reference_en ? 1 : 0, normal_en ? 1 : 0, inverse_composition_en ? 1 : 0, raycast_en ? 1 : 0);
+  fflush(stdout);
   for (int camera_id = 0; camera_id < numCameras(); ++camera_id)
   {
     PerCameraData &ctx = cameras_[camera_id];
@@ -5818,17 +5909,34 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     ctx.new_frame.reset(new Frame(ctx.cam, image, mf.frame_id, camera_id, mf.timestamp));
     updateFrameState(ctx, *state);
     resetGrid(ctx);
+    printf("[ VIO Debug ] frame setup camera_id=%d frame=%d image=%dx%d type=%d ns=%s\n",
+           ctx.camera_id, mf.frame_id, image.cols, image.rows, image.type(), ctx.camera_namespace.c_str());
+    fflush(stdout);
   }
   const double frame_setup_end = omp_get_wtime();
 
   for (PerCameraData &ctx : cameras_)
   {
+    printf("[ VIO Debug ] retrieve begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
+    fflush(stdout);
     retrieveFromVisualSparseMap(ctx, ctx.new_frame->img_, pg, plane_map);
+    printf("[ VIO Debug ] retrieve end camera_id=%d frame=%d total_points=%d\n",
+           ctx.camera_id, mf.frame_id, ctx.total_points);
+    fflush(stdout);
+    printf("[ VIO Debug ] generate begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
+    fflush(stdout);
     generateVisualMapPoints(ctx, ctx.new_frame->img_, pg);
+    printf("[ VIO Debug ] generate end camera_id=%d frame=%d pending=%zu\n",
+           ctx.camera_id, mf.frame_id, ctx.pending_new_points.size());
+    fflush(stdout);
   }
   const double retrieve_end = omp_get_wtime();
 
+  printf("[ VIO Debug ] ekf begin frame=%d\n", mf.frame_id);
+  fflush(stdout);
   computeJacobianAndUpdateEKF();
+  printf("[ VIO Debug ] ekf end frame=%d\n", mf.frame_id);
+  fflush(stdout);
   const double ekf_end = omp_get_wtime();
 
   if (ref_patch_dump_en && !cameras_.empty())
@@ -5841,14 +5949,28 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
       pending.T_f_w = ctx.new_frame->T_f_w_;
       if (pending.virtual_patch_valid) pending.T_v_w = composeVirtualPose(pending.R_v_from_c, pending.T_f_w);
     }
+    printf("[ VIO Debug ] updateVisualMap begin camera_id=%d frame=%d pending=%zu\n",
+           ctx.camera_id, mf.frame_id, ctx.pending_new_points.size());
+    fflush(stdout);
     updateVisualMapPoints(ctx, ctx.new_frame->img_);
+    printf("[ VIO Debug ] updateVisualMap end camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
+    fflush(stdout);
   }
   const double map_update_end = omp_get_wtime();
+  printf("[ VIO Debug ] commitPendingNewPoints begin frame=%d\n", mf.frame_id);
+  fflush(stdout);
   commitPendingNewPoints();
+  printf("[ VIO Debug ] commitPendingNewPoints end frame=%d feat_map=%zu\n", mf.frame_id, feat_map.size());
+  fflush(stdout);
   const double commit_end = omp_get_wtime();
   for (PerCameraData &ctx : cameras_)
   {
+    printf("[ VIO Debug ] updateReference begin camera_id=%d frame=%d total_points=%d\n",
+           ctx.camera_id, mf.frame_id, ctx.total_points);
+    fflush(stdout);
     updateReferencePatch(ctx, plane_map);
+    printf("[ VIO Debug ] updateReference end camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
+    fflush(stdout);
     plotTrackedPoints(ctx);
     if (plot_flag) projectPatchFromRefToCur(ctx, plane_map);
   }
