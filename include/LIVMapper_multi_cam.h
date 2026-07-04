@@ -41,6 +41,14 @@ struct CameraInputConfig
   std::vector<double> Rcl;
   std::vector<double> Pcl;
   bool online_extrinsic_en = true;
+  std::string camera_model_type = "Pinhole";
+  double k1 = 0.0;
+  double k2 = 0.0;
+  double k3 = 0.0;
+  double k4 = 0.0;
+  double xi = 0.0;
+  double p1 = 0.0;
+  double p2 = 0.0;
 };
 
 struct PendingImageGroup
@@ -169,6 +177,7 @@ public:
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
   bool virtual_s2_optimize_en = false;
+  bool raw_camera_model_jacobian_en = false;
   bool cross_camera_reference_en = false;
   bool online_extrinsic_en = false;
   bool online_extrinsic_rot_en = true;

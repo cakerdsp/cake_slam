@@ -180,6 +180,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("vio.virtual_fisheye_patch_en", false);
   try_declare.template operator()<bool>("vio.virtual_sparse_patch_en", false);
   try_declare.template operator()<bool>("vio.virtual_s2_optimize_en", false);
+  try_declare.template operator()<bool>("vio.raw_camera_model_jacobian_en", false);
   try_declare.template operator()<double>("vio.virtual_focal_length", 300.0);
   try_declare.template operator()<int>("vio.virtual_patch_margin", 4);
   try_declare.template operator()<int>("vio.virtual_max_search_level", 1);
@@ -306,6 +307,24 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
       throw std::runtime_error(rotation_key + " must contain exactly 9 values");
     if (camera_configs[camera_id].Pcl.size() != 3)
       throw std::runtime_error(translation_key + " must contain exactly 3 values");
+
+    const std::string camera_param_ns = camera_configs[camera_id].camera_namespace;
+    try_declare.template operator()<std::string>(camera_param_ns + ".model", "Pinhole");
+    try_declare.template operator()<double>(camera_param_ns + ".k1", 0.0);
+    try_declare.template operator()<double>(camera_param_ns + ".k2", 0.0);
+    try_declare.template operator()<double>(camera_param_ns + ".k3", 0.0);
+    try_declare.template operator()<double>(camera_param_ns + ".k4", 0.0);
+    try_declare.template operator()<double>(camera_param_ns + ".xi", 0.0);
+    try_declare.template operator()<double>(camera_param_ns + ".p1", 0.0);
+    try_declare.template operator()<double>(camera_param_ns + ".p2", 0.0);
+    node->get_parameter(camera_param_ns + ".model", camera_configs[camera_id].camera_model_type);
+    node->get_parameter(camera_param_ns + ".k1", camera_configs[camera_id].k1);
+    node->get_parameter(camera_param_ns + ".k2", camera_configs[camera_id].k2);
+    node->get_parameter(camera_param_ns + ".k3", camera_configs[camera_id].k3);
+    node->get_parameter(camera_param_ns + ".k4", camera_configs[camera_id].k4);
+    node->get_parameter(camera_param_ns + ".xi", camera_configs[camera_id].xi);
+    node->get_parameter(camera_param_ns + ".p1", camera_configs[camera_id].p1);
+    node->get_parameter(camera_param_ns + ".p2", camera_configs[camera_id].p2);
   }
 
   this->node->get_parameter("vio.normal_en", normal_en);
@@ -323,6 +342,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.virtual_fisheye_patch_en", virtual_fisheye_patch_en);
   this->node->get_parameter("vio.virtual_sparse_patch_en", virtual_sparse_patch_en);
   this->node->get_parameter("vio.virtual_s2_optimize_en", virtual_s2_optimize_en);
+  this->node->get_parameter("vio.raw_camera_model_jacobian_en", raw_camera_model_jacobian_en);
   this->node->get_parameter("vio.virtual_focal_length", virtual_focal_length);
   this->node->get_parameter("vio.virtual_patch_margin", virtual_patch_margin);
   this->node->get_parameter("vio.virtual_max_search_level", virtual_max_search_level);
@@ -409,6 +429,9 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   if (extrinR.size() != 9) throw std::runtime_error("extrin_calib.extrinsic_R must contain exactly 9 values");
   if (!online_extrinsic_camera_mask.empty() && static_cast<int>(online_extrinsic_camera_mask.size()) != num_cameras)
     throw std::runtime_error("vio.online_extrinsic_camera_mask must be empty or have common.num_cameras entries");
+  if (raw_camera_model_jacobian_en && virtual_fisheye_patch_en)
+    throw std::runtime_error("vio.raw_camera_model_jacobian_en and vio.virtual_fisheye_patch_en are mutually exclusive");
+
   if (online_extrinsic_camera_mask.empty())
   {
     online_extrinsic_camera_mask.resize(num_cameras, 1);
@@ -464,6 +487,9 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
              config.undistort_map_x.cols, config.undistort_map_x.rows);
     }
     vio_manager->setCameraCalibration(camera_id, config.img_topic, config.camera_namespace, config.Rcl, config.Pcl);
+    vio_manager->setCameraModelJacobianParameters(camera_id, config.camera_model_type,
+                                                  config.k1, config.k2, config.k3, config.k4,
+                                                  config.xi, config.p1, config.p2);
     const M3D Rcl = vio_manager->cameras_[camera_id].Rcl;
     const V3D Pcl = vio_manager->cameras_[camera_id].Pcl;
     const double rot_std_rad = online_extrinsic_prior_rot_std_deg * kDegToRad;
@@ -495,6 +521,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->virtual_fisheye_patch_en = virtual_fisheye_patch_en;
   vio_manager->virtual_sparse_patch_en = virtual_sparse_patch_en;
   vio_manager->virtual_s2_optimize_en = virtual_s2_optimize_en;
+  vio_manager->raw_camera_model_jacobian_en = raw_camera_model_jacobian_en;
   vio_manager->cross_camera_reference_en = cross_camera_reference_en;
   vio_manager->online_extrinsic_en = online_extrinsic_en;
   vio_manager->online_extrinsic_rot_en = online_extrinsic_rot_en;
@@ -722,6 +749,13 @@ void LIVMapper::handleVIO()
   {
     printf("[ VIO ] No lidar points, continue frontend_mode=%d image frontend.\n", current_frontend_mode);
   }
+
+  const size_t vio_raw_points = pcl_w_wait_pub != nullptr ? pcl_w_wait_pub->points.size() : 0;
+  printf("[ VIO Debug ] dispatch frontend_mode=%d raw_points=%zu cameras=%d virtual=%d cross_ref=%d normal=%d inverse=%d raycast=%d\n",
+         current_frontend_mode, vio_raw_points, vio_manager->numCameras(), vio_manager->virtual_fisheye_patch_en ? 1 : 0,
+         vio_manager->cross_camera_reference_en ? 1 : 0, vio_manager->normal_en ? 1 : 0,
+         vio_manager->inverse_composition_en ? 1 : 0, vio_manager->raycast_en ? 1 : 0);
+  fflush(stdout);
 
   if (fabs((LidarMeasures.last_lio_update_time - _first_lidar_time) - plot_time) < (frame_cnt / 2 * 0.1)) 
   {
@@ -1032,7 +1066,7 @@ void LIVMapper::imu_prop_callback()
 {
   if (p_imu->imu_need_init || !new_imu || !ekf_finish_once) { return; }
   mtx_buffer_imu_prop.lock();
-  new_imu = false; // 控制 propagate 频率和 IMU 频率一致
+  new_imu = false; // 控制 propagate 频率�?IMU 频率一�?
   if (imu_prop_enable && !prop_imu_buffer.empty())
   {
     static double last_t_from_lidar_end_time = 0;

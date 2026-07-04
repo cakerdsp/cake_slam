@@ -216,6 +216,14 @@ struct PerCameraData
   std::string camera_namespace;
   vk::AbstractCamera *cam = nullptr;
   vk::PinholeCamera *pinhole_cam = nullptr;
+  std::string camera_model_type = "Pinhole";
+  double k1 = 0.0;
+  double k2 = 0.0;
+  double k3 = 0.0;
+  double k4 = 0.0;
+  double xi = 0.0;
+  double p1 = 0.0;
+  double p2 = 0.0;
 
   M3D Rcl = M3D::Identity();
   M3D Rci = M3D::Identity();
@@ -281,6 +289,7 @@ public:
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
   bool virtual_s2_optimize_en = false;
+  bool raw_camera_model_jacobian_en = false;
   bool cross_camera_reference_en = false;
   bool online_extrinsic_en = false;
   bool online_extrinsic_rot_en = true;
@@ -445,6 +454,9 @@ public:
   void configureCameras(int num_cameras);
   void setCameraCalibration(int camera_id, const std::string &topic, const std::string &camera_namespace,
                             const std::vector<double> &R, const std::vector<double> &P);
+  void setCameraModelJacobianParameters(int camera_id, const std::string &model_type,
+                                        double k1, double k2, double k3, double k4,
+                                        double xi, double p1, double p2);
   int numCameras() const { return static_cast<int>(cameras_.size()); }
   void processMultiCameraFrame(const MeasureGroup &meas, vector<pointWithVar> &pg,
                                const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
@@ -485,7 +497,7 @@ public:
                            const int pyramid_level, const int halfpatch_size, Matrix2d &A_cur_ref);
   void getWarpMatrixAffineHomography(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const V2D &px_ref,
                                      const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
-  void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
+  bool warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
   bool buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &point_in_raw_camera, const V2D &raw_center_px,
                                  M3D &R_v_from_c, M3D &R_c_from_v) const;
