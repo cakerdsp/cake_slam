@@ -430,7 +430,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   if (!online_extrinsic_camera_mask.empty() && static_cast<int>(online_extrinsic_camera_mask.size()) != num_cameras)
     throw std::runtime_error("vio.online_extrinsic_camera_mask must be empty or have common.num_cameras entries");
   if (raw_camera_model_jacobian_en && virtual_fisheye_patch_en)
-    throw std::runtime_error("vio.raw_camera_model_jacobian_en and vio.virtual_fisheye_patch_en are mutually exclusive");
+    RCLCPP_WARN(node->get_logger(),
+                "vio.raw_camera_model_jacobian_en is ignored because vio.virtual_fisheye_patch_en is true");
 
   if (online_extrinsic_camera_mask.empty())
   {
@@ -521,7 +522,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->virtual_fisheye_patch_en = virtual_fisheye_patch_en;
   vio_manager->virtual_sparse_patch_en = virtual_sparse_patch_en;
   vio_manager->virtual_s2_optimize_en = virtual_s2_optimize_en;
-  vio_manager->raw_camera_model_jacobian_en = raw_camera_model_jacobian_en;
+  vio_manager->raw_camera_model_jacobian_en = raw_camera_model_jacobian_en && !virtual_fisheye_patch_en;
   vio_manager->cross_camera_reference_en = cross_camera_reference_en;
   vio_manager->online_extrinsic_en = online_extrinsic_en;
   vio_manager->online_extrinsic_rot_en = online_extrinsic_rot_en;

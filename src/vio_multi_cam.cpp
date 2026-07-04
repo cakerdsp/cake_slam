@@ -421,7 +421,10 @@ void VIOManager::initializeVIO()
   border = (patch_size_half + 1) * (1 << patch_pyrimid_level);
 
   if (raw_camera_model_jacobian_en && virtual_fisheye_patch_en)
-    throw std::runtime_error("raw_camera_model_jacobian_en requires virtual_fisheye_patch_en=false");
+  {
+    printf("[ VIO ] raw_camera_model_jacobian_en is ignored because virtual_fisheye_patch_en is true.\n");
+    raw_camera_model_jacobian_en = false;
+  }
 
   if (virtual_fisheye_patch_en)
   {
