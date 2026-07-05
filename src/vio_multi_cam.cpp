@@ -511,6 +511,7 @@ void VIOManager::initializeVIO()
 
   if (usage_stats_window <= 0) throw std::runtime_error("usage_stats_window must be positive");
   resetUsageStatsWindow();
+  resetUsageStatsTotals();
   if (usage_stats_en)
   {
     printf("\033[1;35m[ VIO Usage Stats ] enabled: window=%d frames; tables show candidate/accepted usage ratios.\033[0m\n",
@@ -2413,6 +2414,17 @@ void VIOManager::resetUsageStatsWindow()
   for (UsageStatsCell &cell : usage_anisotropy_bins_) cell.reset();
 }
 
+void VIOManager::resetUsageStatsTotals()
+{
+  usage_stats_total_frames_ = 0;
+  usage_total_camera_pairs_.assign(std::max(0, numCameras() * numCameras()), UsageStatsCell());
+  for (UsageStatsCell &cell : usage_total_region_pairs_) cell.reset();
+  for (UsageStatsCell &cell : usage_total_cross_region_pairs_) cell.reset();
+  for (UsageStatsCell &cell : usage_total_view_angle_bins_) cell.reset();
+  for (UsageStatsCell &cell : usage_total_footprint_bins_) cell.reset();
+  for (UsageStatsCell &cell : usage_total_anisotropy_bins_) cell.reset();
+}
+
 void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
                                         const V2D &cur_px, const Matrix2d &A_cur_ref, bool accepted,
                                         double sse, double ncc)
@@ -2422,7 +2434,12 @@ void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature 
   if (camera_count <= 0 || ctx.camera_id < 0 || ctx.camera_id >= camera_count ||
       ref_ftr.camera_id_ < 0 || ref_ftr.camera_id_ >= camera_count)
     return;
-  if (usage_camera_pairs_.size() != static_cast<size_t>(camera_count * camera_count)) resetUsageStatsWindow();
+  const size_t expected_pairs = static_cast<size_t>(camera_count * camera_count);
+  if (usage_camera_pairs_.size() != expected_pairs || usage_total_camera_pairs_.size() != expected_pairs)
+  {
+    resetUsageStatsWindow();
+    resetUsageStatsTotals();
+  }
 
   const PerCameraData &ref_ctx = cameras_[ref_ftr.camera_id_];
   const int ref_region = usageRegionBin(ref_ctx, ref_ftr.px_);
@@ -2451,23 +2468,42 @@ void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature 
     }
   };
 
-  updateCell(usage_camera_pairs_[ref_ftr.camera_id_ * camera_count + ctx.camera_id]);
+  const int camera_pair_idx = ref_ftr.camera_id_ * camera_count + ctx.camera_id;
+  updateCell(usage_camera_pairs_[camera_pair_idx]);
+  updateCell(usage_total_camera_pairs_[camera_pair_idx]);
   if (ref_region >= 0 && cur_region >= 0)
   {
-    updateCell(usage_region_pairs_[ref_region * 4 + cur_region]);
-    updateCell(usage_cross_region_pairs_[(cross_camera ? 16 : 0) + ref_region * 4 + cur_region]);
+    const int region_pair_idx = ref_region * 4 + cur_region;
+    const int cross_region_pair_idx = (cross_camera ? 16 : 0) + region_pair_idx;
+    updateCell(usage_region_pairs_[region_pair_idx]);
+    updateCell(usage_total_region_pairs_[region_pair_idx]);
+    updateCell(usage_cross_region_pairs_[cross_region_pair_idx]);
+    updateCell(usage_total_cross_region_pairs_[cross_region_pair_idx]);
   }
-  if (view_bin >= 0) updateCell(usage_view_angle_bins_[view_bin]);
-  if (footprint_bin >= 0) updateCell(usage_footprint_bins_[footprint_bin]);
-  if (anisotropy_bin >= 0) updateCell(usage_anisotropy_bins_[anisotropy_bin]);
+  if (view_bin >= 0)
+  {
+    updateCell(usage_view_angle_bins_[view_bin]);
+    updateCell(usage_total_view_angle_bins_[view_bin]);
+  }
+  if (footprint_bin >= 0)
+  {
+    updateCell(usage_footprint_bins_[footprint_bin]);
+    updateCell(usage_total_footprint_bins_[footprint_bin]);
+  }
+  if (anisotropy_bin >= 0)
+  {
+    updateCell(usage_anisotropy_bins_[anisotropy_bin]);
+    updateCell(usage_total_anisotropy_bins_[anisotropy_bin]);
+  }
 }
 
 void VIOManager::printUsageStatsTable(int frame_id)
 {
   if (!usage_stats_en) return;
-  UsageStatsCell total;
-  UsageStatsCell same_camera;
-  UsageStatsCell cross_camera;
+
+  const char *color = "\033[1;35m";
+  const char *reset = "\033[0m";
+
   auto mergeCell = [](UsageStatsCell &dst, const UsageStatsCell &src) {
     dst.candidates += src.candidates;
     dst.accepted += src.accepted;
@@ -2476,25 +2512,6 @@ void VIOManager::printUsageStatsTable(int frame_id)
     dst.sse += src.sse;
     dst.ncc_sum += src.ncc_sum;
   };
-
-  const int camera_count = numCameras();
-  for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
-  {
-    for (int cur_cam = 0; cur_cam < camera_count; ++cur_cam)
-    {
-      const UsageStatsCell &cell = usage_camera_pairs_[ref_cam * camera_count + cur_cam];
-      mergeCell(total, cell);
-      if (ref_cam == cur_cam)
-        mergeCell(same_camera, cell);
-      else
-        mergeCell(cross_camera, cell);
-    }
-  }
-
-  const char *color = "\033[1;35m";
-  const char *reset = "\033[0m";
-  const long long total_residuals = std::max(1LL, total.residuals);
-  const double samples_per_patch = static_cast<double>(std::max(1, patch_size_total));
 
   auto formatDouble = [](double value, int precision = 3) {
     std::ostringstream stream;
@@ -2505,89 +2522,131 @@ void VIOManager::printUsageStatsTable(int frame_id)
   auto printDivider = [&]() {
     printf("%s+--------------------------------------------------------------------------------------------------+%s\n", color, reset);
   };
-  auto printSection = [&](const char *title) {
+
+  auto printStatsSet = [&](const char *title, const char *frame_label, long long frame_count,
+                           const std::vector<UsageStatsCell> &camera_pairs,
+                           const std::array<UsageStatsCell, 16> &region_pairs,
+                           const std::array<UsageStatsCell, 32> &cross_region_pairs,
+                           const std::array<UsageStatsCell, 5> &view_angle_bins,
+                           const std::array<UsageStatsCell, 5> &footprint_bins,
+                           const std::array<UsageStatsCell, 4> &anisotropy_bins) {
+    UsageStatsCell total;
+    UsageStatsCell same_camera;
+    UsageStatsCell cross_camera;
+    const int camera_count = numCameras();
+    for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
+    {
+      for (int cur_cam = 0; cur_cam < camera_count; ++cur_cam)
+      {
+        const size_t idx = static_cast<size_t>(ref_cam * camera_count + cur_cam);
+        if (idx >= camera_pairs.size()) continue;
+        const UsageStatsCell &cell = camera_pairs[idx];
+        mergeCell(total, cell);
+        if (ref_cam == cur_cam)
+          mergeCell(same_camera, cell);
+        else
+          mergeCell(cross_camera, cell);
+      }
+    }
+
+    const long long total_residuals = std::max(1LL, total.residuals);
+    const double samples_per_patch = static_cast<double>(std::max(1, patch_size_total));
+
+    auto printSection = [&](const char *section_title) {
+      printDivider();
+      printf("%s| %-96s |%s\n", color, section_title, reset);
+      printDivider();
+      printf("%s| %-32s | %9s | %9s | %7s | %7s | %8s | %8s |%s\n",
+             color, "Category", "Candidate", "Accepted", "Acc %", "Use %", "RMS", "NCC", reset);
+      printDivider();
+    };
+
+    auto printRow = [&](const std::string &name, const UsageStatsCell &cell) {
+      const double accept_ratio = cell.candidates > 0 ? 100.0 * static_cast<double>(cell.accepted) / cell.candidates : 0.0;
+      const double use_ratio = 100.0 * static_cast<double>(cell.residuals) / total_residuals;
+      const double rms = cell.accepted > 0 ? std::sqrt(std::max(0.0, cell.sse) / (cell.accepted * samples_per_patch)) : 0.0;
+      const std::string rms_text = cell.accepted > 0 ? formatDouble(rms, 2) : "-";
+      const std::string ncc_text = cell.ncc_count > 0 ? formatDouble(cell.ncc_sum / cell.ncc_count, 3) : "-";
+      printf("%s| %-32s | %9lld | %9lld | %7.2f | %7.2f | %8s | %8s |%s\n",
+             color, name.c_str(), cell.candidates, cell.accepted, accept_ratio, use_ratio,
+             rms_text.c_str(), ncc_text.c_str(), reset);
+    };
+
     printDivider();
     printf("%s| %-96s |%s\n", color, title, reset);
-    printDivider();
-    printf("%s| %-32s | %9s | %9s | %7s | %7s | %8s | %8s |%s\n",
-           color, "Category", "Candidate", "Accepted", "Acc %", "Use %", "RMS", "NCC", reset);
-    printDivider();
-  };
-  auto printRow = [&](const std::string &name, const UsageStatsCell &cell) {
-    const double accept_ratio = cell.candidates > 0 ? 100.0 * static_cast<double>(cell.accepted) / cell.candidates : 0.0;
-    const double use_ratio = 100.0 * static_cast<double>(cell.residuals) / total_residuals;
-    const double rms = cell.accepted > 0 ? std::sqrt(std::max(0.0, cell.sse) / (cell.accepted * samples_per_patch)) : 0.0;
-    const std::string rms_text = cell.accepted > 0 ? formatDouble(rms, 2) : "-";
-    const std::string ncc_text = cell.ncc_count > 0 ? formatDouble(cell.ncc_sum / cell.ncc_count, 3) : "-";
-    printf("%s| %-32s | %9lld | %9lld | %7.2f | %7.2f | %8s | %8s |%s\n",
-           color, name.c_str(), cell.candidates, cell.accepted, accept_ratio, use_ratio,
-           rms_text.c_str(), ncc_text.c_str(), reset);
-  };
+    printf("%s| frame=%-8d %-13s=%-8lld total_candidates=%-8lld total_accepted=%-8lld residuals=%-8lld |%s\n",
+           color, frame_id, frame_label, frame_count, total.candidates, total.accepted, total.residuals, reset);
 
-  printDivider();
-  printf("%s| %-96s |%s\n", color, "VIO Usage Stats", reset);
-  printf("%s| frame=%-8d window_frames=%-8lld total_candidates=%-8lld total_accepted=%-8lld residuals=%-8lld |%s\n",
-         color, frame_id, usage_stats_frames_, total.candidates, total.accepted, total.residuals, reset);
+    printSection("SAME_CROSS_USAGE");
+    printRow("same_cam", same_camera);
+    printRow("cross_cam", cross_camera);
 
-  printSection("SAME_CROSS_USAGE");
-  printRow("same_cam", same_camera);
-  printRow("cross_cam", cross_camera);
-
-  printSection("CAMERA_PAIR_USAGE");
-  for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
-  {
-    for (int cur_cam = 0; cur_cam < camera_count; ++cur_cam)
+    printSection("CAMERA_PAIR_USAGE");
+    for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
     {
-      const UsageStatsCell &cell = usage_camera_pairs_[ref_cam * camera_count + cur_cam];
-      if (cell.candidates == 0 && cell.accepted == 0) continue;
-      printRow("cam" + std::to_string(ref_cam) + "->cam" + std::to_string(cur_cam), cell);
+      for (int cur_cam = 0; cur_cam < camera_count; ++cur_cam)
+      {
+        const size_t idx = static_cast<size_t>(ref_cam * camera_count + cur_cam);
+        if (idx >= camera_pairs.size()) continue;
+        const UsageStatsCell &cell = camera_pairs[idx];
+        if (cell.candidates == 0 && cell.accepted == 0) continue;
+        printRow("cam" + std::to_string(ref_cam) + "->cam" + std::to_string(cur_cam), cell);
+      }
     }
-  }
 
-  static const char *region_names[] = {"center", "mid", "edge", "outer"};
-  printSection("REGION_PAIR_USAGE");
-  for (int ref_region = 0; ref_region < 4; ++ref_region)
-  {
-    for (int cur_region = 0; cur_region < 4; ++cur_region)
-    {
-      const UsageStatsCell &cell = usage_region_pairs_[ref_region * 4 + cur_region];
-      if (cell.candidates == 0 && cell.accepted == 0) continue;
-      printRow(std::string(region_names[ref_region]) + "->" + region_names[cur_region], cell);
-    }
-  }
-
-  printSection("CROSS_CAMERA_REGION_USAGE");
-  for (int cross = 0; cross < 2; ++cross)
-  {
+    static const char *region_names[] = {"center", "mid", "edge", "outer"};
+    printSection("REGION_PAIR_USAGE");
     for (int ref_region = 0; ref_region < 4; ++ref_region)
     {
       for (int cur_region = 0; cur_region < 4; ++cur_region)
       {
-        const UsageStatsCell &cell = usage_cross_region_pairs_[cross * 16 + ref_region * 4 + cur_region];
+        const UsageStatsCell &cell = region_pairs[ref_region * 4 + cur_region];
         if (cell.candidates == 0 && cell.accepted == 0) continue;
-        printRow(std::string(cross ? "cross " : "same ") + region_names[ref_region] + "->" + region_names[cur_region], cell);
+        printRow(std::string(region_names[ref_region]) + "->" + region_names[cur_region], cell);
       }
     }
-  }
 
-  static const char *angle_names[] = {"0-5deg", "5-15deg", "15-30deg", "30-60deg", ">60deg"};
-  printSection("VIEW_ANGLE_DELTA_USAGE");
-  for (int i = 0; i < 5; ++i) printRow(angle_names[i], usage_view_angle_bins_[i]);
+    printSection("CROSS_CAMERA_REGION_USAGE");
+    for (int cross = 0; cross < 2; ++cross)
+    {
+      for (int ref_region = 0; ref_region < 4; ++ref_region)
+      {
+        for (int cur_region = 0; cur_region < 4; ++cur_region)
+        {
+          const UsageStatsCell &cell = cross_region_pairs[cross * 16 + ref_region * 4 + cur_region];
+          if (cell.candidates == 0 && cell.accepted == 0) continue;
+          printRow(std::string(cross ? "cross " : "same ") + region_names[ref_region] + "->" + region_names[cur_region], cell);
+        }
+      }
+    }
 
-  static const char *footprint_names[] = {"invalid", "1-2x", "2-4x", "4-8x", ">8x"};
-  printSection("FOOTPRINT_USAGE");
-  for (int i = 0; i < 5; ++i) printRow(footprint_names[i], usage_footprint_bins_[i]);
+    static const char *angle_names[] = {"0-5deg", "5-15deg", "15-30deg", "30-60deg", ">60deg"};
+    printSection("VIEW_ANGLE_DELTA_USAGE");
+    for (int i = 0; i < 5; ++i) printRow(angle_names[i], view_angle_bins[i]);
 
-  static const char *anisotropy_names[] = {"1-1.5x", "1.5-2x", "2-4x", ">4x"};
-  printSection("ANISOTROPY_USAGE");
-  for (int i = 0; i < 4; ++i) printRow(anisotropy_names[i], usage_anisotropy_bins_[i]);
-  printDivider();
+    static const char *footprint_names[] = {"invalid", "1-2x", "2-4x", "4-8x", ">8x"};
+    printSection("FOOTPRINT_USAGE");
+    for (int i = 0; i < 5; ++i) printRow(footprint_names[i], footprint_bins[i]);
+
+    static const char *anisotropy_names[] = {"1-1.5x", "1.5-2x", "2-4x", ">4x"};
+    printSection("ANISOTROPY_USAGE");
+    for (int i = 0; i < 4; ++i) printRow(anisotropy_names[i], anisotropy_bins[i]);
+    printDivider();
+  };
+
+  printStatsSet("VIO Usage Stats (Window)", "window_frames", usage_stats_frames_, usage_camera_pairs_,
+                usage_region_pairs_, usage_cross_region_pairs_, usage_view_angle_bins_,
+                usage_footprint_bins_, usage_anisotropy_bins_);
+  printStatsSet("VIO Usage Stats (Run Total)", "total_frames", usage_stats_total_frames_, usage_total_camera_pairs_,
+                usage_total_region_pairs_, usage_total_cross_region_pairs_, usage_total_view_angle_bins_,
+                usage_total_footprint_bins_, usage_total_anisotropy_bins_);
 }
 
 void VIOManager::maybePrintUsageStatsTable(int frame_id)
 {
   if (!usage_stats_en) return;
   ++usage_stats_frames_;
+  ++usage_stats_total_frames_;
   if (usage_stats_frames_ < std::max(1, usage_stats_window)) return;
   printUsageStatsTable(frame_id);
   resetUsageStatsWindow();

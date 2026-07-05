@@ -395,12 +395,19 @@ public:
   };
 
   long long usage_stats_frames_ = 0;
+  long long usage_stats_total_frames_ = 0;
   std::vector<UsageStatsCell> usage_camera_pairs_;
+  std::vector<UsageStatsCell> usage_total_camera_pairs_;
   std::array<UsageStatsCell, 16> usage_region_pairs_;
+  std::array<UsageStatsCell, 16> usage_total_region_pairs_;
   std::array<UsageStatsCell, 32> usage_cross_region_pairs_;
+  std::array<UsageStatsCell, 32> usage_total_cross_region_pairs_;
   std::array<UsageStatsCell, 5> usage_view_angle_bins_;
+  std::array<UsageStatsCell, 5> usage_total_view_angle_bins_;
   std::array<UsageStatsCell, 5> usage_footprint_bins_;
+  std::array<UsageStatsCell, 5> usage_total_footprint_bins_;
   std::array<UsageStatsCell, 4> usage_anisotropy_bins_;
+  std::array<UsageStatsCell, 4> usage_total_anisotropy_bins_;
   int virtual_map_grid_count_ = 0;
   int virtual_candidate_null_count_ = 0;
   int virtual_candidate_normal_uninit_count_ = 0;
@@ -622,6 +629,7 @@ public:
   int usageFootprintBin(const Matrix2d &A_cur_ref) const;
   int usageAnisotropyBin(const Matrix2d &A_cur_ref) const;
   void resetUsageStatsWindow();
+  void resetUsageStatsTotals();
   void recordUsageObservation(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
                               const V2D &cur_px, const Matrix2d &A_cur_ref, bool accepted,
                               double sse = 0.0, double ncc = std::numeric_limits<double>::quiet_NaN());
