@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <rcutils/logging.h>
 #include <vikit/abstract_camera.h>
 #include <vikit/camera_loader.h>
 
@@ -22,6 +23,13 @@ using namespace Sophus;
 namespace
 {
 constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+void suppressRosInfoLogs(const rclcpp::Node::SharedPtr &node)
+{
+  if (!node) return;
+  rcutils_logging_set_logger_level(node->get_logger().get_name(), RCUTILS_LOG_SEVERITY_WARN);
+  rcutils_logging_set_logger_level("", RCUTILS_LOG_SEVERITY_WARN);
+}
+
 
 bool hasLaterCompleteImageGroupLocked(const std::map<uint64_t, PendingImageGroup> &pending_images,
                                       uint64_t stamp_ns)
@@ -105,6 +113,7 @@ LIVMapper::LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name, const
       extT(0, 0, 0),
       extR(M3D::Identity())
 {
+  suppressRosInfoLogs(this->node);
   extrinT.assign(3, 0.0);
   extrinR.assign(9, 0.0);
   
@@ -1311,7 +1320,7 @@ void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
   last_timestamp_imu = timestamp;
 
   imu_buffer.push_back(msg);
-  cout<<"got imu: "<<timestamp<<" imu size "<<imu_buffer.size()<<endl;
+  // cout<<"got imu: "<<timestamp<<" imu size "<<imu_buffer.size()<<endl;
   mtx_buffer.unlock();
   if (imu_prop_enable)
   {
