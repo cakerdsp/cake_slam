@@ -173,6 +173,8 @@ public:
   bool raycast_en = false;
   bool ncc_en = false;
   double ncc_thre = 0.8;
+  bool usage_stats_en = false;
+  int usage_stats_window = 100;
   int lidar_en = 1;
   bool is_first_frame = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;

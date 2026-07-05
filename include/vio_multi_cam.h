@@ -16,6 +16,7 @@ which is included as part of this source code package.
 #include "voxel_map_multi_cam.h"
 #include "feature_multi_cam.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -320,6 +321,8 @@ public:
   bool virtual_splat_require_full_core_coverage = true;
   bool virtual_splat_debug_compare_pull_exact = false;
   bool draw_rejected_points_en = false;
+  bool usage_stats_en = false;
+  int usage_stats_window = 100;
   bool ref_patch_dump_en = false;
   int ref_patch_dump_random_seed = -1;
   int ref_patch_dump_max_candidate_skip = 50;
@@ -370,6 +373,34 @@ public:
   double virtual_result_collect_time_ = 0.0;
   double virtual_warp_time_ = 0.0;
   double virtual_current_core_time_ = 0.0;
+
+  struct UsageStatsCell
+  {
+    long long candidates = 0;
+    long long accepted = 0;
+    long long residuals = 0;
+    long long ncc_count = 0;
+    double sse = 0.0;
+    double ncc_sum = 0.0;
+
+    void reset()
+    {
+      candidates = 0;
+      accepted = 0;
+      residuals = 0;
+      ncc_count = 0;
+      sse = 0.0;
+      ncc_sum = 0.0;
+    }
+  };
+
+  long long usage_stats_frames_ = 0;
+  std::vector<UsageStatsCell> usage_camera_pairs_;
+  std::array<UsageStatsCell, 16> usage_region_pairs_;
+  std::array<UsageStatsCell, 32> usage_cross_region_pairs_;
+  std::array<UsageStatsCell, 5> usage_view_angle_bins_;
+  std::array<UsageStatsCell, 5> usage_footprint_bins_;
+  std::array<UsageStatsCell, 4> usage_anisotropy_bins_;
   int virtual_map_grid_count_ = 0;
   int virtual_candidate_null_count_ = 0;
   int virtual_candidate_normal_uninit_count_ = 0;
@@ -586,6 +617,16 @@ public:
   void projectPatchFromRefToCur(PerCameraData &ctx, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void updateReferencePatch(PerCameraData &ctx, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void dumpDataForColmap();
+  int usageRegionBin(const PerCameraData &ctx, const V2D &px) const;
+  int usageViewAngleBin(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt) const;
+  int usageFootprintBin(const Matrix2d &A_cur_ref) const;
+  int usageAnisotropyBin(const Matrix2d &A_cur_ref) const;
+  void resetUsageStatsWindow();
+  void recordUsageObservation(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
+                              const V2D &cur_px, const Matrix2d &A_cur_ref, bool accepted,
+                              double sse = 0.0, double ncc = std::numeric_limits<double>::quiet_NaN());
+  void printUsageStatsTable(int frame_id);
+  void maybePrintUsageStatsTable(int frame_id);
   double calculateNCC(float *ref_patch, float *cur_patch, int patch_size);
   int getBestSearchLevel(const Matrix2d &A_cur_ref, const int max_level);
   V3F getInterpolatedPixel(const cv::Mat &img, V2D pc) const;

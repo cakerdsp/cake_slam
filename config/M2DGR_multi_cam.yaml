@@ -3,7 +3,7 @@
     common:
       # The first N camera entries below are enabled. Valid range: 1..7.
       # camera6 is excluded by default because its official extrinsic is marked "to be changed".
-      num_cameras: 1
+      num_cameras: 3
       require_all_cameras: true
       multi_cam_sync_queue_size: 5
       multi_cam_sync_tolerance_ms: 40.0
@@ -15,17 +15,28 @@
 
     cameras:
       # camera0: left 8823
+      # camera0:
+      #   img_topic: "/camera/left/image_raw"
+      #   camera_ns: "camera0"
+      #   # Input-only remap. When true, camera_ns should name the undistorted pinhole model,
+      #   # and raw_camera_ns should name the raw fisheye model in the camera YAML.
+      #   image_undistort_en: false
+      #   raw_camera_ns: "camera0"
+      #   Rcl: [0.0, -1.0,  0.0,
+      #         0.0,  0.0, -1.0,
+      #         1.0,  0.0,  0.0]
+      #   Pcl: [0.16123, -0.16711, -0.24221]
+      #   online_extrinsic_en: true
+
       camera0:
-        img_topic: "/camera/left/image_raw"
+        img_topic: "/camera/color/image_raw/compressed"
         camera_ns: "camera0"
-        # Input-only remap. When true, camera_ns should name the undistorted pinhole model,
-        # and raw_camera_ns should name the raw fisheye model in the camera YAML.
         image_undistort_en: false
         raw_camera_ns: "camera0"
         Rcl: [0.0, -1.0,  0.0,
               0.0,  0.0, -1.0,
               1.0,  0.0,  0.0]
-        Pcl: [0.16123, -0.16711, -0.24221]
+        Pcl: [0.00065, 0.65376, -0.30456]
         online_extrinsic_en: true
 
       # # camera1: right 8828
@@ -125,6 +136,8 @@
       outlier_threshold: 1000
       ncc_en: true
       ncc_thre: 0.7
+      usage_stats_en: false
+      usage_stats_window: 100
       img_point_cov: 1000
       grid_size: 5
       # Suggested grid_n_height: 17/12/10/8/7 for 1/2/3/4/6 cameras.

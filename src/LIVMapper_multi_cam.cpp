@@ -192,6 +192,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("vio.draw_rejected_points_en", false);
   try_declare.template operator()<bool>("vio.ncc_en", false);
   try_declare.template operator()<double>("vio.ncc_thre", 0.8);
+  try_declare.template operator()<bool>("vio.usage_stats_en", false);
+  try_declare.template operator()<int>("vio.usage_stats_window", 100);
   try_declare.template operator()<bool>("vio.cross_camera_reference_en", false);
   try_declare.template operator()<bool>("vio.online_extrinsic_en", false);
   try_declare.template operator()<bool>("vio.online_extrinsic_rot_en", true);
@@ -356,6 +358,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.draw_rejected_points_en", draw_rejected_points_en);
   this->node->get_parameter("vio.ncc_en", ncc_en);
   this->node->get_parameter("vio.ncc_thre", ncc_thre);
+  this->node->get_parameter("vio.usage_stats_en", usage_stats_en);
+  this->node->get_parameter("vio.usage_stats_window", usage_stats_window);
   this->node->get_parameter("vio.cross_camera_reference_en", cross_camera_reference_en);
   this->node->get_parameter("vio.online_extrinsic_en", online_extrinsic_en);
   this->node->get_parameter("vio.online_extrinsic_rot_en", online_extrinsic_rot_en);
@@ -425,6 +429,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
 
   if (!std::isfinite(ncc_thre) || ncc_thre < -1.0 || ncc_thre > 1.0)
     throw std::runtime_error("vio.ncc_thre must be finite and in [-1, 1]");
+  if (usage_stats_window <= 0) throw std::runtime_error("vio.usage_stats_window must be positive");
 
   if (num_cameras > 1 && colmap_output_en)
   {
@@ -553,6 +558,8 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->draw_rejected_points_en = draw_rejected_points_en;
   vio_manager->ncc_en = ncc_en;
   vio_manager->ncc_thre = ncc_thre;
+  vio_manager->usage_stats_en = usage_stats_en;
+  vio_manager->usage_stats_window = usage_stats_window;
   vio_manager->ref_patch_dump_en = ref_patch_dump_en;
   vio_manager->ref_patch_dump_random_seed = ref_patch_dump_random_seed;
   vio_manager->ref_patch_dump_max_candidate_skip = ref_patch_dump_max_candidate_skip;
