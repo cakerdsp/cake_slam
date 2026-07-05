@@ -307,7 +307,7 @@ public:
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
   int max_iterations, total_points;
 
-  double img_point_cov, outlier_threshold, ncc_thre;
+  double img_point_cov, outlier_threshold, ncc_thre = 0.8;
 
   double virtual_focal_length = 300.0;
   int virtual_patch_margin = 4;

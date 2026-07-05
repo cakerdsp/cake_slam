@@ -156,6 +156,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("vio.virtual_splat_require_full_core_coverage", true);
   try_declare.template operator()<bool>("vio.virtual_splat_debug_compare_pull_exact", false);
   try_declare.template operator()<bool>("vio.draw_rejected_points_en", false);
+  try_declare.template operator()<bool>("vio.ncc_en", false);
+  try_declare.template operator()<double>("vio.ncc_thre", 0.8);
   try_declare.template operator()<int>("vio.outlier_threshold", 100);
   try_declare.template operator()<int>("vio.frontend_mode", 0);
   try_declare.template operator()<int>("vio.opticalflow.max_cnt", 250);
@@ -239,6 +241,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.virtual_splat_require_full_core_coverage", virtual_splat_require_full_core_coverage);
   this->node->get_parameter("vio.virtual_splat_debug_compare_pull_exact", virtual_splat_debug_compare_pull_exact);
   this->node->get_parameter("vio.draw_rejected_points_en", draw_rejected_points_en);
+  this->node->get_parameter("vio.ncc_en", ncc_en);
+  this->node->get_parameter("vio.ncc_thre", ncc_thre);
   this->node->get_parameter("vio.outlier_threshold", outlier_threshold);
   this->node->get_parameter("vio.frontend_mode", frontend_mode);
   this->node->get_parameter("vio.opticalflow.max_cnt", optical_flow_max_cnt);
@@ -288,6 +292,9 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("publish.pub_scan_num", pub_scan_num);
   this->node->get_parameter("publish.pub_effect_point_en", pub_effect_point_en);
   this->node->get_parameter("publish.dense_map_en", dense_map_en);
+
+  if (!std::isfinite(ncc_thre) || ncc_thre < -1.0 || ncc_thre > 1.0)
+    throw std::runtime_error("vio.ncc_thre must be finite and in [-1, 1]");
 
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
@@ -346,6 +353,8 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->virtual_splat_require_full_core_coverage = virtual_splat_require_full_core_coverage;
   vio_manager->virtual_splat_debug_compare_pull_exact = virtual_splat_debug_compare_pull_exact;
   vio_manager->draw_rejected_points_en = draw_rejected_points_en;
+  vio_manager->ncc_en = ncc_en;
+  vio_manager->ncc_thre = ncc_thre;
   vio_manager->exposure_estimate_en = exposure_estimate_en;
   vio_manager->colmap_output_en = colmap_output_en;
   vio_manager->frontend_mode = frontend_mode;

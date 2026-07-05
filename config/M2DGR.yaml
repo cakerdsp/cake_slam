@@ -48,6 +48,8 @@
       frontend_mode: 0
       max_iterations: 5
       outlier_threshold: 1000
+      ncc_en: true
+      ncc_thre: 0.8
       img_point_cov: 1000
       grid_size: 5
       grid_n_height: 17

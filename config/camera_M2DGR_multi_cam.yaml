@@ -101,15 +101,15 @@
       k4: -0.003041081642470451
 
     # Generated undistort-baseline output models for M2DGR fisheyes.
-    # Policy: output_size=1024x1024, target_hfov=140deg, centered principal point.
+    # Policy: output_size=1024x1024, target_hfov=120deg, centered principal point.
     # Use camera{i}_undistort as cameras.camera*.camera_ns and camera{i} as raw_camera_ns.
     camera0_undistort:
       model: Pinhole
       width: 1024
       height: 1024
       scale: 1.0
-      fx: 186.352760
-      fy: 186.352760
+      fx: 295.603338
+      fy: 295.603338
       cx: 511.5
       cy: 511.5
       d0: 0.0
@@ -122,8 +122,8 @@
       width: 1024
       height: 1024
       scale: 1.0
-      fx: 186.352760
-      fy: 186.352760
+      fx: 295.603338
+      fy: 295.603338
       cx: 511.5
       cy: 511.5
       d0: 0.0
@@ -136,8 +136,8 @@
       width: 1024
       height: 1024
       scale: 1.0
-      fx: 186.352760
-      fy: 186.352760
+      fx: 295.603338
+      fy: 295.603338
       cx: 511.5
       cy: 511.5
       d0: 0.0
@@ -150,8 +150,8 @@
       width: 1024
       height: 1024
       scale: 1.0
-      fx: 186.352760
-      fy: 186.352760
+      fx: 295.603338
+      fy: 295.603338
       cx: 511.5
       cy: 511.5
       d0: 0.0
@@ -164,8 +164,8 @@
       width: 1024
       height: 1024
       scale: 1.0
-      fx: 186.352760
-      fy: 186.352760
+      fx: 295.603338
+      fy: 295.603338
       cx: 511.5
       cy: 511.5
       d0: 0.0
@@ -178,8 +178,8 @@
       width: 1024
       height: 1024
       scale: 1.0
-      fx: 186.352760
-      fy: 186.352760
+      fx: 295.603338
+      fy: 295.603338
       cx: 511.5
       cy: 511.5
       d0: 0.0

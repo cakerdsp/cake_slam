@@ -123,6 +123,8 @@
       cross_camera_reference_en: false
       max_iterations: 5
       outlier_threshold: 500
+      ncc_en: true
+      ncc_thre: 0.8
       img_point_cov: 1000
       grid_size: 5
       # Suggested grid_n_height: 17/12/10/8/7 for 1/2/3/4/6 cameras.

@@ -15,7 +15,7 @@
       k4: 0.007442211946112636
 
     # Generated undistort-baseline output model for M2DGR camera0.
-    # Policy: output_size=1024x1024, target_hfov=140deg, centered principal point.
+    # Policy: output_size=1024x1024, target_hfov=120deg, centered principal point.
     # Single-camera mapper currently loads output namespace "camera"; use this block
     # as the pinhole output model when wiring a single-camera undistort baseline.
     camera_undistort:
@@ -23,8 +23,8 @@
       width: 1024
       height: 1024
       scale: 1.0
-      fx: 186.352760
-      fy: 186.352760
+      fx: 295.603338
+      fy: 295.603338
       cx: 511.5
       cy: 511.5
       d0: 0.0

@@ -122,6 +122,8 @@ public:
   double exposure_time_init = 0.0;
   bool inverse_composition_en = false;
   bool raycast_en = false;
+  bool ncc_en = false;
+  double ncc_thre = 0.8;
   int lidar_en = 1;
   bool is_first_frame = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;

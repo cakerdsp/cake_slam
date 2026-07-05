@@ -136,7 +136,7 @@ public:
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
   int max_iterations, total_points;
 
-  double img_point_cov, outlier_threshold, ncc_thre;
+  double img_point_cov, outlier_threshold, ncc_thre = 0.8;
   
   SubSparseMap *visual_submap;
   std::vector<std::vector<V3D>> rays_with_sample_points;
