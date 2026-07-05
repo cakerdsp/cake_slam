@@ -3,7 +3,7 @@
     common:
       # The first N camera entries below are enabled. Valid range: 1..7.
       # camera6 is excluded by default because its official extrinsic is marked "to be changed".
-      num_cameras: 3
+      num_cameras: 1
       require_all_cameras: true
       multi_cam_sync_queue_size: 5
       multi_cam_sync_tolerance_ms: 40.0
@@ -17,10 +17,10 @@
       # camera0: left 8823
       camera0:
         img_topic: "/camera/left/image_raw"
-        camera_ns: "camera0_undistort"
+        camera_ns: "camera0"
         # Input-only remap. When true, camera_ns should name the undistorted pinhole model,
         # and raw_camera_ns should name the raw fisheye model in the camera YAML.
-        image_undistort_en: true
+        image_undistort_en: false
         raw_camera_ns: "camera0"
         Rcl: [0.0, -1.0,  0.0,
               0.0,  0.0, -1.0,
@@ -40,8 +40,8 @@
       # camera2: third / mid-left 8830
       camera1:
         img_topic: "/camera/third/image_raw"
-        camera_ns: "camera1_undistort"
-        image_undistort_en: true
+        camera_ns: "camera1"
+        image_undistort_en: false
         raw_camera_ns: "camera1"
         Rcl: [1.0, 0.0,  0.0,
               0.0, 0.0, -1.0,
@@ -52,8 +52,8 @@
       # camera3: fourth / mid-right 8827
       camera2:
         img_topic: "/camera/fourth/image_raw"
-        camera_ns: "camera2_undistort"
-        image_undistort_en: true
+        camera_ns: "camera2"
+        image_undistort_en: false
         raw_camera_ns: "camera2"
         Rcl: [-1.0,  0.0,  0.0,
                0.0,  0.0, -1.0,
@@ -110,7 +110,7 @@
 
     preprocess:
       image_downclock_en: false
-      point_filter_num: 15
+      point_filter_num: 65
       filter_size_surf: 0.1
       lidar_type: 2
       scan_line: 32
@@ -120,20 +120,20 @@
 
     vio:
       frontend_mode: 0
-      cross_camera_reference_en: false
+      cross_camera_reference_en: true
       max_iterations: 5
-      outlier_threshold: 500
+      outlier_threshold: 1000
       ncc_en: true
-      ncc_thre: 0.8
+      ncc_thre: 0.7
       img_point_cov: 1000
       grid_size: 5
       # Suggested grid_n_height: 17/12/10/8/7 for 1/2/3/4/6 cameras.
-      grid_n_height: 10
-      patch_size: 8
-      patch_pyrimid_level: 3
+      grid_n_height: 20
+      patch_size: 10
+      patch_pyrimid_level: 1
 
 
-      virtual_fisheye_patch_en: false
+      virtual_fisheye_patch_en: true
       raw_camera_model_jacobian_en: false
       virtual_s2_optimize_en: false
       virtual_sparse_patch_en: false
