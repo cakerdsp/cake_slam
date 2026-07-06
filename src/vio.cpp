@@ -965,7 +965,7 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
       pt->addFrameRef(ftr_new);
     }
   }
-  printf("[ VIO ] Update %d points in visual submap\n", update_num);
+  // printf("[ VIO ] Update %d points in visual submap\n", update_num);
 }
 
 void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)

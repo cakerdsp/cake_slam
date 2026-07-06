@@ -511,7 +511,6 @@ void VIOManager::initializeVIO()
 
   if (usage_stats_window <= 0) throw std::runtime_error("usage_stats_window must be positive");
   resetUsageStatsWindow();
-  resetUsageStatsTotals();
   if (usage_stats_en)
   {
     printf("\033[1;35m[ VIO Usage Stats ] enabled: window=%d frames; tables show candidate/accepted usage ratios.\033[0m\n",
@@ -2279,18 +2278,18 @@ bool VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, c
                                    std::fabs(debug_affine_det) > 1e-9 && px_ref.array().isFinite().all();
   if (!debug_warp_input_ok)
   {
-    printf("[ VIO Debug ] warpAffine reject det=%.6e finite=%d px=(%.2f,%.2f) img=%dx%d type=%d level_ref=%d search=%d pyramid=%d half=%d patch_null=%d\n",
-           debug_affine_det, A_cur_ref.array().isFinite().all() ? 1 : 0, px_ref[0], px_ref[1], img_ref.cols, img_ref.rows, img_ref.type(),
-           level_ref, search_level, pyramid_level, halfpatch_size, patch == nullptr ? 1 : 0);
-    fflush(stdout);
+    // printf("[ VIO Debug ] warpAffine reject det=%.6e finite=%d px=(%.2f,%.2f) img=%dx%d type=%d level_ref=%d search=%d pyramid=%d half=%d patch_null=%d\n",
+    //        debug_affine_det, A_cur_ref.array().isFinite().all() ? 1 : 0, px_ref[0], px_ref[1], img_ref.cols, img_ref.rows, img_ref.type(),
+    //        level_ref, search_level, pyramid_level, halfpatch_size, patch == nullptr ? 1 : 0);
+    // fflush(stdout);
     return false;
   }
 
   const Matrix2f A_ref_cur = A_cur_ref.inverse().cast<float>();
   if (!A_ref_cur.array().isFinite().all())
   {
-    printf("[ VIO Debug ] warpAffine reject inverse_nonfinite det=%.6e\n", debug_affine_det);
-    fflush(stdout);
+    // printf("[ VIO Debug ] warpAffine reject inverse_nonfinite det=%.6e\n", debug_affine_det);
+    // fflush(stdout);
     return false;
   }
 
@@ -2414,17 +2413,6 @@ void VIOManager::resetUsageStatsWindow()
   for (UsageStatsCell &cell : usage_anisotropy_bins_) cell.reset();
 }
 
-void VIOManager::resetUsageStatsTotals()
-{
-  usage_stats_total_frames_ = 0;
-  usage_total_camera_pairs_.assign(std::max(0, numCameras() * numCameras()), UsageStatsCell());
-  for (UsageStatsCell &cell : usage_total_region_pairs_) cell.reset();
-  for (UsageStatsCell &cell : usage_total_cross_region_pairs_) cell.reset();
-  for (UsageStatsCell &cell : usage_total_view_angle_bins_) cell.reset();
-  for (UsageStatsCell &cell : usage_total_footprint_bins_) cell.reset();
-  for (UsageStatsCell &cell : usage_total_anisotropy_bins_) cell.reset();
-}
-
 void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
                                         const V2D &cur_px, const Matrix2d &A_cur_ref, bool accepted,
                                         double sse, double ncc)
@@ -2434,12 +2422,7 @@ void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature 
   if (camera_count <= 0 || ctx.camera_id < 0 || ctx.camera_id >= camera_count ||
       ref_ftr.camera_id_ < 0 || ref_ftr.camera_id_ >= camera_count)
     return;
-  const size_t expected_pairs = static_cast<size_t>(camera_count * camera_count);
-  if (usage_camera_pairs_.size() != expected_pairs || usage_total_camera_pairs_.size() != expected_pairs)
-  {
-    resetUsageStatsWindow();
-    resetUsageStatsTotals();
-  }
+  if (usage_camera_pairs_.size() != static_cast<size_t>(camera_count * camera_count)) resetUsageStatsWindow();
 
   const PerCameraData &ref_ctx = cameras_[ref_ftr.camera_id_];
   const int ref_region = usageRegionBin(ref_ctx, ref_ftr.px_);
@@ -2468,42 +2451,23 @@ void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature 
     }
   };
 
-  const int camera_pair_idx = ref_ftr.camera_id_ * camera_count + ctx.camera_id;
-  updateCell(usage_camera_pairs_[camera_pair_idx]);
-  updateCell(usage_total_camera_pairs_[camera_pair_idx]);
+  updateCell(usage_camera_pairs_[ref_ftr.camera_id_ * camera_count + ctx.camera_id]);
   if (ref_region >= 0 && cur_region >= 0)
   {
-    const int region_pair_idx = ref_region * 4 + cur_region;
-    const int cross_region_pair_idx = (cross_camera ? 16 : 0) + region_pair_idx;
-    updateCell(usage_region_pairs_[region_pair_idx]);
-    updateCell(usage_total_region_pairs_[region_pair_idx]);
-    updateCell(usage_cross_region_pairs_[cross_region_pair_idx]);
-    updateCell(usage_total_cross_region_pairs_[cross_region_pair_idx]);
+    updateCell(usage_region_pairs_[ref_region * 4 + cur_region]);
+    updateCell(usage_cross_region_pairs_[(cross_camera ? 16 : 0) + ref_region * 4 + cur_region]);
   }
-  if (view_bin >= 0)
-  {
-    updateCell(usage_view_angle_bins_[view_bin]);
-    updateCell(usage_total_view_angle_bins_[view_bin]);
-  }
-  if (footprint_bin >= 0)
-  {
-    updateCell(usage_footprint_bins_[footprint_bin]);
-    updateCell(usage_total_footprint_bins_[footprint_bin]);
-  }
-  if (anisotropy_bin >= 0)
-  {
-    updateCell(usage_anisotropy_bins_[anisotropy_bin]);
-    updateCell(usage_total_anisotropy_bins_[anisotropy_bin]);
-  }
+  if (view_bin >= 0) updateCell(usage_view_angle_bins_[view_bin]);
+  if (footprint_bin >= 0) updateCell(usage_footprint_bins_[footprint_bin]);
+  if (anisotropy_bin >= 0) updateCell(usage_anisotropy_bins_[anisotropy_bin]);
 }
 
 void VIOManager::printUsageStatsTable(int frame_id)
 {
   if (!usage_stats_en) return;
-
-  const char *color = "\033[1;35m";
-  const char *reset = "\033[0m";
-
+  UsageStatsCell total;
+  UsageStatsCell same_camera;
+  UsageStatsCell cross_camera;
   auto mergeCell = [](UsageStatsCell &dst, const UsageStatsCell &src) {
     dst.candidates += src.candidates;
     dst.accepted += src.accepted;
@@ -2512,6 +2476,25 @@ void VIOManager::printUsageStatsTable(int frame_id)
     dst.sse += src.sse;
     dst.ncc_sum += src.ncc_sum;
   };
+
+  const int camera_count = numCameras();
+  for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
+  {
+    for (int cur_cam = 0; cur_cam < camera_count; ++cur_cam)
+    {
+      const UsageStatsCell &cell = usage_camera_pairs_[ref_cam * camera_count + cur_cam];
+      mergeCell(total, cell);
+      if (ref_cam == cur_cam)
+        mergeCell(same_camera, cell);
+      else
+        mergeCell(cross_camera, cell);
+    }
+  }
+
+  const char *color = "\033[1;35m";
+  const char *reset = "\033[0m";
+  const long long total_residuals = std::max(1LL, total.residuals);
+  const double samples_per_patch = static_cast<double>(std::max(1, patch_size_total));
 
   auto formatDouble = [](double value, int precision = 3) {
     std::ostringstream stream;
@@ -2522,131 +2505,89 @@ void VIOManager::printUsageStatsTable(int frame_id)
   auto printDivider = [&]() {
     printf("%s+--------------------------------------------------------------------------------------------------+%s\n", color, reset);
   };
-
-  auto printStatsSet = [&](const char *title, const char *frame_label, long long frame_count,
-                           const std::vector<UsageStatsCell> &camera_pairs,
-                           const std::array<UsageStatsCell, 16> &region_pairs,
-                           const std::array<UsageStatsCell, 32> &cross_region_pairs,
-                           const std::array<UsageStatsCell, 5> &view_angle_bins,
-                           const std::array<UsageStatsCell, 5> &footprint_bins,
-                           const std::array<UsageStatsCell, 4> &anisotropy_bins) {
-    UsageStatsCell total;
-    UsageStatsCell same_camera;
-    UsageStatsCell cross_camera;
-    const int camera_count = numCameras();
-    for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
-    {
-      for (int cur_cam = 0; cur_cam < camera_count; ++cur_cam)
-      {
-        const size_t idx = static_cast<size_t>(ref_cam * camera_count + cur_cam);
-        if (idx >= camera_pairs.size()) continue;
-        const UsageStatsCell &cell = camera_pairs[idx];
-        mergeCell(total, cell);
-        if (ref_cam == cur_cam)
-          mergeCell(same_camera, cell);
-        else
-          mergeCell(cross_camera, cell);
-      }
-    }
-
-    const long long total_residuals = std::max(1LL, total.residuals);
-    const double samples_per_patch = static_cast<double>(std::max(1, patch_size_total));
-
-    auto printSection = [&](const char *section_title) {
-      printDivider();
-      printf("%s| %-96s |%s\n", color, section_title, reset);
-      printDivider();
-      printf("%s| %-32s | %9s | %9s | %7s | %7s | %8s | %8s |%s\n",
-             color, "Category", "Candidate", "Accepted", "Acc %", "Use %", "RMS", "NCC", reset);
-      printDivider();
-    };
-
-    auto printRow = [&](const std::string &name, const UsageStatsCell &cell) {
-      const double accept_ratio = cell.candidates > 0 ? 100.0 * static_cast<double>(cell.accepted) / cell.candidates : 0.0;
-      const double use_ratio = 100.0 * static_cast<double>(cell.residuals) / total_residuals;
-      const double rms = cell.accepted > 0 ? std::sqrt(std::max(0.0, cell.sse) / (cell.accepted * samples_per_patch)) : 0.0;
-      const std::string rms_text = cell.accepted > 0 ? formatDouble(rms, 2) : "-";
-      const std::string ncc_text = cell.ncc_count > 0 ? formatDouble(cell.ncc_sum / cell.ncc_count, 3) : "-";
-      printf("%s| %-32s | %9lld | %9lld | %7.2f | %7.2f | %8s | %8s |%s\n",
-             color, name.c_str(), cell.candidates, cell.accepted, accept_ratio, use_ratio,
-             rms_text.c_str(), ncc_text.c_str(), reset);
-    };
-
+  auto printSection = [&](const char *title) {
     printDivider();
     printf("%s| %-96s |%s\n", color, title, reset);
-    printf("%s| frame=%-8d %-13s=%-8lld total_candidates=%-8lld total_accepted=%-8lld residuals=%-8lld |%s\n",
-           color, frame_id, frame_label, frame_count, total.candidates, total.accepted, total.residuals, reset);
+    printDivider();
+    printf("%s| %-32s | %9s | %9s | %7s | %7s | %8s | %8s |%s\n",
+           color, "Category", "Candidate", "Accepted", "Acc %", "Use %", "RMS", "NCC", reset);
+    printDivider();
+  };
+  auto printRow = [&](const std::string &name, const UsageStatsCell &cell) {
+    const double accept_ratio = cell.candidates > 0 ? 100.0 * static_cast<double>(cell.accepted) / cell.candidates : 0.0;
+    const double use_ratio = 100.0 * static_cast<double>(cell.residuals) / total_residuals;
+    const double rms = cell.accepted > 0 ? std::sqrt(std::max(0.0, cell.sse) / (cell.accepted * samples_per_patch)) : 0.0;
+    const std::string rms_text = cell.accepted > 0 ? formatDouble(rms, 2) : "-";
+    const std::string ncc_text = cell.ncc_count > 0 ? formatDouble(cell.ncc_sum / cell.ncc_count, 3) : "-";
+    printf("%s| %-32s | %9lld | %9lld | %7.2f | %7.2f | %8s | %8s |%s\n",
+           color, name.c_str(), cell.candidates, cell.accepted, accept_ratio, use_ratio,
+           rms_text.c_str(), ncc_text.c_str(), reset);
+  };
 
-    printSection("SAME_CROSS_USAGE");
-    printRow("same_cam", same_camera);
-    printRow("cross_cam", cross_camera);
+  printDivider();
+  printf("%s| %-96s |%s\n", color, "VIO Usage Stats", reset);
+  printf("%s| frame=%-8d window_frames=%-8lld total_candidates=%-8lld total_accepted=%-8lld residuals=%-8lld |%s\n",
+         color, frame_id, usage_stats_frames_, total.candidates, total.accepted, total.residuals, reset);
 
-    printSection("CAMERA_PAIR_USAGE");
-    for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
+  printSection("SAME_CROSS_USAGE");
+  printRow("same_cam", same_camera);
+  printRow("cross_cam", cross_camera);
+
+  printSection("CAMERA_PAIR_USAGE");
+  for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
+  {
+    for (int cur_cam = 0; cur_cam < camera_count; ++cur_cam)
     {
-      for (int cur_cam = 0; cur_cam < camera_count; ++cur_cam)
-      {
-        const size_t idx = static_cast<size_t>(ref_cam * camera_count + cur_cam);
-        if (idx >= camera_pairs.size()) continue;
-        const UsageStatsCell &cell = camera_pairs[idx];
-        if (cell.candidates == 0 && cell.accepted == 0) continue;
-        printRow("cam" + std::to_string(ref_cam) + "->cam" + std::to_string(cur_cam), cell);
-      }
+      const UsageStatsCell &cell = usage_camera_pairs_[ref_cam * camera_count + cur_cam];
+      if (cell.candidates == 0 && cell.accepted == 0) continue;
+      printRow("cam" + std::to_string(ref_cam) + "->cam" + std::to_string(cur_cam), cell);
     }
+  }
 
-    static const char *region_names[] = {"center", "mid", "edge", "outer"};
-    printSection("REGION_PAIR_USAGE");
+  static const char *region_names[] = {"center", "mid", "edge", "outer"};
+  printSection("REGION_PAIR_USAGE");
+  for (int ref_region = 0; ref_region < 4; ++ref_region)
+  {
+    for (int cur_region = 0; cur_region < 4; ++cur_region)
+    {
+      const UsageStatsCell &cell = usage_region_pairs_[ref_region * 4 + cur_region];
+      if (cell.candidates == 0 && cell.accepted == 0) continue;
+      printRow(std::string(region_names[ref_region]) + "->" + region_names[cur_region], cell);
+    }
+  }
+
+  printSection("CROSS_CAMERA_REGION_USAGE");
+  for (int cross = 0; cross < 2; ++cross)
+  {
     for (int ref_region = 0; ref_region < 4; ++ref_region)
     {
       for (int cur_region = 0; cur_region < 4; ++cur_region)
       {
-        const UsageStatsCell &cell = region_pairs[ref_region * 4 + cur_region];
+        const UsageStatsCell &cell = usage_cross_region_pairs_[cross * 16 + ref_region * 4 + cur_region];
         if (cell.candidates == 0 && cell.accepted == 0) continue;
-        printRow(std::string(region_names[ref_region]) + "->" + region_names[cur_region], cell);
+        printRow(std::string(cross ? "cross " : "same ") + region_names[ref_region] + "->" + region_names[cur_region], cell);
       }
     }
+  }
 
-    printSection("CROSS_CAMERA_REGION_USAGE");
-    for (int cross = 0; cross < 2; ++cross)
-    {
-      for (int ref_region = 0; ref_region < 4; ++ref_region)
-      {
-        for (int cur_region = 0; cur_region < 4; ++cur_region)
-        {
-          const UsageStatsCell &cell = cross_region_pairs[cross * 16 + ref_region * 4 + cur_region];
-          if (cell.candidates == 0 && cell.accepted == 0) continue;
-          printRow(std::string(cross ? "cross " : "same ") + region_names[ref_region] + "->" + region_names[cur_region], cell);
-        }
-      }
-    }
+  static const char *angle_names[] = {"0-5deg", "5-15deg", "15-30deg", "30-60deg", ">60deg"};
+  printSection("VIEW_ANGLE_DELTA_USAGE");
+  for (int i = 0; i < 5; ++i) printRow(angle_names[i], usage_view_angle_bins_[i]);
 
-    static const char *angle_names[] = {"0-5deg", "5-15deg", "15-30deg", "30-60deg", ">60deg"};
-    printSection("VIEW_ANGLE_DELTA_USAGE");
-    for (int i = 0; i < 5; ++i) printRow(angle_names[i], view_angle_bins[i]);
+  static const char *footprint_names[] = {"invalid", "1-2x", "2-4x", "4-8x", ">8x"};
+  printSection("FOOTPRINT_USAGE");
+  for (int i = 0; i < 5; ++i) printRow(footprint_names[i], usage_footprint_bins_[i]);
 
-    static const char *footprint_names[] = {"invalid", "1-2x", "2-4x", "4-8x", ">8x"};
-    printSection("FOOTPRINT_USAGE");
-    for (int i = 0; i < 5; ++i) printRow(footprint_names[i], footprint_bins[i]);
-
-    static const char *anisotropy_names[] = {"1-1.5x", "1.5-2x", "2-4x", ">4x"};
-    printSection("ANISOTROPY_USAGE");
-    for (int i = 0; i < 4; ++i) printRow(anisotropy_names[i], anisotropy_bins[i]);
-    printDivider();
-  };
-
-  printStatsSet("VIO Usage Stats (Window)", "window_frames", usage_stats_frames_, usage_camera_pairs_,
-                usage_region_pairs_, usage_cross_region_pairs_, usage_view_angle_bins_,
-                usage_footprint_bins_, usage_anisotropy_bins_);
-  printStatsSet("VIO Usage Stats (Run Total)", "total_frames", usage_stats_total_frames_, usage_total_camera_pairs_,
-                usage_total_region_pairs_, usage_total_cross_region_pairs_, usage_total_view_angle_bins_,
-                usage_total_footprint_bins_, usage_total_anisotropy_bins_);
+  static const char *anisotropy_names[] = {"1-1.5x", "1.5-2x", "2-4x", ">4x"};
+  printSection("ANISOTROPY_USAGE");
+  for (int i = 0; i < 4; ++i) printRow(anisotropy_names[i], usage_anisotropy_bins_[i]);
+  printDivider();
 }
 
 void VIOManager::maybePrintUsageStatsTable(int frame_id)
 {
   if (!usage_stats_en) return;
   ++usage_stats_frames_;
-  ++usage_stats_total_frames_;
   if (usage_stats_frames_ < std::max(1, usage_stats_window)) return;
   printUsageStatsTable(frame_id);
   resetUsageStatsWindow();
@@ -3087,7 +3028,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     result.warped_reference.assign(warp_len, 0.0f);
     for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
     {
-      // [MODIFY] 使用第一次生成的参�?patch，不再每帧重�?
+      // [MODIFY] 使用第一次生成的参�?patch，不再每帧重�?
       if (!warpAffineVirtual(result.track.A_cur_ref, ref_ftr->img_, ref_ftr->level_, result.track.search_level, pyramid_level,
                              patch_size_half, result.warped_reference.data()))
       {
@@ -3304,15 +3245,15 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
   }
   if (feat_map.size() <= 0)
   {
-    printf("[ VIO Debug ] retrieve skip camera_id=%d reason=empty_feat_map pg=%zu img=%dx%d\n",
-           ctx.camera_id, pg.size(), img.cols, img.rows);
-    fflush(stdout);
+    // printf("[ VIO Debug ] retrieve skip camera_id=%d reason=empty_feat_map pg=%zu img=%dx%d\n",
+    //        ctx.camera_id, pg.size(), img.cols, img.rows);
+    // fflush(stdout);
     return;
   }
-  printf("[ VIO Debug ] retrieve start camera_id=%d img=%dx%d pg=%zu feat_map=%zu cross_ref=%d normal=%d raycast=%d border=%d grid=%d\n",
-         ctx.camera_id, img.cols, img.rows, pg.size(), feat_map.size(), cross_camera_reference_en ? 1 : 0,
-         normal_en ? 1 : 0, raycast_en ? 1 : 0, border, ctx.length);
-  fflush(stdout);
+  // printf("[ VIO Debug ] retrieve start camera_id=%d img=%dx%d pg=%zu feat_map=%zu cross_ref=%d normal=%d raycast=%d border=%d grid=%d\n",
+  //        ctx.camera_id, img.cols, img.rows, pg.size(), feat_map.size(), cross_camera_reference_en ? 1 : 0,
+  //        normal_en ? 1 : 0, raycast_en ? 1 : 0, border, ctx.length);
+  // fflush(stdout);
   double ts0 = omp_get_wtime();
 
   // pg_down->reserve(feat_map.size());
@@ -3394,9 +3335,9 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
     // t_depth += omp_get_wtime()-t2;
   }
 
-  printf("[ VIO Debug ] retrieve depth camera_id=%d depth_samples=%d sub_voxels=%zu elapsed=%.6f\n",
-         ctx.camera_id, debug_depth_samples, ctx.sub_feat_map.size(), omp_get_wtime() - ts0);
-  fflush(stdout);
+  // printf("[ VIO Debug ] retrieve depth camera_id=%d depth_samples=%d sub_voxels=%zu elapsed=%.6f\n",
+  //        ctx.camera_id, debug_depth_samples, ctx.sub_feat_map.size(), omp_get_wtime() - ts0);
+  // fflush(stdout);
 
   // imshow("depth_img", depth_img);
   // printf("A1: %.6lf \n", omp_get_wtime() - ts1);
@@ -3566,9 +3507,9 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
     ctx.sub_feat_map.erase(key);
   }
 
-  printf("[ VIO Debug ] retrieve map camera_id=%d sub_voxels=%zu deleted_voxels=%zu raycast=%d\n",
-         ctx.camera_id, ctx.sub_feat_map.size(), DeleteKeyList.size(), raycast_en ? 1 : 0);
-  fflush(stdout);
+  // printf("[ VIO Debug ] retrieve map camera_id=%d sub_voxels=%zu deleted_voxels=%zu raycast=%d\n",
+  //        ctx.camera_id, ctx.sub_feat_map.size(), DeleteKeyList.size(), raycast_en ? 1 : 0);
+  // fflush(stdout);
   int debug_grid_candidates = 0;
   int debug_ref_invalid = 0;
   int debug_cross_refs = 0;
@@ -3744,17 +3685,17 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
         ++debug_affine_bad;
         if (debug_affine_bad <= 5)
         {
-          printf("[ VIO Debug ] retrieve affine suspicious camera_id=%d ref_camera_id=%d det=%.6e search_level=%d finite=%d\n",
-                 ctx.camera_id, ref_ftr->camera_id_, debug_affine_det, search_level, debug_affine_ok ? 1 : 0);
-          fflush(stdout);
+          // printf("[ VIO Debug ] retrieve affine suspicious camera_id=%d ref_camera_id=%d det=%.6e search_level=%d finite=%d\n",
+          //        ctx.camera_id, ref_ftr->camera_id_, debug_affine_det, search_level, debug_affine_ok ? 1 : 0);
+          // fflush(stdout);
         }
       }
       if (debug_warp_logs < 8)
       {
-        printf("[ VIO Debug ] retrieve warp camera_id=%d ref_camera_id=%d search_level=%d det=%.6e finite=%d ref_px=(%.2f,%.2f) ref_img=%dx%d ref_level=%d\n",
-               ctx.camera_id, ref_ftr->camera_id_, search_level, debug_affine_det, debug_affine_ok ? 1 : 0,
-               ref_ftr->px_[0], ref_ftr->px_[1], ref_ftr->img_.cols, ref_ftr->img_.rows, ref_ftr->level_);
-        fflush(stdout);
+        // printf("[ VIO Debug ] retrieve warp camera_id=%d ref_camera_id=%d search_level=%d det=%.6e finite=%d ref_px=(%.2f,%.2f) ref_img=%dx%d ref_level=%d\n",
+        //        ctx.camera_id, ref_ftr->camera_id_, search_level, debug_affine_det, debug_affine_ok ? 1 : 0,
+        //        ref_ftr->px_[0], ref_ftr->px_[1], ref_ftr->img_.cols, ref_ftr->img_.rows, ref_ftr->level_);
+        // fflush(stdout);
         ++debug_warp_logs;
       }
       ++debug_warp_attempts;
@@ -3813,11 +3754,11 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
   // cout<<"C. addSubSparseMap: "<<t3-t2<<endl;
   // cout<<"depthcontinuous: C1 "<<t_2<<" C2 "<<t_3<<" C3 "<<t_4<<" C4
   // "<<t_5<<endl;
-  printf("[ VIO ] camera_id=%d retrieve %d points from visual sparse map\n", ctx.camera_id, ctx.total_points);
-  printf("[ VIO Debug ] retrieve summary camera_id=%d grid_candidates=%d ref_invalid=%d cross_refs=%d warp_attempts=%d affine_bad=%d accepted=%d elapsed=%.6f\n",
-         ctx.camera_id, debug_grid_candidates, debug_ref_invalid, debug_cross_refs, debug_warp_attempts, debug_affine_bad, debug_accepted,
-         omp_get_wtime() - ts0);
-  fflush(stdout);
+  // printf("[ VIO ] camera_id=%d retrieve %d points from visual sparse map\n", ctx.camera_id, ctx.total_points);
+  // printf("[ VIO Debug ] retrieve summary camera_id=%d grid_candidates=%d ref_invalid=%d cross_refs=%d warp_attempts=%d affine_bad=%d accepted=%d elapsed=%.6f\n",
+  //        ctx.camera_id, debug_grid_candidates, debug_ref_invalid, debug_cross_refs, debug_warp_attempts, debug_affine_bad, debug_accepted,
+  //        omp_get_wtime() - ts0);
+  // fflush(stdout);
 }
 
 bool VIOManager::interpolateReferenceFeature(const Feature &reference, const V2D &px, float &value) const
@@ -4740,7 +4681,7 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
       delete[] patch_temp;
     }
   }
-  printf("[ VIO ] Update %d points in visual submap\n", update_num);
+  // printf("[ VIO ] Update %d points in visual submap\n", update_num);
 }
 
 void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
@@ -5177,7 +5118,7 @@ void VIOManager::precomputeReferencePatchesVirtual(int level)
         const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
         float value;
         V2D gradient;
-        // [MODIFY] 使用第一次生成的参�?patch，不再每帧重�?
+        // [MODIFY] 使用第一次生成的参�?patch，不再每帧重�?
         if (!sampleStoredVirtualValueAndGradient(pt->ref_patch->img_, center + offset.cast<double>(), scale, value, gradient)) continue;
         MD(1, 2) Jimg;
         Jimg << gradient[0] / scale, gradient[1] / scale;
@@ -5977,10 +5918,10 @@ void VIOManager::dumpDataForColmap()
   Eigen::Quaterniond q(ctx.new_frame->T_f_w_.rotationMatrix());
   Eigen::Vector3d t = ctx.new_frame->T_f_w_.translation();
   fout_colmap << cnt << " "
-            << std::fixed << std::setprecision(6)  // 保证浮点数精度为6�?
+            << std::fixed << std::setprecision(6)  // 保证浮点数精度为6�?
             << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " "
             << t.x() << " " << t.y() << " " << t.z() << " "
-            << 1 << " "  // CAMERA_ID (假设相机ID�?)
+            << 1 << " "  // CAMERA_ID (假设相机ID�?)
             << cnt_str << ".png" << std::endl;
   fout_colmap << "0.0 0.0 -1" << std::endl;
   cnt++;
@@ -6411,10 +6352,10 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     throw std::runtime_error("MultiCameraFrame image count does not match VIOManager camera count");
 
   const double frame_start = omp_get_wtime();
-  printf("[ VIO Debug ] processMultiCameraFrame begin frame=%d cameras=%d pg=%zu feat_map=%zu plane_map=%zu virtual=%d cross_ref=%d normal=%d inverse=%d raycast=%d\n",
-         mf.frame_id, numCameras(), pg.size(), feat_map.size(), plane_map.size(), virtual_fisheye_patch_en ? 1 : 0,
-         cross_camera_reference_en ? 1 : 0, normal_en ? 1 : 0, inverse_composition_en ? 1 : 0, raycast_en ? 1 : 0);
-  fflush(stdout);
+  // printf("[ VIO Debug ] processMultiCameraFrame begin frame=%d cameras=%d pg=%zu feat_map=%zu plane_map=%zu virtual=%d cross_ref=%d normal=%d inverse=%d raycast=%d\n",
+  //        mf.frame_id, numCameras(), pg.size(), feat_map.size(), plane_map.size(), virtual_fisheye_patch_en ? 1 : 0,
+  //        cross_camera_reference_en ? 1 : 0, normal_en ? 1 : 0, inverse_composition_en ? 1 : 0, raycast_en ? 1 : 0);
+  // fflush(stdout);
   for (int camera_id = 0; camera_id < numCameras(); ++camera_id)
   {
     PerCameraData &ctx = cameras_[camera_id];
@@ -6428,34 +6369,34 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     ctx.new_frame.reset(new Frame(ctx.cam, image, mf.frame_id, camera_id, mf.timestamp));
     updateFrameState(ctx, *state);
     resetGrid(ctx);
-    printf("[ VIO Debug ] frame setup camera_id=%d frame=%d image=%dx%d type=%d ns=%s\n",
-           ctx.camera_id, mf.frame_id, image.cols, image.rows, image.type(), ctx.camera_namespace.c_str());
-    fflush(stdout);
+    // printf("[ VIO Debug ] frame setup camera_id=%d frame=%d image=%dx%d type=%d ns=%s\n",
+    //        ctx.camera_id, mf.frame_id, image.cols, image.rows, image.type(), ctx.camera_namespace.c_str());
+    // fflush(stdout);
   }
   const double frame_setup_end = omp_get_wtime();
 
   for (PerCameraData &ctx : cameras_)
   {
-    printf("[ VIO Debug ] retrieve begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
-    fflush(stdout);
+    // printf("[ VIO Debug ] retrieve begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
+    // fflush(stdout);
     retrieveFromVisualSparseMap(ctx, ctx.new_frame->img_, pg, plane_map);
-    printf("[ VIO Debug ] retrieve end camera_id=%d frame=%d total_points=%d\n",
-           ctx.camera_id, mf.frame_id, ctx.total_points);
-    fflush(stdout);
-    printf("[ VIO Debug ] generate begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
-    fflush(stdout);
+    // printf("[ VIO Debug ] retrieve end camera_id=%d frame=%d total_points=%d\n",
+    //        ctx.camera_id, mf.frame_id, ctx.total_points);
+    // fflush(stdout);
+    // printf("[ VIO Debug ] generate begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
+    // fflush(stdout);
     generateVisualMapPoints(ctx, ctx.new_frame->img_, pg);
-    printf("[ VIO Debug ] generate end camera_id=%d frame=%d pending=%zu\n",
-           ctx.camera_id, mf.frame_id, ctx.pending_new_points.size());
-    fflush(stdout);
+    // printf("[ VIO Debug ] generate end camera_id=%d frame=%d pending=%zu\n",
+    //        ctx.camera_id, mf.frame_id, ctx.pending_new_points.size());
+    // fflush(stdout);
   }
   const double retrieve_end = omp_get_wtime();
 
-  printf("[ VIO Debug ] ekf begin frame=%d\n", mf.frame_id);
-  fflush(stdout);
+  // printf("[ VIO Debug ] ekf begin frame=%d\n", mf.frame_id);
+  // fflush(stdout);
   computeJacobianAndUpdateEKF();
-  printf("[ VIO Debug ] ekf end frame=%d\n", mf.frame_id);
-  fflush(stdout);
+  // printf("[ VIO Debug ] ekf end frame=%d\n", mf.frame_id);
+  // fflush(stdout);
   const double ekf_end = omp_get_wtime();
 
   if (ref_patch_dump_en && !cameras_.empty())
@@ -6468,28 +6409,28 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
       pending.T_f_w = ctx.new_frame->T_f_w_;
       if (pending.virtual_patch_valid) pending.T_v_w = composeVirtualPose(pending.R_v_from_c, pending.T_f_w);
     }
-    printf("[ VIO Debug ] updateVisualMap begin camera_id=%d frame=%d pending=%zu\n",
-           ctx.camera_id, mf.frame_id, ctx.pending_new_points.size());
-    fflush(stdout);
+    // printf("[ VIO Debug ] updateVisualMap begin camera_id=%d frame=%d pending=%zu\n",
+    //        ctx.camera_id, mf.frame_id, ctx.pending_new_points.size());
+    // fflush(stdout);
     updateVisualMapPoints(ctx, ctx.new_frame->img_);
-    printf("[ VIO Debug ] updateVisualMap end camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
-    fflush(stdout);
+    // printf("[ VIO Debug ] updateVisualMap end camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
+    // fflush(stdout);
   }
   const double map_update_end = omp_get_wtime();
-  printf("[ VIO Debug ] commitPendingNewPoints begin frame=%d\n", mf.frame_id);
-  fflush(stdout);
+  // printf("[ VIO Debug ] commitPendingNewPoints begin frame=%d\n", mf.frame_id);
+  // fflush(stdout);
   commitPendingNewPoints();
-  printf("[ VIO Debug ] commitPendingNewPoints end frame=%d feat_map=%zu\n", mf.frame_id, feat_map.size());
-  fflush(stdout);
+  // printf("[ VIO Debug ] commitPendingNewPoints end frame=%d feat_map=%zu\n", mf.frame_id, feat_map.size());
+  // fflush(stdout);
   const double commit_end = omp_get_wtime();
   for (PerCameraData &ctx : cameras_)
   {
-    printf("[ VIO Debug ] updateReference begin camera_id=%d frame=%d total_points=%d\n",
-           ctx.camera_id, mf.frame_id, ctx.total_points);
-    fflush(stdout);
+    // printf("[ VIO Debug ] updateReference begin camera_id=%d frame=%d total_points=%d\n",
+    //        ctx.camera_id, mf.frame_id, ctx.total_points);
+    // fflush(stdout);
     updateReferencePatch(ctx, plane_map);
-    printf("[ VIO Debug ] updateReference end camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
-    fflush(stdout);
+    // printf("[ VIO Debug ] updateReference end camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
+    // fflush(stdout);
     plotTrackedPoints(ctx);
     if (plot_flag) projectPatchFromRefToCur(ctx, plane_map);
   }

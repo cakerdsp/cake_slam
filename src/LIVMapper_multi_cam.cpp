@@ -777,11 +777,11 @@ void LIVMapper::handleVIO()
   }
 
   const size_t vio_raw_points = pcl_w_wait_pub != nullptr ? pcl_w_wait_pub->points.size() : 0;
-  printf("[ VIO Debug ] dispatch frontend_mode=%d raw_points=%zu cameras=%d virtual=%d cross_ref=%d normal=%d inverse=%d raycast=%d\n",
-         current_frontend_mode, vio_raw_points, vio_manager->numCameras(), vio_manager->virtual_fisheye_patch_en ? 1 : 0,
-         vio_manager->cross_camera_reference_en ? 1 : 0, vio_manager->normal_en ? 1 : 0,
-         vio_manager->inverse_composition_en ? 1 : 0, vio_manager->raycast_en ? 1 : 0);
-  fflush(stdout);
+  // printf("[ VIO Debug ] dispatch frontend_mode=%d raw_points=%zu cameras=%d virtual=%d cross_ref=%d normal=%d inverse=%d raycast=%d\n",
+  //        current_frontend_mode, vio_raw_points, vio_manager->numCameras(), vio_manager->virtual_fisheye_patch_en ? 1 : 0,
+  //        vio_manager->cross_camera_reference_en ? 1 : 0, vio_manager->normal_en ? 1 : 0,
+  //        vio_manager->inverse_composition_en ? 1 : 0, vio_manager->raycast_en ? 1 : 0);
+  // fflush(stdout);
 
   if (fabs((LidarMeasures.last_lio_update_time - _first_lidar_time) - plot_time) < (frame_cnt / 2 * 0.1)) 
   {
@@ -1092,7 +1092,7 @@ void LIVMapper::imu_prop_callback()
 {
   if (p_imu->imu_need_init || !new_imu || !ekf_finish_once) { return; }
   mtx_buffer_imu_prop.lock();
-  new_imu = false; // 控制 propagate 频率�?IMU 频率一�?
+  new_imu = false; // 控制 propagate 频率�?IMU 频率一�?
   if (imu_prop_enable && !prop_imu_buffer.empty())
   {
     static double last_t_from_lidar_end_time = 0;
