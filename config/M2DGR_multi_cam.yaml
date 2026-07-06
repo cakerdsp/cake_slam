@@ -135,7 +135,7 @@
       max_iterations: 5
       outlier_threshold: 1000
       ncc_en: true
-      ncc_thre: 0.1
+      ncc_thre: 0.7
       usage_stats_en: true
       usage_stats_window: 100
       img_point_cov: 1000
@@ -163,7 +163,7 @@
       raycast_en: false
       inverse_composition_en: false
       exposure_estimate_en: true
-      online_extrinsic_en: true
+      online_extrinsic_en: false
       online_extrinsic_rot_en: true
       online_extrinsic_trans_en: true
       online_extrinsic_prior_factor_en: false
