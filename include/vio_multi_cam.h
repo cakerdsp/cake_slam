@@ -374,23 +374,50 @@ public:
   double virtual_warp_time_ = 0.0;
   double virtual_current_core_time_ = 0.0;
 
+  static constexpr int kUsageNccBinCount = 11;
+  static constexpr int kUsagePoseDim = 6;
+
   struct UsageStatsCell
   {
     long long candidates = 0;
     long long accepted = 0;
     long long residuals = 0;
+    long long candidate_ncc_count = 0;
     long long ncc_count = 0;
     double sse = 0.0;
+    double candidate_ncc_sum = 0.0;
     double ncc_sum = 0.0;
+    std::array<long long, kUsageNccBinCount> candidate_ncc_hist = {};
+    std::array<long long, kUsageNccBinCount> accepted_ncc_hist = {};
 
     void reset()
     {
       candidates = 0;
       accepted = 0;
       residuals = 0;
+      candidate_ncc_count = 0;
       ncc_count = 0;
       sse = 0.0;
+      candidate_ncc_sum = 0.0;
       ncc_sum = 0.0;
+      candidate_ncc_hist.fill(0);
+      accepted_ncc_hist.fill(0);
+    }
+  };
+
+  struct PoseInfoStatsCell
+  {
+    long long patches = 0;
+    long long residuals = 0;
+    double trace = 0.0;
+    std::array<double, kUsagePoseDim * kUsagePoseDim> h_pose = {};
+
+    void reset()
+    {
+      patches = 0;
+      residuals = 0;
+      trace = 0.0;
+      h_pose.fill(0.0);
     }
   };
 
@@ -408,6 +435,12 @@ public:
   std::array<UsageStatsCell, 5> usage_total_footprint_bins_;
   std::array<UsageStatsCell, 4> usage_anisotropy_bins_;
   std::array<UsageStatsCell, 4> usage_total_anisotropy_bins_;
+  std::vector<PoseInfoStatsCell> usage_pose_camera_pairs_;
+  std::vector<PoseInfoStatsCell> usage_total_pose_camera_pairs_;
+  std::array<PoseInfoStatsCell, 16> usage_pose_region_pairs_;
+  std::array<PoseInfoStatsCell, 16> usage_total_pose_region_pairs_;
+  std::array<PoseInfoStatsCell, 32> usage_pose_cross_region_pairs_;
+  std::array<PoseInfoStatsCell, 32> usage_total_pose_cross_region_pairs_;
   int virtual_map_grid_count_ = 0;
   int virtual_candidate_null_count_ = 0;
   int virtual_candidate_normal_uninit_count_ = 0;
@@ -628,11 +661,16 @@ public:
   int usageViewAngleBin(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt) const;
   int usageFootprintBin(const Matrix2d &A_cur_ref) const;
   int usageAnisotropyBin(const Matrix2d &A_cur_ref) const;
+  int usageNccBin(double ncc) const;
   void resetUsageStatsWindow();
   void resetUsageStatsTotals();
   void recordUsageObservation(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
                               const V2D &cur_px, const Matrix2d &A_cur_ref, bool accepted,
                               double sse = 0.0, double ncc = std::numeric_limits<double>::quiet_NaN());
+  void recordUsageCandidateNcc(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
+                               const V2D &cur_px, const Matrix2d &A_cur_ref, double ncc);
+  void recordUsagePoseInfo(const PerCameraData &ctx, const Feature &ref_ftr, const V2D &cur_px,
+                           const Eigen::Matrix<double, kUsagePoseDim, 1> &j_pose, bool count_patch);
   void printUsageStatsTable(int frame_id);
   void maybePrintUsageStatsTable(int frame_id);
   double calculateNCC(float *ref_patch, float *cur_patch, int patch_size);
