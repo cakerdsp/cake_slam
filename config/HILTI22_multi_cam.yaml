@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     common:
-      num_cameras: 1
+      num_cameras: 5
       require_all_cameras: true
       multi_cam_sync_queue_size: 5
       multi_cam_sync_tolerance_ms: 40.0
@@ -14,17 +14,66 @@
     cameras:
       camera0:
         img_topic: "/alphasense/cam0/image_raw"
-        camera_ns: "camera"
+        camera_ns: "camera0"
         image_undistort_en: false
-        raw_camera_ns: "camera"
-        Rcl: [-0.999926, -0.00670802, 0.0101073,
-              -0.0100912, -0.00242564, -0.999946,
-               0.00673218, -0.999975, 0.00235777]
-        Pcl: [-0.0549762, 0.0675401, -0.0520599]
+        raw_camera_ns: "camera0"
+        # HILTI C0. imu_to_cam0 composed with extrin_calib imu<-lidar.
+        Rcl: [-0.9999264201, -0.006708021447, 0.01010727015,
+              -0.01009119702, -0.002425643644, -0.9999461405,
+               0.006732176792, -0.999974559, 0.0023577732]
+        Pcl: [-0.05497620466, 0.06754014554, -0.0520599209]
+        online_extrinsic_en: true
+
+      camera1:
+        img_topic: "/alphasense/cam1/image_raw"
+        camera_ns: "camera1"
+        image_undistort_en: false
+        raw_camera_ns: "camera1"
+        # HILTI C1. imu_to_cam1 composed with extrin_calib imu<-lidar.
+        Rcl: [-0.9999840643, -0.001655612644, 0.005397233569,
+              -0.005395690615, -0.0009350089579, -0.999985006,
+               0.001660634281, -0.9999981924, 0.0009260608843]
+        Pcl: [0.05377943234, 0.0683868197, -0.05154509159]
+        online_extrinsic_en: true
+
+      camera2:
+        img_topic: "/alphasense/cam2/image_raw"
+        camera_ns: "camera2"
+        image_undistort_en: false
+        raw_camera_ns: "camera2"
+        # HILTI C2. imu_to_cam2 composed with extrin_calib imu<-lidar.
+        Rcl: [-0.004234051672, -0.9999897552, 0.00160069188,
+               0.9999871882, -0.004238470701, -0.002767461132,
+               0.002774217265, 0.001588953799, 0.9999948895]
+        Pcl: [-0.007986043407, 0.0007666033303, -0.08909935435]
+        online_extrinsic_en: true
+
+      camera3:
+        img_topic: "/alphasense/cam3/image_raw"
+        camera_ns: "camera3"
+        image_undistort_en: false
+        raw_camera_ns: "camera3"
+        # HILTI C3. imu_to_cam3 composed with extrin_calib imu<-lidar.
+        Rcl: [-0.007396041671, 0.9998916894, -0.01272430781,
+               0.002363530932, -0.01270714046, -0.9999164677,
+              -0.9999698557, -0.007425498157, -0.002269292396]
+        Pcl: [-0.001388073157, 0.06618357503, -0.0656154501]
+        online_extrinsic_en: true
+
+      camera4:
+        img_topic: "/alphasense/cam4/image_raw"
+        camera_ns: "camera4"
+        image_undistort_en: false
+        raw_camera_ns: "camera4"
+        # HILTI C4. imu_to_cam4 composed with extrin_calib imu<-lidar.
+        Rcl: [0.0009424276675, -0.9999880402, 0.004799082218,
+              0.002190089783, -0.004797008862, -0.999986096,
+              0.9999971577, 0.0009529249849, 0.002185542757]
+        Pcl: [0.005160367447, 0.07171380895, -0.06644965352]
         online_extrinsic_en: true
 
     extrin_calib:
-      # Hilti-2022
+      # Hilti-2022. Interpreted by code as imu<-lidar and inverted internally to lidar<-imu.
       extrinsic_T: [-0.001, -0.00855, 0.055]
       extrinsic_R: [0.0, -1.0, 0.0,
                     -1.0, 0.0, 0.0,
