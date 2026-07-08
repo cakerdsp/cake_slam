@@ -207,6 +207,8 @@ public:
   int ref_patch_dump_random_seed = -1;
   int ref_patch_dump_max_candidate_skip = 50;
   double ref_patch_dump_ncc_threshold = 0.6;
+  bool runtime_support_dump_en = false;
+  std::string runtime_support_dump_folder = "runtime_support";
   int frontend_mode = 0;
   int optical_flow_max_cnt = 250;
   int optical_flow_min_dist = 20;

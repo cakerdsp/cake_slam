@@ -327,6 +327,13 @@ public:
   int ref_patch_dump_random_seed = -1;
   int ref_patch_dump_max_candidate_skip = 50;
   double ref_patch_dump_ncc_threshold = 0.6;
+  bool runtime_support_dump_en = false;
+  std::string runtime_support_dump_folder = "runtime_support";
+  bool runtime_support_dump_initialized_ = false;
+  int runtime_support_dump_next_point_id_ = 0;
+  int runtime_support_dump_best_track_count_ = 0;
+  const VisualPoint *runtime_support_dump_best_point_ = nullptr;
+  std::string runtime_support_dump_effective_folder_;
   int virtual_support_radius = 0;
   int virtual_support_size = 0;
   int virtual_ref_support_materialized_count_ = 0;
@@ -625,6 +632,11 @@ public:
                                     const cv::Mat &virtual_support_img, const std::vector<V2D> &raw_sample_pixels,
                                     const std::vector<V2D> &virtual_sample_pixels,
                                     const cv::Mat &raw_patch_display, const cv::Mat &virtual_patch_display);
+  void initializeRuntimeSupportDump();
+  void dumpRuntimeSupportObservation(const PerCameraData &ctx, const VisualPoint &point, const Feature &ref_ftr,
+                                     const V2D &current_raw_center_px, const VirtualTrackPatch &track,
+                                     const std::vector<float> &warped_reference, const std::vector<float> &current_core,
+                                     int track_count, int submap_index, double error, double ncc);
   bool getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
                                   int halfpatch_size, Matrix2d &A_cur_ref) const;
   bool getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_vcur_vref,

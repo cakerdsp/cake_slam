@@ -37,6 +37,8 @@ public:
   Feature *ref_patch;           //!< Reference patch of the point.
   std::vector<Feature *> ref_patch_by_camera_;
   std::vector<uint8_t> has_ref_patch_by_camera_;
+  int runtime_support_track_count_ = 0;
+  int runtime_support_dump_id_ = -1;
 
   VisualPoint(const Vector3d &pos);
   ~VisualPoint();

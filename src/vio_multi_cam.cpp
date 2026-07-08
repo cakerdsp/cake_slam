@@ -36,6 +36,64 @@ constexpr double kRadiansToDegrees = 57.29577951308232;
 constexpr int kRefPatchDumpWarpDisplaySize = 128;
 constexpr double kS2Eps = 1.0e-12;
 
+std::string sanitizeRuntimeSupportDumpFolder(const std::string &folder)
+{
+  std::string sanitized;
+  sanitized.reserve(folder.size());
+  for (unsigned char ch : folder)
+  {
+    if (std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.')
+      sanitized.push_back(static_cast<char>(ch));
+    else
+      sanitized.push_back('_');
+  }
+  if (sanitized.empty() || sanitized == "." || sanitized == "..") sanitized = "runtime_support";
+  return sanitized;
+}
+
+cv::Mat makeFloatMatDisplay(const cv::Mat &values, const cv::Mat &valid_mask = cv::Mat())
+{
+  if (values.empty() || values.type() != CV_32FC1) return cv::Mat();
+  cv::Mat display(values.rows, values.cols, CV_8UC1, cv::Scalar(0));
+  const bool use_mask = !valid_mask.empty() && valid_mask.type() == CV_8UC1 &&
+                        valid_mask.rows == values.rows && valid_mask.cols == values.cols;
+  for (int y = 0; y < values.rows; ++y)
+  {
+    const float *src = values.ptr<float>(y);
+    const uint8_t *mask = use_mask ? valid_mask.ptr<uint8_t>(y) : nullptr;
+    uint8_t *dst = display.ptr<uint8_t>(y);
+    for (int x = 0; x < values.cols; ++x)
+    {
+      if (mask != nullptr && mask[x] == 0) continue;
+      const float value = src[x];
+      if (std::isfinite(value)) dst[x] = static_cast<uint8_t>(std::lround(std::clamp(value, 0.0f, 255.0f)));
+    }
+  }
+  return display;
+}
+
+cv::Mat makeFloatPatchDisplay(const std::vector<float> &values, int patch_size, int offset = 0)
+{
+  if (patch_size <= 0 || offset < 0 || values.size() < static_cast<size_t>(offset + patch_size * patch_size))
+    return cv::Mat();
+  cv::Mat display(patch_size, patch_size, CV_8UC1, cv::Scalar(0));
+  for (int y = 0; y < patch_size; ++y)
+  {
+    uint8_t *dst = display.ptr<uint8_t>(y);
+    for (int x = 0; x < patch_size; ++x)
+    {
+      const float value = values[offset + y * patch_size + x];
+      if (std::isfinite(value)) dst[x] = static_cast<uint8_t>(std::lround(std::clamp(value, 0.0f, 255.0f)));
+    }
+  }
+  return display;
+}
+
+bool writeImageIfAvailable(const std::filesystem::path &path, const cv::Mat &image)
+{
+  return !image.empty() && cv::imwrite(path.string(), image);
+}
+
 std::string normalizeCameraModelType(std::string model)
 {
   std::string normalized;
@@ -421,6 +479,13 @@ void VIOManager::initializeVIO()
   patch_buffer.resize(patch_size_total);
   warp_len = patch_size_total * patch_pyrimid_level;
   border = (patch_size_half + 1) * (1 << patch_pyrimid_level);
+  runtime_support_dump_initialized_ = false;
+  runtime_support_dump_next_point_id_ = 0;
+  runtime_support_dump_best_track_count_ = 0;
+  runtime_support_dump_best_point_ = nullptr;
+  runtime_support_dump_effective_folder_.clear();
+  if (runtime_support_dump_en && !virtual_fisheye_patch_en)
+    printf("[ VIO Runtime Support Dump ] Ignored because virtual_fisheye_patch_en is false.\n");
 
   if (raw_camera_model_jacobian_en && virtual_fisheye_patch_en)
   {
@@ -2132,6 +2197,86 @@ void VIOManager::dumpRefPatchProbeObservation(const PerCameraData &ctx, const V2
   ++ref_patch_dump_probe_.saved_refs;
 }
 
+void VIOManager::initializeRuntimeSupportDump()
+{
+  if (runtime_support_dump_initialized_) return;
+  runtime_support_dump_effective_folder_ = sanitizeRuntimeSupportDumpFolder(runtime_support_dump_folder);
+  const std::filesystem::path root = std::filesystem::path(ROOT_DIR) / "Log" / "result" / "patchs" / runtime_support_dump_effective_folder_;
+  std::filesystem::create_directories(root / "updates");
+
+  const std::filesystem::path index_path = root / "index.csv";
+  if (!std::filesystem::exists(index_path) || std::filesystem::file_size(index_path) == 0)
+  {
+    std::ofstream index(index_path);
+    index << "event,frame_id,timestamp,camera_id,point_dump_id,track_count,submap_index,ref_frame_id,ref_camera_id,ref_timestamp,search_level,error,ncc,raw_u,raw_v,ref_support,cur_support,cur_mask,warped_ref,current_core\n";
+  }
+
+  std::ofstream selection(root / "selection.txt");
+  selection << "This folder is written by debug.runtime_support_dump_en.\n"
+            << "It stores actual virtual support images from accepted runtime optimization tracks, not the ref_patch_dump probe path.\n"
+            << "folder=" << runtime_support_dump_effective_folder_ << "\n";
+  runtime_support_dump_initialized_ = true;
+}
+
+void VIOManager::dumpRuntimeSupportObservation(const PerCameraData &ctx, const VisualPoint &point, const Feature &ref_ftr,
+                                               const V2D &current_raw_center_px, const VirtualTrackPatch &track,
+                                               const std::vector<float> &warped_reference,
+                                               const std::vector<float> &current_core, int track_count,
+                                               int submap_index, double error, double ncc)
+{
+  if (!runtime_support_dump_en || ctx.new_frame == nullptr) return;
+  initializeRuntimeSupportDump();
+
+  const std::filesystem::path root = std::filesystem::path(ROOT_DIR) / "Log" / "result" / "patchs" / runtime_support_dump_effective_folder_;
+  const std::filesystem::path updates_dir = root / "updates";
+  std::ostringstream base_name;
+  base_name << "frame_" << std::setw(6) << std::setfill('0') << ctx.new_frame->id_
+            << "_point_" << std::setw(4) << std::setfill('0') << point.runtime_support_dump_id_
+            << "_count_" << std::setw(4) << std::setfill('0') << track_count;
+  const std::string base = base_name.str();
+
+  const std::filesystem::path ref_support_path = updates_dir / (base + "_ref_support.png");
+  const std::filesystem::path cur_support_path = updates_dir / (base + "_cur_support.png");
+  const std::filesystem::path cur_mask_path = updates_dir / (base + "_cur_support_mask.png");
+  const std::filesystem::path warped_ref_path = updates_dir / (base + "_warped_ref_l0.png");
+  const std::filesystem::path current_core_path = updates_dir / (base + "_current_core_l0.png");
+
+  const cv::Mat ref_support_display = makeFloatMatDisplay(ref_ftr.img_);
+  const cv::Mat cur_support_display = makeFloatMatDisplay(track.cur_support.values, track.cur_support.valid_mask);
+  const cv::Mat warped_ref_display = makeFloatPatchDisplay(warped_reference, patch_size, 0);
+  const cv::Mat current_core_display = makeFloatPatchDisplay(current_core, patch_size, 0);
+
+  const bool ref_saved = writeImageIfAvailable(ref_support_path, ref_support_display);
+  const bool cur_saved = writeImageIfAvailable(cur_support_path, cur_support_display);
+  const bool mask_saved = writeImageIfAvailable(cur_mask_path, track.cur_support.valid_mask);
+  const bool warped_saved = writeImageIfAvailable(warped_ref_path, warped_ref_display);
+  const bool core_saved = writeImageIfAvailable(current_core_path, current_core_display);
+
+  if (ref_saved) writeImageIfAvailable(root / "best_ref_support.png", ref_support_display);
+  if (cur_saved) writeImageIfAvailable(root / "best_cur_support.png", cur_support_display);
+  if (mask_saved) writeImageIfAvailable(root / "best_cur_support_mask.png", track.cur_support.valid_mask);
+  if (warped_saved) writeImageIfAvailable(root / "best_warped_ref_l0.png", warped_ref_display);
+  if (core_saved) writeImageIfAvailable(root / "best_current_core_l0.png", current_core_display);
+
+  std::ofstream index(root / "index.csv", std::ios::app);
+  index << "best_update," << ctx.new_frame->id_ << ','
+        << std::fixed << std::setprecision(9) << ctx.new_frame->timestamp_ << ','
+        << ctx.camera_id << ',' << point.runtime_support_dump_id_ << ',' << track_count << ','
+        << submap_index << ',' << ref_ftr.id_ << ',' << ref_ftr.camera_id_ << ','
+        << std::setprecision(9) << ref_ftr.timestamp_ << ',' << track.search_level << ','
+        << std::setprecision(6) << error << ',' << ncc << ','
+        << current_raw_center_px[0] << ',' << current_raw_center_px[1] << ','
+        << (ref_saved ? std::filesystem::relative(ref_support_path, root).generic_string() : "") << ','
+        << (cur_saved ? std::filesystem::relative(cur_support_path, root).generic_string() : "") << ','
+        << (mask_saved ? std::filesystem::relative(cur_mask_path, root).generic_string() : "") << ','
+        << (warped_saved ? std::filesystem::relative(warped_ref_path, root).generic_string() : "") << ','
+        << (core_saved ? std::filesystem::relative(current_core_path, root).generic_string() : "") << '\n';
+
+  printf("[ VIO Runtime Support Dump ] best point=%d tracks=%d frame=%d ref_saved=%d cur_saved=%d core_saved=%d folder=%s\n",
+         point.runtime_support_dump_id_, track_count, ctx.new_frame->id_, ref_saved ? 1 : 0,
+         cur_saved ? 1 : 0, core_saved ? 1 : 0, runtime_support_dump_effective_folder_.c_str());
+}
+
 bool VIOManager::getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
                                             int halfpatch_size, Matrix2d &A_cur_ref) const
 {
@@ -3189,6 +3334,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     VirtualTrackPatch track;
     vector<float> warped_reference;
+    vector<float> current_core;
     float error = 0.0f;
     double inverse_reference_exposure = 0.0;
     double ncc = std::numeric_limits<double>::quiet_NaN();
@@ -3436,7 +3582,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     result.warped_reference.assign(warp_len, 0.0f);
     for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
     {
-      // [MODIFY] 使用第一次生成的参�?patch，不再每帧重�?
+      // Reuse the stored reference support instead of regenerating it every frame.
       if (!warpAffineVirtual(result.track.A_cur_ref, ref_ftr->img_, ref_ftr->level_, result.track.search_level, pyramid_level,
                              patch_size_half, result.warped_reference.data()))
       {
@@ -3510,6 +3656,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     }
     result.current_core_time = omp_get_wtime() - current_core_start;
 
+    if (runtime_support_dump_en) result.current_core = std::move(current_core);
     result.inverse_reference_exposure = ref_ftr->inv_expo_time_;
     result.track.valid = true;
     result.valid = true;
@@ -3589,6 +3736,23 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       const VirtualCandidate &candidate = candidates[candidate_index];
       recordUsageObservation(ctx, *candidate.reference, *candidate.point, candidate.current_raw_center_px,
                              result.track.A_cur_ref, true, result.error, result.ncc);
+    }
+    const VirtualCandidate &accepted_candidate = candidates[candidate_index];
+    if (runtime_support_dump_en && accepted_candidate.point != nullptr)
+    {
+      if (accepted_candidate.point->runtime_support_dump_id_ < 0)
+        accepted_candidate.point->runtime_support_dump_id_ = runtime_support_dump_next_point_id_++;
+      const int track_count = ++accepted_candidate.point->runtime_support_track_count_;
+      if (track_count > runtime_support_dump_best_track_count_)
+      {
+        runtime_support_dump_best_track_count_ = track_count;
+        runtime_support_dump_best_point_ = accepted_candidate.point;
+        const int submap_index = static_cast<int>(ctx.visual_submap->voxel_points.size());
+        dumpRuntimeSupportObservation(ctx, *accepted_candidate.point, *accepted_candidate.reference,
+                                      accepted_candidate.current_raw_center_px, result.track,
+                                      result.warped_reference, result.current_core,
+                                      track_count, submap_index, result.error, result.ncc);
+      }
     }
     ctx.visual_submap->voxel_points.push_back(candidates[candidate_index].point);
     ctx.visual_submap->reference_features.push_back(candidates[candidate_index].reference);
@@ -5545,7 +5709,7 @@ void VIOManager::precomputeReferencePatchesVirtual(int level)
         const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
         float value;
         V2D gradient;
-        // [MODIFY] 使用第一次生成的参�?patch，不再每帧重�?
+        // Reuse the stored reference support instead of regenerating it every frame.
         if (!sampleStoredVirtualValueAndGradient(pt->ref_patch->img_, center + offset.cast<double>(), scale, value, gradient)) continue;
         MD(1, 2) Jimg;
         Jimg << gradient[0] / scale, gradient[1] / scale;
@@ -6345,10 +6509,10 @@ void VIOManager::dumpDataForColmap()
   Eigen::Quaterniond q(ctx.new_frame->T_f_w_.rotationMatrix());
   Eigen::Vector3d t = ctx.new_frame->T_f_w_.translation();
   fout_colmap << cnt << " "
-            << std::fixed << std::setprecision(6)  // 保证浮点数精度为6�?
+            << std::fixed << std::setprecision(6)
             << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " "
             << t.x() << " " << t.y() << " " << t.z() << " "
-            << 1 << " "  // CAMERA_ID (假设相机ID�?)
+            << 1 << " "
             << cnt_str << ".png" << std::endl;
   fout_colmap << "0.0 0.0 -1" << std::endl;
   cnt++;

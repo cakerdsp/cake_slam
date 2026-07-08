@@ -211,3 +211,8 @@
       ref_patch_dump_random_seed: -1
       ref_patch_dump_max_candidate_skip: 50
       ref_patch_dump_ncc_threshold: 0.6
+      # Runtime support dump is independent from ref_patch_dump_en. It writes actual
+      # accepted virtual support images used by the optimization path under
+      # Log/result/patchs/<runtime_support_dump_folder>.
+      runtime_support_dump_en: false
+      runtime_support_dump_folder: "hilti22_runtime_support"
