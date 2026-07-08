@@ -72,6 +72,23 @@ cv::Mat makeFloatMatDisplay(const cv::Mat &values, const cv::Mat &valid_mask = c
   return display;
 }
 
+cv::Mat makeMarkedFloatMatDisplay(const cv::Mat &values, const cv::Mat &valid_mask, const V2D &center_px)
+{
+  const cv::Mat gray = makeFloatMatDisplay(values, valid_mask);
+  if (gray.empty()) return gray;
+
+  cv::Mat display;
+  cv::cvtColor(gray, display, cv::COLOR_GRAY2BGR);
+  if (center_px.array().isFinite().all())
+  {
+    const int x = static_cast<int>(std::lround(center_px[0]));
+    const int y = static_cast<int>(std::lround(center_px[1]));
+    if (x >= 0 && x < display.cols && y >= 0 && y < display.rows)
+      display.at<cv::Vec3b>(y, x) = cv::Vec3b(0, 0, 255);
+  }
+  return display;
+}
+
 cv::Mat makeFloatPatchDisplay(const std::vector<float> &values, int patch_size, int offset = 0)
 {
   if (patch_size <= 0 || offset < 0 || values.size() < static_cast<size_t>(offset + patch_size * patch_size))
@@ -2241,8 +2258,12 @@ void VIOManager::dumpRuntimeSupportObservation(const PerCameraData &ctx, const V
   const std::filesystem::path warped_ref_path = updates_dir / (base + "_warped_ref_l0.png");
   const std::filesystem::path current_core_path = updates_dir / (base + "_current_core_l0.png");
 
-  const cv::Mat ref_support_display = makeFloatMatDisplay(ref_ftr.img_);
-  const cv::Mat cur_support_display = makeFloatMatDisplay(track.cur_support.values, track.cur_support.valid_mask);
+  const V2D ref_support_center(virtual_support_radius, virtual_support_radius);
+  const V3D point_vcur = track.T_vcur_w_seed * point.pos_;
+  const V2D cur_support_center = virtualProject(point_vcur);
+  const cv::Mat ref_support_display = makeMarkedFloatMatDisplay(ref_ftr.img_, cv::Mat(), ref_support_center);
+  const cv::Mat cur_support_display =
+      makeMarkedFloatMatDisplay(track.cur_support.values, track.cur_support.valid_mask, cur_support_center);
   const cv::Mat warped_ref_display = makeFloatPatchDisplay(warped_reference, patch_size, 0);
   const cv::Mat current_core_display = makeFloatPatchDisplay(current_core, patch_size, 0);
 
