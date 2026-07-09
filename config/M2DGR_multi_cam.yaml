@@ -146,7 +146,7 @@
       patch_pyrimid_level: 2
 
 
-      virtual_fisheye_patch_en: false
+      virtual_fisheye_patch_en: true
       raw_camera_model_jacobian_en: true
       virtual_s2_optimize_en: false
       virtual_sparse_patch_en: false
@@ -251,4 +251,4 @@
       # raw or virtual support evidence used by the runtime optimization path under
       # Log/result/patchs/<runtime_support_dump_folder>.
       runtime_support_dump_en: true
-      runtime_support_dump_folder: "m2dgr_runtime_support"
+      runtime_support_dump_folder: "m2dgr_runtime_support4"

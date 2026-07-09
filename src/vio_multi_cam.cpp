@@ -38,6 +38,7 @@ constexpr double kRadiansToDegrees = 57.29577951308232;
 constexpr int kRefPatchDumpWarpDisplaySize = 128;
 constexpr double kS2Eps = 1.0e-12;
 constexpr double kInterpPi = 3.14159265358979323846;
+constexpr int kRuntimeRawSupportDumpSize = 45;
 
 std::string normalizeVirtualInterpMode(std::string mode)
 {
@@ -143,35 +144,32 @@ cv::Mat makeMarkedFloatMatDisplay(const cv::Mat &values, const cv::Mat &valid_ma
   return display;
 }
 
-cv::Mat makeMarkedGrayMatDisplay(const cv::Mat &image, const V2D &center_px)
-{
-  if (image.empty() || image.type() != CV_8UC1) return cv::Mat();
-  cv::Mat display;
-  cv::cvtColor(image, display, cv::COLOR_GRAY2BGR);
-  if (center_px.array().isFinite().all())
-  {
-    const int x = static_cast<int>(std::lround(center_px[0]));
-    const int y = static_cast<int>(std::lround(center_px[1]));
-    if (x >= 0 && x < display.cols && y >= 0 && y < display.rows)
-      display.at<cv::Vec3b>(y, x) = cv::Vec3b(0, 0, 255);
-  }
-  return display;
-}
 
-cv::Mat makeMarkedRawSupportDisplay(const cv::Mat &image, const V2D &center_px, int radius)
+cv::Mat makeMarkedRawSupportDisplay(const cv::Mat &image, const V2D &center_px, int support_size)
 {
-  if (image.empty() || image.type() != CV_8UC1 || radius <= 0 || !center_px.array().isFinite().all())
+  if (image.empty() || image.type() != CV_8UC1 || support_size <= 0 || !center_px.array().isFinite().all())
     return cv::Mat();
+
+  const int half_size = support_size / 2;
   const int cx = static_cast<int>(std::lround(center_px[0]));
   const int cy = static_cast<int>(std::lround(center_px[1]));
-  const int x0 = std::max(0, cx - radius);
-  const int y0 = std::max(0, cy - radius);
-  const int x1 = std::min(image.cols, cx + radius + 1);
-  const int y1 = std::min(image.rows, cy + radius + 1);
-  if (x0 >= x1 || y0 >= y1) return cv::Mat();
+  const int src_x0 = std::max(0, cx - half_size);
+  const int src_y0 = std::max(0, cy - half_size);
+  const int src_x1 = std::min(image.cols, cx - half_size + support_size);
+  const int src_y1 = std::min(image.rows, cy - half_size + support_size);
+  if (src_x0 >= src_x1 || src_y0 >= src_y1) return cv::Mat();
 
-  const cv::Rect roi(x0, y0, x1 - x0, y1 - y0);
-  return makeMarkedGrayMatDisplay(image(roi), V2D(center_px[0] - x0, center_px[1] - y0));
+  cv::Mat display(support_size, support_size, CV_8UC3, cv::Scalar(0, 0, 0));
+  const int dst_x0 = src_x0 - (cx - half_size);
+  const int dst_y0 = src_y0 - (cy - half_size);
+  cv::Mat roi_gray = image(cv::Rect(src_x0, src_y0, src_x1 - src_x0, src_y1 - src_y0));
+  cv::Mat roi_bgr;
+  cv::cvtColor(roi_gray, roi_bgr, cv::COLOR_GRAY2BGR);
+  roi_bgr.copyTo(display(cv::Rect(dst_x0, dst_y0, roi_bgr.cols, roi_bgr.rows)));
+
+  if (half_size >= 0 && half_size < display.cols && half_size < display.rows)
+    display.at<cv::Vec3b>(half_size, half_size) = cv::Vec3b(0, 0, 255);
+  return display;
 }
 
 cv::Mat makeFloatPatchDisplay(const std::vector<float> &values, int patch_size, int offset = 0)
@@ -2471,7 +2469,6 @@ void VIOManager::dumpRuntimeSupportObservation(const PerCameraData &ctx, const V
 
   const std::filesystem::path ref_support_path = updates_dir / (base + "_ref_support.png");
   const std::filesystem::path cur_support_path = updates_dir / (base + "_cur_support.png");
-  const std::filesystem::path cur_mask_path = updates_dir / (base + "_cur_support_mask.png");
   const std::filesystem::path warped_ref_path = updates_dir / (base + "_warped_ref_l0.png");
   const std::filesystem::path current_core_path = updates_dir / (base + "_current_core_l0.png");
 
@@ -2486,13 +2483,11 @@ void VIOManager::dumpRuntimeSupportObservation(const PerCameraData &ctx, const V
 
   const bool ref_saved = writeImageIfAvailable(ref_support_path, ref_support_display);
   const bool cur_saved = writeImageIfAvailable(cur_support_path, cur_support_display);
-  const bool mask_saved = writeImageIfAvailable(cur_mask_path, track.cur_support.valid_mask);
   const bool warped_saved = writeImageIfAvailable(warped_ref_path, warped_ref_display);
   const bool core_saved = writeImageIfAvailable(current_core_path, current_core_display);
 
   if (ref_saved) writeImageIfAvailable(root / "best_ref_support.png", ref_support_display);
   if (cur_saved) writeImageIfAvailable(root / "best_cur_support.png", cur_support_display);
-  if (mask_saved) writeImageIfAvailable(root / "best_cur_support_mask.png", track.cur_support.valid_mask);
   if (warped_saved) writeImageIfAvailable(root / "best_warped_ref_l0.png", warped_ref_display);
   if (core_saved) writeImageIfAvailable(root / "best_current_core_l0.png", current_core_display);
 
@@ -2506,7 +2501,7 @@ void VIOManager::dumpRuntimeSupportObservation(const PerCameraData &ctx, const V
         << current_raw_center_px[0] << ',' << current_raw_center_px[1] << ','
         << (ref_saved ? std::filesystem::relative(ref_support_path, root).generic_string() : "") << ','
         << (cur_saved ? std::filesystem::relative(cur_support_path, root).generic_string() : "") << ','
-        << (mask_saved ? std::filesystem::relative(cur_mask_path, root).generic_string() : "") << ','
+        << "" << ','
         << (warped_saved ? std::filesystem::relative(warped_ref_path, root).generic_string() : "") << ','
         << (core_saved ? std::filesystem::relative(current_core_path, root).generic_string() : "") << '\n';
 
@@ -2537,11 +2532,9 @@ void VIOManager::dumpRuntimeSupportRawObservation(const PerCameraData &ctx, cons
   const std::filesystem::path warped_ref_path = updates_dir / (base + "_warped_ref_l0.png");
   const std::filesystem::path current_core_path = updates_dir / (base + "_current_core_l0.png");
 
-  const int safe_search_level = (search_level >= 0 && search_level < 20) ? search_level : 0;
-  const int support_scale = 1 << safe_search_level;
-  const int support_radius = (patch_size_half + 1) * support_scale + 2;
-  const cv::Mat ref_support_display = makeMarkedRawSupportDisplay(ref_ftr.img_, ref_ftr.px_, support_radius);
-  const cv::Mat cur_support_display = makeMarkedRawSupportDisplay(ctx.new_frame->img_, current_raw_center_px, support_radius);
+  const cv::Mat ref_support_display = makeMarkedRawSupportDisplay(ref_ftr.img_, ref_ftr.px_, kRuntimeRawSupportDumpSize);
+  const cv::Mat cur_support_display = makeMarkedRawSupportDisplay(ctx.new_frame->img_, current_raw_center_px,
+                                                                   kRuntimeRawSupportDumpSize);
   const cv::Mat warped_ref_display = makeFloatPatchDisplay(warped_reference, patch_size, 0);
   const cv::Mat current_core_display = makeFloatPatchDisplay(current_core, patch_size, 0);
 
