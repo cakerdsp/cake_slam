@@ -14,6 +14,8 @@ which is included as part of this source code package.
 
 #include <Eigen/Eigenvalues>
 
+#include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -35,6 +37,58 @@ constexpr double kRefPatchDumpMinStdDev = 12.0;
 constexpr double kRadiansToDegrees = 57.29577951308232;
 constexpr int kRefPatchDumpWarpDisplaySize = 128;
 constexpr double kS2Eps = 1.0e-12;
+constexpr double kInterpPi = 3.14159265358979323846;
+
+std::string normalizeVirtualInterpMode(std::string mode)
+{
+  for (char &ch : mode) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  return mode;
+}
+
+int interpolationKernelRadius(VirtualInterpMode mode)
+{
+  switch (mode)
+  {
+  case VirtualInterpMode::BICUBIC: return 2;
+  case VirtualInterpMode::LANCZOS: return 4;
+  case VirtualInterpMode::BILINEAR:
+  default: return 1;
+  }
+}
+
+int interpolationBorderMargin(VirtualInterpMode mode)
+{
+  return interpolationKernelRadius(mode) + 1;
+}
+
+float clampInterpValue(double value)
+{
+  return static_cast<float>(std::clamp(value, 0.0, 255.0));
+}
+
+double cubicInterpWeight(double x)
+{
+  x = std::fabs(x);
+  constexpr double a = -0.5;
+  if (x <= 1.0) return (a + 2.0) * x * x * x - (a + 3.0) * x * x + 1.0;
+  if (x < 2.0) return a * x * x * x - 5.0 * a * x * x + 8.0 * a * x - 4.0 * a;
+  return 0.0;
+}
+
+double sinc(double x)
+{
+  if (std::fabs(x) < 1.0e-12) return 1.0;
+  const double pix = kInterpPi * x;
+  return std::sin(pix) / pix;
+}
+
+double lanczosInterpWeight(double x)
+{
+  x = std::fabs(x);
+  constexpr double a = 4.0;
+  if (x >= a) return 0.0;
+  return sinc(x) * sinc(x / a);
+}
 
 std::string sanitizeRuntimeSupportDumpFolder(const std::string &folder)
 {
@@ -529,8 +583,23 @@ void VIOManager::initializeVIO()
       throw std::runtime_error("virtual_patch_resampling_mode must be forward_splat or pull_exact");
     }
 
+    virtual_interp_mode = normalizeVirtualInterpMode(virtual_interp_mode);
+    if (virtual_interp_mode == "bilinear")
+      virtual_interp_mode_enum = VirtualInterpMode::BILINEAR;
+    else if (virtual_interp_mode == "bicubic")
+      virtual_interp_mode_enum = VirtualInterpMode::BICUBIC;
+    else if (virtual_interp_mode == "lanczos")
+      virtual_interp_mode_enum = VirtualInterpMode::LANCZOS;
+    else
+      throw std::runtime_error("virtual_interp_mode must be bilinear, bicubic, or lanczos");
+
+    if (virtual_patch_resampling_mode_enum == VirtualPatchResamplingMode::FORWARD_SPLAT &&
+        virtual_interp_mode_enum != VirtualInterpMode::BILINEAR)
+      printf("[ VIO Virtual Interp ] virtual_interp_mode=%s affects support reads; forward_splat deposition remains bilinear. Use pull_exact for raw pull interpolation.\n",
+             virtual_interp_mode.c_str());
+
     const int max_scale = 1 << ((patch_pyrimid_level - 1) + virtual_max_search_level);
-    virtual_support_radius = patch_size_half * max_scale + virtual_patch_margin + 2;
+    virtual_support_radius = patch_size_half * max_scale + virtual_patch_margin + interpolationBorderMargin(virtual_interp_mode_enum);
     virtual_support_size = 2 * virtual_support_radius + 1;
     virtual_support_ray_lut_.resize(virtual_support_size * virtual_support_size);
     for (int y = 0; y < virtual_support_size; ++y)
@@ -1055,8 +1124,7 @@ bool VIOManager::sampleRawImageValueAndGradient(const cv::Mat &raw_img, const V2
     if (!std::isfinite(u) || !std::isfinite(v) || u < 0.0 || v < 0.0 ||
         u >= raw_img.cols - 1 || v >= raw_img.rows - 1)
       return false;
-    sampled = static_cast<float>(vk::interpolateMat_8u(raw_img, u, v));
-    return std::isfinite(sampled);
+    return interpolateRawVirtualImage(raw_img, u, v, sampled);
   };
 
   if (raw_px[0] - scale < 0.0 || raw_px[1] - scale < 0.0 ||
@@ -1096,7 +1164,7 @@ bool VIOManager::linearizeVirtualS2Sample(const PerCameraData &ctx, const cv::Ma
 
   V2D raw_px;
   MD(2, 3) J_raw_sample;
-  const int required_border = scale + 1;
+  const int required_border = scale + interpolationBorderMargin(virtual_interp_mode_enum);
   if (!projectRawCameraWithJacobian(ctx, p_sample_c, required_border, raw_px, J_raw_sample)) return false;
 
   V2D raw_gradient;
@@ -1155,11 +1223,12 @@ bool VIOManager::buildVirtualSupportPatchPullExact(const PerCameraData &ctx, con
       const V3D ray_v = virtual_support_ray_lut_[y * virtual_support_size + x].cast<double>();
       const V3D ray_c = R_c_from_v * ray_v;
       V2D raw_px;
-      if (!projectRawFisheyeIfValid(ctx, ray_c, 1, raw_px)) continue;
+      if (!projectRawFisheyeIfValid(ctx, ray_c, interpolationBorderMargin(virtual_interp_mode_enum), raw_px)) continue;
       const double local_u = raw_px[0] - raw_origin.x;
       const double local_v = raw_px[1] - raw_origin.y;
-      if (local_u < 0.0 || local_v < 0.0 || local_u >= raw_img.cols - 1 || local_v >= raw_img.rows - 1) continue;
-      values[x] = static_cast<float>(vk::interpolateMat_8u(raw_img, local_u, local_v));
+      float sampled = 0.0f;
+      if (!interpolateRawVirtualImage(raw_img, local_u, local_v, sampled)) continue;
+      values[x] = sampled;
       mask[x] = 255;
     }
   }
@@ -1425,10 +1494,11 @@ bool VIOManager::captureVirtualReferenceSource(const PerCameraData &ctx, const c
     }
   }
 
-  const int x0 = std::max(0, static_cast<int>(std::floor(min_u)) - 2);
-  const int y0 = std::max(0, static_cast<int>(std::floor(min_v)) - 2);
-  const int x1 = std::min(raw_img.cols, static_cast<int>(std::ceil(max_u)) + 3);
-  const int y1 = std::min(raw_img.rows, static_cast<int>(std::ceil(max_v)) + 3);
+  const int interp_margin = interpolationBorderMargin(virtual_interp_mode_enum);
+  const int x0 = std::max(0, static_cast<int>(std::floor(min_u)) - interp_margin);
+  const int y0 = std::max(0, static_cast<int>(std::floor(min_v)) - interp_margin);
+  const int x1 = std::min(raw_img.cols, static_cast<int>(std::ceil(max_u)) + interp_margin + 1);
+  const int y1 = std::min(raw_img.rows, static_cast<int>(std::ceil(max_v)) + interp_margin + 1);
   if (x0 >= x1 || y0 >= y1) return false;
 
   raw_origin = cv::Point(x0, y0);
@@ -1469,44 +1539,121 @@ bool VIOManager::materializeVirtualReferenceSupport(Feature &feature, bool &mate
   return true;
 }
 
-bool VIOManager::interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value) const
+bool VIOManager::interpolateRawVirtualImage(const cv::Mat &img, double u, double v, float &value) const
 {
-  if (!std::isfinite(u) || !std::isfinite(v) || img.empty() || valid_mask.empty()) return false;
+  value = 0.0f;
+  if (!std::isfinite(u) || !std::isfinite(v) || img.empty() || img.type() != CV_8UC1) return false;
+
   const int x = static_cast<int>(std::floor(u));
   const int y = static_cast<int>(std::floor(v));
-  if (x < 0 || y < 0 || x + 1 >= img.cols || y + 1 >= img.rows) return false;
-  if (valid_mask.at<uint8_t>(y, x) == 0 || valid_mask.at<uint8_t>(y, x + 1) == 0 ||
-      valid_mask.at<uint8_t>(y + 1, x) == 0 || valid_mask.at<uint8_t>(y + 1, x + 1) == 0)
+  if (virtual_interp_mode_enum == VirtualInterpMode::BILINEAR)
+  {
+    if (x < 0 || y < 0 || x + 1 >= img.cols || y + 1 >= img.rows) return false;
+    value = static_cast<float>(vk::interpolateMat_8u(img, u, v));
+    return std::isfinite(value);
+  }
+
+  const int radius = interpolationKernelRadius(virtual_interp_mode_enum);
+  const int start_x = x - (radius - 1);
+  const int end_x = x + radius;
+  const int start_y = y - (radius - 1);
+  const int end_y = y + radius;
+  if (start_x < 0 || start_y < 0 || end_x >= img.cols || end_y >= img.rows) return false;
+
+  const bool use_bicubic = virtual_interp_mode_enum == VirtualInterpMode::BICUBIC;
+  double weighted_sum = 0.0;
+  double weight_sum = 0.0;
+  for (int yy = start_y; yy <= end_y; ++yy)
+  {
+    const double wy = use_bicubic ? cubicInterpWeight(v - yy) : lanczosInterpWeight(v - yy);
+    const uint8_t *row = img.ptr<uint8_t>(yy);
+    for (int xx = start_x; xx <= end_x; ++xx)
+    {
+      const double wx = use_bicubic ? cubicInterpWeight(u - xx) : lanczosInterpWeight(u - xx);
+      const double w = wx * wy;
+      weighted_sum += w * static_cast<double>(row[xx]);
+      weight_sum += w;
+    }
+  }
+
+  if (std::fabs(weight_sum) < 1.0e-12) return false;
+  const double sampled = weighted_sum / weight_sum;
+  if (!std::isfinite(sampled)) return false;
+  value = clampInterpValue(sampled);
+  return true;
+}
+
+bool VIOManager::interpolateFloatVirtualImage(const cv::Mat &img, const cv::Mat *valid_mask, double u, double v, float &value) const
+{
+  value = 0.0f;
+  if (!std::isfinite(u) || !std::isfinite(v) || img.empty() || img.type() != CV_32FC1) return false;
+  if (valid_mask != nullptr && (valid_mask->empty() || valid_mask->type() != CV_8UC1 ||
+                                valid_mask->rows != img.rows || valid_mask->cols != img.cols))
     return false;
 
-  const float dx = u - x;
-  const float dy = v - y;
-  const float top = (1.0f - dx) * img.at<float>(y, x) + dx * img.at<float>(y, x + 1);
-  const float bottom = (1.0f - dx) * img.at<float>(y + 1, x) + dx * img.at<float>(y + 1, x + 1);
-  value = (1.0f - dy) * top + dy * bottom;
-  return std::isfinite(value);
+  auto read_sample = [&](int yy, int xx, double &sample) -> bool {
+    if (valid_mask != nullptr && valid_mask->ptr<uint8_t>(yy)[xx] == 0) return false;
+    const float value_at_pixel = img.ptr<float>(yy)[xx];
+    if (!std::isfinite(value_at_pixel)) return false;
+    sample = static_cast<double>(value_at_pixel);
+    return true;
+  };
+
+  const int x = static_cast<int>(std::floor(u));
+  const int y = static_cast<int>(std::floor(v));
+  if (virtual_interp_mode_enum == VirtualInterpMode::BILINEAR)
+  {
+    if (x < 0 || y < 0 || x + 1 >= img.cols || y + 1 >= img.rows) return false;
+    double tl = 0.0, tr = 0.0, bl = 0.0, br = 0.0;
+    if (!read_sample(y, x, tl) || !read_sample(y, x + 1, tr) ||
+        !read_sample(y + 1, x, bl) || !read_sample(y + 1, x + 1, br))
+      return false;
+    const double dx = u - x;
+    const double dy = v - y;
+    value = clampInterpValue((1.0 - dy) * ((1.0 - dx) * tl + dx * tr) +
+                             dy * ((1.0 - dx) * bl + dx * br));
+    return true;
+  }
+
+  const int radius = interpolationKernelRadius(virtual_interp_mode_enum);
+  const int start_x = x - (radius - 1);
+  const int end_x = x + radius;
+  const int start_y = y - (radius - 1);
+  const int end_y = y + radius;
+  if (start_x < 0 || start_y < 0 || end_x >= img.cols || end_y >= img.rows) return false;
+
+  const bool use_bicubic = virtual_interp_mode_enum == VirtualInterpMode::BICUBIC;
+  double weighted_sum = 0.0;
+  double weight_sum = 0.0;
+  for (int yy = start_y; yy <= end_y; ++yy)
+  {
+    const double wy = use_bicubic ? cubicInterpWeight(v - yy) : lanczosInterpWeight(v - yy);
+    for (int xx = start_x; xx <= end_x; ++xx)
+    {
+      double sample = 0.0;
+      if (!read_sample(yy, xx, sample)) return false;
+      const double wx = use_bicubic ? cubicInterpWeight(u - xx) : lanczosInterpWeight(u - xx);
+      const double w = wx * wy;
+      weighted_sum += w * sample;
+      weight_sum += w;
+    }
+  }
+
+  if (std::fabs(weight_sum) < 1.0e-12) return false;
+  const double sampled = weighted_sum / weight_sum;
+  if (!std::isfinite(sampled)) return false;
+  value = clampInterpValue(sampled);
+  return true;
+}
+
+bool VIOManager::interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value) const
+{
+  return interpolateFloatVirtualImage(img, &valid_mask, u, v, value);
 }
 
 bool VIOManager::interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value) const
 {
-  if (!std::isfinite(u) || !std::isfinite(v) || img.empty() || img.type() != CV_32FC1) return false;
-
-  const int x = static_cast<int>(std::floor(u));
-  const int y = static_cast<int>(std::floor(v));
-  if (x < 0 || y < 0 || x + 1 >= img.cols || y + 1 >= img.rows) return false;
-
-  const float tl = img.at<float>(y, x);
-  const float tr = img.at<float>(y, x + 1);
-  const float bl = img.at<float>(y + 1, x);
-  const float br = img.at<float>(y + 1, x + 1);
-  if (!std::isfinite(tl) || !std::isfinite(tr) || !std::isfinite(bl) || !std::isfinite(br)) return false;
-
-  const float dx = u - x;
-  const float dy = v - y;
-  const float top = (1.0f - dx) * tl + dx * tr;
-  const float bottom = (1.0f - dx) * bl + dx * br;
-  value = (1.0f - dy) * top + dy * bottom;
-  return std::isfinite(value);
+  return interpolateFloatVirtualImage(img, nullptr, u, v, value);
 }
 
 V2D VIOManager::virtualProject(const V3D &p_v) const
@@ -1554,9 +1701,8 @@ bool VIOManager::sampleSparseVirtualValue(const PerCameraData &ctx, const cv::Ma
   if (raw_img.empty() || raw_img.type() != CV_8UC1 || !px.array().isFinite().all()) return false;
   const V3D ray_c = R_c_from_v * virtualCam2World(px);
   V2D raw_px;
-  if (!projectRawFisheyeIfValid(ctx, ray_c, 1, raw_px)) return false;
-  value = static_cast<float>(vk::interpolateMat_8u(raw_img, raw_px[0], raw_px[1]));
-  return std::isfinite(value);
+  if (!projectRawFisheyeIfValid(ctx, ray_c, interpolationBorderMargin(virtual_interp_mode_enum), raw_px)) return false;
+  return interpolateRawVirtualImage(raw_img, raw_px[0], raw_px[1], value);
 }
 
 bool VIOManager::sampleSparseVirtualCorePatch(const PerCameraData &ctx, const cv::Mat &raw_img,

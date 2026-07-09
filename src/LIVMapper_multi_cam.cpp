@@ -194,6 +194,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<int>("vio.virtual_patch_margin", 4);
   try_declare.template operator()<int>("vio.virtual_max_search_level", 1);
   try_declare.template operator()<std::string>("vio.virtual_patch_resampling_mode", "forward_splat");
+  try_declare.template operator()<std::string>("vio.virtual_interp_mode", "bilinear");
   try_declare.template operator()<int>("vio.virtual_raw_window_half_size", 48);
   try_declare.template operator()<double>("vio.virtual_splat_min_weight", 1.0e-6);
   try_declare.template operator()<bool>("vio.virtual_splat_require_full_core_coverage", true);
@@ -362,6 +363,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.virtual_patch_margin", virtual_patch_margin);
   this->node->get_parameter("vio.virtual_max_search_level", virtual_max_search_level);
   this->node->get_parameter("vio.virtual_patch_resampling_mode", virtual_patch_resampling_mode);
+  this->node->get_parameter("vio.virtual_interp_mode", virtual_interp_mode);
   this->node->get_parameter("vio.virtual_raw_window_half_size", virtual_raw_window_half_size);
   this->node->get_parameter("vio.virtual_splat_min_weight", virtual_splat_min_weight);
   this->node->get_parameter("vio.virtual_splat_require_full_core_coverage", virtual_splat_require_full_core_coverage);
@@ -564,6 +566,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->virtual_patch_margin = virtual_patch_margin;
   vio_manager->virtual_max_search_level = virtual_max_search_level;
   vio_manager->virtual_patch_resampling_mode = virtual_patch_resampling_mode;
+  vio_manager->virtual_interp_mode = virtual_interp_mode;
   vio_manager->virtual_raw_window_half_size = virtual_raw_window_half_size;
   vio_manager->virtual_splat_min_weight = virtual_splat_min_weight;
   vio_manager->virtual_splat_require_full_core_coverage = virtual_splat_require_full_core_coverage;

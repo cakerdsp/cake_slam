@@ -70,6 +70,13 @@ enum class VirtualPatchResamplingMode
   PULL_EXACT
 };
 
+enum class VirtualInterpMode
+{
+  BILINEAR = 0,
+  BICUBIC,
+  LANCZOS
+};
+
 struct SubSparseMap
 {
   vector<float> propa_errors;
@@ -316,6 +323,8 @@ public:
   double virtual_min_z = 1.0e-6;
   std::string virtual_patch_resampling_mode = "forward_splat";
   VirtualPatchResamplingMode virtual_patch_resampling_mode_enum = VirtualPatchResamplingMode::FORWARD_SPLAT;
+  std::string virtual_interp_mode = "bilinear";
+  VirtualInterpMode virtual_interp_mode_enum = VirtualInterpMode::BILINEAR;
   int virtual_raw_window_half_size = 48;
   double virtual_splat_min_weight = 1.0e-6;
   bool virtual_splat_require_full_core_coverage = true;
@@ -608,6 +617,8 @@ public:
   bool captureVirtualReferenceSource(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px,
                                      const M3D &R_c_from_v, cv::Mat &raw_roi, cv::Point &raw_origin) const;
   bool materializeVirtualReferenceSupport(Feature &feature, bool &materialized_now);
+  bool interpolateRawVirtualImage(const cv::Mat &img, double u, double v, float &value) const;
+  bool interpolateFloatVirtualImage(const cv::Mat &img, const cv::Mat *valid_mask, double u, double v, float &value) const;
   bool interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value) const;
   bool interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value) const;
   V2D virtualProject(const V3D &p_v) const;

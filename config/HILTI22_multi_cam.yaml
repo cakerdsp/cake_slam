@@ -118,6 +118,7 @@
       virtual_patch_margin: 8
       virtual_max_search_level: 1
       virtual_patch_resampling_mode: "pull_exact"
+      virtual_interp_mode: "bilinear"
       virtual_raw_window_half_size: 96
       virtual_splat_min_weight: 1.0e-6
       virtual_splat_require_full_core_coverage: true

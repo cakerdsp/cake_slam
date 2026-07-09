@@ -198,6 +198,7 @@ public:
   int virtual_patch_margin = 4;
   int virtual_max_search_level = 1;
   std::string virtual_patch_resampling_mode = "forward_splat";
+  std::string virtual_interp_mode = "bilinear";
   int virtual_raw_window_half_size = 48;
   double virtual_splat_min_weight = 1.0e-6;
   bool virtual_splat_require_full_core_coverage = true;
