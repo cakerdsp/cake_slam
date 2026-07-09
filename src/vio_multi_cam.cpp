@@ -3893,8 +3893,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
 
     for (int j = 0; j < 3; j++)
     {
-      loc_xyz[j] = floor(pt_w[j] / voxel_size);
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
+      loc_xyz[j] = static_cast<int>(std::floor(pt_w[j] / voxel_size));
     }
     VOXEL_LOCATION position(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
 
@@ -3910,22 +3909,15 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
 
     V3D pt_c(ctx.new_frame->w2f(pt_w));
 
-    if (pt_c[2] > 0)
+    V2D px = ctx.cam->world2cam(pt_c);
+    if (px.array().isFinite().all() && ctx.cam->isInFrame(px.cast<int>(), border))
     {
-      V2D px;
-      // px[0] = fx * pt_c[0]/pt_c[2] + cx;
-      // px[1] = fy * pt_c[1]/pt_c[2]+ cy;
-      px = ctx.cam->world2cam(pt_c);
-
-      if (ctx.cam->isInFrame(px.cast<int>(), border))
-      {
-        // cv::circle(img_cp, cv::Point2f(px[0], px[1]), 3, cv::Scalar(0, 0, 255), -1, 8);
-        float depth = pt_c[2];
-        int col = int(px[0]);
-        int row = int(px[1]);
-        it[ctx.width * row + col] = depth;
-        ++debug_depth_samples;
-      }
+      // cv::circle(img_cp, cv::Point2f(px[0], px[1]), 3, cv::Scalar(0, 0, 255), -1, 8);
+      float range = static_cast<float>(pt_c.norm());
+      int col = int(px[0]);
+      int row = int(px[1]);
+      it[ctx.width * row + col] = range;
+      ++debug_depth_samples;
     }
     // t_depth += omp_get_wtime()-t2;
   }
@@ -3964,9 +3956,8 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
         if (pt == nullptr) continue;
         if (pt->obs_.size() == 0) continue;
 
-        V3D norm_vec(ctx.new_frame->T_f_w_.rotationMatrix() * pt->normal_);
-        V3D dir(ctx.new_frame->T_f_w_ * pt->pos_);
-        if (dir[2] < 0) continue;
+        // V3D norm_vec(ctx.new_frame->T_f_w_.rotationMatrix() * pt->normal_);
+        // V3D dir(ctx.new_frame->T_f_w_ * pt->pos_);
         // dir.normalize();
         // if (dir.dot(norm_vec) <= 0.17) continue; // 0.34 70 degree  0.17 80 degree 0.08 85 degree
 
@@ -4014,8 +4005,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
 
         for (int j = 0; j < 3; j++)
         {
-          loc_xyz[j] = floor(sample_point_w[j] / voxel_size);
-          if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
+          loc_xyz[j] = static_cast<int>(std::floor(sample_point_w[j] / voxel_size));
         }
 
         VOXEL_LOCATION sample_pos(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
@@ -4042,10 +4032,9 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
             // sub_map_ray.push_back(pt); // cloud_visual_sub_map
             // add_sample = true;
 
-            V3D norm_vec(ctx.new_frame->T_f_w_.rotationMatrix() * pt->normal_);
-            V3D dir(ctx.new_frame->T_f_w_ * pt->pos_);
-            if (dir[2] < 0) continue;
-            dir.normalize();
+            // V3D norm_vec(ctx.new_frame->T_f_w_.rotationMatrix() * pt->normal_);
+            // V3D dir(ctx.new_frame->T_f_w_ * pt->pos_);
+            // dir.normalize();
             // if (dir.dot(norm_vec) <= 0.17) continue; // 0.34 70 degree 0.17 80 degree 0.08 85 degree
 
             V2D pc(ctx.new_frame->w2c(pt->pos_));
@@ -4146,7 +4135,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
 
           if (depth == 0.) continue;
 
-          double delta_dist = abs(pt_cam[2] - depth);
+          double delta_dist = abs(pt_cam.norm() - depth);
 
           if (delta_dist > 0.5)
           {
