@@ -143,6 +143,37 @@ cv::Mat makeMarkedFloatMatDisplay(const cv::Mat &values, const cv::Mat &valid_ma
   return display;
 }
 
+cv::Mat makeMarkedGrayMatDisplay(const cv::Mat &image, const V2D &center_px)
+{
+  if (image.empty() || image.type() != CV_8UC1) return cv::Mat();
+  cv::Mat display;
+  cv::cvtColor(image, display, cv::COLOR_GRAY2BGR);
+  if (center_px.array().isFinite().all())
+  {
+    const int x = static_cast<int>(std::lround(center_px[0]));
+    const int y = static_cast<int>(std::lround(center_px[1]));
+    if (x >= 0 && x < display.cols && y >= 0 && y < display.rows)
+      display.at<cv::Vec3b>(y, x) = cv::Vec3b(0, 0, 255);
+  }
+  return display;
+}
+
+cv::Mat makeMarkedRawSupportDisplay(const cv::Mat &image, const V2D &center_px, int radius)
+{
+  if (image.empty() || image.type() != CV_8UC1 || radius <= 0 || !center_px.array().isFinite().all())
+    return cv::Mat();
+  const int cx = static_cast<int>(std::lround(center_px[0]));
+  const int cy = static_cast<int>(std::lround(center_px[1]));
+  const int x0 = std::max(0, cx - radius);
+  const int y0 = std::max(0, cy - radius);
+  const int x1 = std::min(image.cols, cx + radius + 1);
+  const int y1 = std::min(image.rows, cy + radius + 1);
+  if (x0 >= x1 || y0 >= y1) return cv::Mat();
+
+  const cv::Rect roi(x0, y0, x1 - x0, y1 - y0);
+  return makeMarkedGrayMatDisplay(image(roi), V2D(center_px[0] - x0, center_px[1] - y0));
+}
+
 cv::Mat makeFloatPatchDisplay(const std::vector<float> &values, int patch_size, int offset = 0)
 {
   if (patch_size <= 0 || offset < 0 || values.size() < static_cast<size_t>(offset + patch_size * patch_size))
@@ -556,7 +587,7 @@ void VIOManager::initializeVIO()
   runtime_support_dump_best_point_ = nullptr;
   runtime_support_dump_effective_folder_.clear();
   if (runtime_support_dump_en && !virtual_fisheye_patch_en)
-    printf("[ VIO Runtime Support Dump ] Ignored because virtual_fisheye_patch_en is false.\n");
+    printf("[ VIO Runtime Support Dump ] Enabled for raw patch path.\n");
 
   if (raw_camera_model_jacobian_en && virtual_fisheye_patch_en)
   {
@@ -862,6 +893,46 @@ void VIOManager::getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D
   }
 }
 
+bool VIOManager::sampleRawCorePatchForDump(const PerCameraData &ctx, const cv::Mat &img, const V2D &pc,
+                                           int scale, std::vector<float> &patch) const
+{
+  patch.clear();
+  if (scale <= 0 || patch_size <= 0 || patch_size_total <= 0 || img.empty() || img.type() != CV_8UC1 ||
+      !pc.array().isFinite().all())
+    return false;
+
+  const int required_border = (patch_size_half + 1) * scale + 1;
+  if (ctx.cam != nullptr && !ctx.cam->isInFrame(pc.cast<int>(), required_border)) return false;
+
+  const int u_i = static_cast<int>(std::floor(pc[0] / scale)) * scale;
+  const int v_i = static_cast<int>(std::floor(pc[1] / scale)) * scale;
+  const double subpix_u = (pc[0] - u_i) / scale;
+  const double subpix_v = (pc[1] - v_i) / scale;
+  const double w_tl = (1.0 - subpix_u) * (1.0 - subpix_v);
+  const double w_tr = subpix_u * (1.0 - subpix_v);
+  const double w_bl = (1.0 - subpix_u) * subpix_v;
+  const double w_br = subpix_u * subpix_v;
+
+  patch.assign(patch_size_total, 0.0f);
+  for (int row_index = 0; row_index < patch_size; ++row_index)
+  {
+    const int row = v_i - patch_size_half * scale + row_index * scale;
+    const int row_next = row + scale;
+    if (row < 0 || row_next < 0 || row >= img.rows || row_next >= img.rows) return false;
+    const uint8_t *row0 = img.ptr<uint8_t>(row);
+    const uint8_t *row1 = img.ptr<uint8_t>(row_next);
+    for (int col_index = 0; col_index < patch_size; ++col_index)
+    {
+      const int col = u_i - patch_size_half * scale + col_index * scale;
+      const int col_next = col + scale;
+      if (col < 0 || col_next < 0 || col >= img.cols || col_next >= img.cols) return false;
+      const double value = w_tl * row0[col] + w_tr * row0[col_next] +
+                           w_bl * row1[col] + w_br * row1[col_next];
+      patch[row_index * patch_size + col_index] = static_cast<float>(value);
+    }
+  }
+  return true;
+}
 SE3<double> VIOManager::composeVirtualPose(const M3D &R_v_from_c, const SE3<double> &T_c_w) const
 {
   // {}^V T_W = {}^V T_C * {}^C T_W. The virtual and raw cameras share the optical center.
@@ -2376,7 +2447,7 @@ void VIOManager::initializeRuntimeSupportDump()
 
   std::ofstream selection(root / "selection.txt");
   selection << "This folder is written by debug.runtime_support_dump_en.\n"
-            << "It stores actual virtual support images from accepted runtime optimization tracks, not the ref_patch_dump probe path.\n"
+            << "It stores accepted runtime support evidence from the raw or virtual optimization path, not the ref_patch_dump probe path.\n"
             << "folder=" << runtime_support_dump_effective_folder_ << "\n";
   runtime_support_dump_initialized_ = true;
 }
@@ -2440,6 +2511,65 @@ void VIOManager::dumpRuntimeSupportObservation(const PerCameraData &ctx, const V
         << (core_saved ? std::filesystem::relative(current_core_path, root).generic_string() : "") << '\n';
 
   printf("[ VIO Runtime Support Dump ] best point=%d tracks=%d frame=%d ref_saved=%d cur_saved=%d core_saved=%d folder=%s\n",
+         point.runtime_support_dump_id_, track_count, ctx.new_frame->id_, ref_saved ? 1 : 0,
+         cur_saved ? 1 : 0, core_saved ? 1 : 0, runtime_support_dump_effective_folder_.c_str());
+}
+
+void VIOManager::dumpRuntimeSupportRawObservation(const PerCameraData &ctx, const VisualPoint &point, const Feature &ref_ftr,
+                                                   const V2D &current_raw_center_px, int search_level,
+                                                   const std::vector<float> &warped_reference,
+                                                   const std::vector<float> &current_core, int track_count,
+                                                   int submap_index, double error, double ncc)
+{
+  if (!runtime_support_dump_en || ctx.new_frame == nullptr) return;
+  initializeRuntimeSupportDump();
+
+  const std::filesystem::path root = std::filesystem::path(ROOT_DIR) / "Log" / "result" / "patchs" / runtime_support_dump_effective_folder_;
+  const std::filesystem::path updates_dir = root / "updates";
+  std::ostringstream base_name;
+  base_name << "frame_" << std::setw(6) << std::setfill('0') << ctx.new_frame->id_
+            << "_point_" << std::setw(4) << std::setfill('0') << point.runtime_support_dump_id_
+            << "_count_" << std::setw(4) << std::setfill('0') << track_count;
+  const std::string base = base_name.str();
+
+  const std::filesystem::path ref_support_path = updates_dir / (base + "_ref_support.png");
+  const std::filesystem::path cur_support_path = updates_dir / (base + "_cur_support.png");
+  const std::filesystem::path warped_ref_path = updates_dir / (base + "_warped_ref_l0.png");
+  const std::filesystem::path current_core_path = updates_dir / (base + "_current_core_l0.png");
+
+  const int safe_search_level = (search_level >= 0 && search_level < 20) ? search_level : 0;
+  const int support_scale = 1 << safe_search_level;
+  const int support_radius = (patch_size_half + 1) * support_scale + 2;
+  const cv::Mat ref_support_display = makeMarkedRawSupportDisplay(ref_ftr.img_, ref_ftr.px_, support_radius);
+  const cv::Mat cur_support_display = makeMarkedRawSupportDisplay(ctx.new_frame->img_, current_raw_center_px, support_radius);
+  const cv::Mat warped_ref_display = makeFloatPatchDisplay(warped_reference, patch_size, 0);
+  const cv::Mat current_core_display = makeFloatPatchDisplay(current_core, patch_size, 0);
+
+  const bool ref_saved = writeImageIfAvailable(ref_support_path, ref_support_display);
+  const bool cur_saved = writeImageIfAvailable(cur_support_path, cur_support_display);
+  const bool warped_saved = writeImageIfAvailable(warped_ref_path, warped_ref_display);
+  const bool core_saved = writeImageIfAvailable(current_core_path, current_core_display);
+
+  if (ref_saved) writeImageIfAvailable(root / "best_ref_support.png", ref_support_display);
+  if (cur_saved) writeImageIfAvailable(root / "best_cur_support.png", cur_support_display);
+  if (warped_saved) writeImageIfAvailable(root / "best_warped_ref_l0.png", warped_ref_display);
+  if (core_saved) writeImageIfAvailable(root / "best_current_core_l0.png", current_core_display);
+
+  std::ofstream index(root / "index.csv", std::ios::app);
+  index << "best_update_raw," << ctx.new_frame->id_ << ','
+        << std::fixed << std::setprecision(9) << ctx.new_frame->timestamp_ << ','
+        << ctx.camera_id << ',' << point.runtime_support_dump_id_ << ',' << track_count << ','
+        << submap_index << ',' << ref_ftr.id_ << ',' << ref_ftr.camera_id_ << ','
+        << std::setprecision(9) << ref_ftr.timestamp_ << ',' << search_level << ','
+        << std::setprecision(6) << error << ',' << ncc << ','
+        << current_raw_center_px[0] << ',' << current_raw_center_px[1] << ','
+        << (ref_saved ? std::filesystem::relative(ref_support_path, root).generic_string() : "") << ','
+        << (cur_saved ? std::filesystem::relative(cur_support_path, root).generic_string() : "") << ','
+        << ','
+        << (warped_saved ? std::filesystem::relative(warped_ref_path, root).generic_string() : "") << ','
+        << (core_saved ? std::filesystem::relative(current_core_path, root).generic_string() : "") << '\n';
+
+  printf("[ VIO Runtime Support Dump ] raw best point=%d tracks=%d frame=%d ref_saved=%d cur_saved=%d core_saved=%d folder=%s\n",
          point.runtime_support_dump_id_, track_count, ctx.new_frame->id_, ref_saved ? 1 : 0,
          cur_saved ? 1 : 0, core_saved ? 1 : 0, runtime_support_dump_effective_folder_.c_str());
 }
@@ -4464,6 +4594,26 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       }
       if (error > outlier_threshold * patch_size_total) continue;
 
+      if (runtime_support_dump_en && pt != nullptr)
+      {
+        if (pt->runtime_support_dump_id_ < 0)
+          pt->runtime_support_dump_id_ = runtime_support_dump_next_point_id_++;
+        const int track_count = ++pt->runtime_support_track_count_;
+        if (track_count > runtime_support_dump_best_track_count_)
+        {
+          runtime_support_dump_best_track_count_ = track_count;
+          runtime_support_dump_best_point_ = pt;
+          const int submap_index = static_cast<int>(ctx.visual_submap->voxel_points.size());
+          std::vector<float> dump_current_core;
+          const int safe_search_level = (search_level >= 0 && search_level < 20) ? search_level : 0;
+          const int dump_scale = 1 << safe_search_level;
+          if (!sampleRawCorePatchForDump(ctx, img, pc, dump_scale, dump_current_core))
+            dump_current_core.assign(patch_buffer.begin(), patch_buffer.begin() + patch_size_total);
+          dumpRuntimeSupportRawObservation(ctx, *pt, *ref_ftr, pc, search_level, patch_wrap,
+                                           dump_current_core, track_count, submap_index,
+                                           error, usage_ncc);
+        }
+      }
       if (usage_stats_en) recordUsageObservation(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero, true, error, usage_ncc);
       ctx.visual_submap->voxel_points.push_back(pt);
       ctx.visual_submap->reference_features.push_back(ref_ftr);

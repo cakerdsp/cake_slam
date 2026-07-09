@@ -3,7 +3,7 @@
     common:
       # The first N camera entries below are enabled. Valid range: 1..7.
       # camera6 is excluded by default because its official extrinsic is marked "to be changed".
-      num_cameras: 3
+      num_cameras: 1
       require_all_cameras: true
       multi_cam_sync_queue_size: 5
       multi_cam_sync_tolerance_ms: 40.0
@@ -121,7 +121,7 @@
 
     preprocess:
       image_downclock_en: false
-      point_filter_num: 25
+      point_filter_num: 70
       filter_size_surf: 0.1
       lidar_type: 2
       scan_line: 32
@@ -141,18 +141,18 @@
       img_point_cov: 1000
       grid_size: 5
       # Suggested grid_n_height: 17/12/10/8/7 for 1/2/3/4/6 cameras.
-      grid_n_height: 10
-      patch_size: 16
-      patch_pyrimid_level: 1
+      grid_n_height: 20
+      patch_size: 8
+      patch_pyrimid_level: 2
 
 
       virtual_fisheye_patch_en: false
       raw_camera_model_jacobian_en: true
       virtual_s2_optimize_en: false
       virtual_sparse_patch_en: false
-      virtual_focal_length: 300.0
-      virtual_patch_margin: 8
-      virtual_max_search_level: 1
+      virtual_focal_length: 500.0
+      virtual_patch_margin: 4
+      virtual_max_search_level: 0
       virtual_patch_resampling_mode: "pull_exact"
       virtual_interp_mode: "bilinear"  # bilinear | bicubic | lanczos
       virtual_raw_window_half_size: 96
@@ -247,8 +247,8 @@
       ref_patch_dump_max_candidate_skip: 50
       # Stop a probe when its virtual patch NCC against the first observation falls below this value.
       ref_patch_dump_ncc_threshold: 0.6
-      # Runtime support dump is independent from ref_patch_dump_en. It writes actual
-      # accepted virtual support images used by the optimization path under
+      # Runtime support dump is independent from ref_patch_dump_en. It writes accepted
+      # raw or virtual support evidence used by the runtime optimization path under
       # Log/result/patchs/<runtime_support_dump_folder>.
-      runtime_support_dump_en: false
+      runtime_support_dump_en: true
       runtime_support_dump_folder: "m2dgr_runtime_support"

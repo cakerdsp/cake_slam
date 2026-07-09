@@ -648,6 +648,13 @@ public:
                                      const V2D &current_raw_center_px, const VirtualTrackPatch &track,
                                      const std::vector<float> &warped_reference, const std::vector<float> &current_core,
                                      int track_count, int submap_index, double error, double ncc);
+  void dumpRuntimeSupportRawObservation(const PerCameraData &ctx, const VisualPoint &point, const Feature &ref_ftr,
+                                        const V2D &current_raw_center_px, int search_level,
+                                        const std::vector<float> &warped_reference,
+                                        const std::vector<float> &current_core, int track_count,
+                                        int submap_index, double error, double ncc);
+  bool sampleRawCorePatchForDump(const PerCameraData &ctx, const cv::Mat &img, const V2D &pc,
+                                 int scale, std::vector<float> &patch) const;
   bool getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
                                   int halfpatch_size, Matrix2d &A_cur_ref) const;
   bool getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_vcur_vref,
