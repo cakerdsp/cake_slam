@@ -203,6 +203,17 @@ public:
   double virtual_splat_min_weight = 1.0e-6;
   bool virtual_splat_require_full_core_coverage = true;
   bool virtual_splat_debug_compare_pull_exact = false;
+  bool visual_geom_filter_en = false;
+  bool visual_geom_filter_log_en = false;
+  bool visual_geom_filter_require_point_cov = true;
+  double visual_geom_filter_voxel_size = 0.5;
+  int visual_geom_filter_min_plane_points = 5;
+  double visual_geom_filter_radius_multiplier = 3.0;
+  double visual_geom_filter_min_normal_cos = 0.8660254037844386;
+  double visual_geom_filter_max_chi2 = 9.0;
+  double visual_geom_filter_min_sigma = 1.0e-12;
+  double visual_geom_filter_max_point_cov_trace = -1.0;
+  double visual_geom_filter_max_normal_cov = -1.0;
   bool draw_rejected_points_en = false;
   bool ref_patch_dump_en = false;
   int ref_patch_dump_random_seed = -1;

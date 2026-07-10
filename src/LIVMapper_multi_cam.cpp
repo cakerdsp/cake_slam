@@ -199,6 +199,17 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<double>("vio.virtual_splat_min_weight", 1.0e-6);
   try_declare.template operator()<bool>("vio.virtual_splat_require_full_core_coverage", true);
   try_declare.template operator()<bool>("vio.virtual_splat_debug_compare_pull_exact", false);
+  try_declare.template operator()<bool>("vio.visual_geom_filter_en", false);
+  try_declare.template operator()<bool>("vio.visual_geom_filter_log_en", false);
+  try_declare.template operator()<bool>("vio.visual_geom_filter_require_point_cov", true);
+  try_declare.template operator()<double>("vio.visual_geom_filter_voxel_size", 0.5);
+  try_declare.template operator()<int>("vio.visual_geom_filter_min_plane_points", 5);
+  try_declare.template operator()<double>("vio.visual_geom_filter_radius_multiplier", 3.0);
+  try_declare.template operator()<double>("vio.visual_geom_filter_min_normal_cos", 0.8660254037844386);
+  try_declare.template operator()<double>("vio.visual_geom_filter_max_chi2", 9.0);
+  try_declare.template operator()<double>("vio.visual_geom_filter_min_sigma", 1.0e-12);
+  try_declare.template operator()<double>("vio.visual_geom_filter_max_point_cov_trace", -1.0);
+  try_declare.template operator()<double>("vio.visual_geom_filter_max_normal_cov", -1.0);
   try_declare.template operator()<bool>("vio.draw_rejected_points_en", false);
   try_declare.template operator()<bool>("vio.ncc_en", false);
   try_declare.template operator()<double>("vio.ncc_thre", 0.8);
@@ -368,6 +379,17 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.virtual_splat_min_weight", virtual_splat_min_weight);
   this->node->get_parameter("vio.virtual_splat_require_full_core_coverage", virtual_splat_require_full_core_coverage);
   this->node->get_parameter("vio.virtual_splat_debug_compare_pull_exact", virtual_splat_debug_compare_pull_exact);
+  this->node->get_parameter("vio.visual_geom_filter_en", visual_geom_filter_en);
+  this->node->get_parameter("vio.visual_geom_filter_log_en", visual_geom_filter_log_en);
+  this->node->get_parameter("vio.visual_geom_filter_require_point_cov", visual_geom_filter_require_point_cov);
+  this->node->get_parameter("vio.visual_geom_filter_voxel_size", visual_geom_filter_voxel_size);
+  this->node->get_parameter("vio.visual_geom_filter_min_plane_points", visual_geom_filter_min_plane_points);
+  this->node->get_parameter("vio.visual_geom_filter_radius_multiplier", visual_geom_filter_radius_multiplier);
+  this->node->get_parameter("vio.visual_geom_filter_min_normal_cos", visual_geom_filter_min_normal_cos);
+  this->node->get_parameter("vio.visual_geom_filter_max_chi2", visual_geom_filter_max_chi2);
+  this->node->get_parameter("vio.visual_geom_filter_min_sigma", visual_geom_filter_min_sigma);
+  this->node->get_parameter("vio.visual_geom_filter_max_point_cov_trace", visual_geom_filter_max_point_cov_trace);
+  this->node->get_parameter("vio.visual_geom_filter_max_normal_cov", visual_geom_filter_max_normal_cov);
   this->node->get_parameter("vio.draw_rejected_points_en", draw_rejected_points_en);
   this->node->get_parameter("vio.ncc_en", ncc_en);
   this->node->get_parameter("vio.ncc_thre", ncc_thre);
@@ -571,6 +593,17 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->virtual_splat_min_weight = virtual_splat_min_weight;
   vio_manager->virtual_splat_require_full_core_coverage = virtual_splat_require_full_core_coverage;
   vio_manager->virtual_splat_debug_compare_pull_exact = virtual_splat_debug_compare_pull_exact;
+  vio_manager->visual_geom_filter_en = visual_geom_filter_en;
+  vio_manager->visual_geom_filter_log_en = visual_geom_filter_log_en;
+  vio_manager->visual_geom_filter_require_point_cov = visual_geom_filter_require_point_cov;
+  vio_manager->visual_geom_filter_voxel_size = visual_geom_filter_voxel_size;
+  vio_manager->visual_geom_filter_min_plane_points = visual_geom_filter_min_plane_points;
+  vio_manager->visual_geom_filter_radius_multiplier = visual_geom_filter_radius_multiplier;
+  vio_manager->visual_geom_filter_min_normal_cos = visual_geom_filter_min_normal_cos;
+  vio_manager->visual_geom_filter_max_chi2 = visual_geom_filter_max_chi2;
+  vio_manager->visual_geom_filter_min_sigma = visual_geom_filter_min_sigma;
+  vio_manager->visual_geom_filter_max_point_cov_trace = visual_geom_filter_max_point_cov_trace;
+  vio_manager->visual_geom_filter_max_normal_cov = visual_geom_filter_max_normal_cov;
   vio_manager->draw_rejected_points_en = draw_rejected_points_en;
   vio_manager->ncc_en = ncc_en;
   vio_manager->ncc_thre = ncc_thre;
@@ -1101,7 +1134,7 @@ void LIVMapper::imu_prop_callback()
 {
   if (p_imu->imu_need_init || !new_imu || !ekf_finish_once) { return; }
   mtx_buffer_imu_prop.lock();
-  new_imu = false; // 控制 propagate 频率�?IMU 频率一�?
+  new_imu = false; // 控制 propagate 频率�?IMU 频率一�?
   if (imu_prop_enable && !prop_imu_buffer.empty())
   {
     static double last_t_from_lidar_end_time = 0;

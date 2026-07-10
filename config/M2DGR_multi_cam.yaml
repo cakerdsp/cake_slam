@@ -159,6 +159,18 @@
       virtual_splat_min_weight: 1.0e-6
       virtual_splat_require_full_core_coverage: true
       virtual_splat_debug_compare_pull_exact: false
+      # Strong geometry gate for newly inserted visual map points only.
+      visual_geom_filter_en: true
+      visual_geom_filter_log_en: true
+      visual_geom_filter_require_point_cov: true
+      visual_geom_filter_voxel_size: 0.4
+      visual_geom_filter_min_plane_points: 5
+      visual_geom_filter_radius_multiplier: 3.0
+      visual_geom_filter_min_normal_cos: 0.8660254
+      visual_geom_filter_max_chi2: 9.0
+      visual_geom_filter_min_sigma: 1.0e-12
+      visual_geom_filter_max_point_cov_trace: 0.2
+      visual_geom_filter_max_normal_cov: 0.05
       draw_rejected_points_en: false
       normal_en: true
       raycast_en: false

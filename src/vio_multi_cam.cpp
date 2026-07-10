@@ -858,6 +858,162 @@ void VIOManager::resetGrid(PerCameraData &ctx)
   // sample_points.clear();
 // }
 
+bool VIOManager::passVisualGeometryFilter(const pointWithVar &candidate,
+                                          const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+                                          VisualGeomRejectReason &reject_reason) const
+{
+  reject_reason = VISUAL_GEOM_REJECT_NONE;
+  if (!visual_geom_filter_en) return true;
+
+  const V3D &p_w = candidate.point_w;
+  const double min_sigma = (std::isfinite(visual_geom_filter_min_sigma) && visual_geom_filter_min_sigma > 0.0)
+                               ? visual_geom_filter_min_sigma
+                               : 1.0e-12;
+  if (!p_w.array().isFinite().all())
+  {
+    reject_reason = VISUAL_GEOM_REJECT_BAD_POINT;
+    return false;
+  }
+
+  const double voxel_size = (std::isfinite(visual_geom_filter_voxel_size) && visual_geom_filter_voxel_size > 1.0e-6)
+                              ? visual_geom_filter_voxel_size
+                              : 0.5;
+  int64_t loc_xyz[3];
+  for (int j = 0; j < 3; ++j) loc_xyz[j] = static_cast<int64_t>(std::floor(p_w[j] / voxel_size));
+  const auto iter = plane_map.find(VOXEL_LOCATION(loc_xyz[0], loc_xyz[1], loc_xyz[2]));
+  if (iter == plane_map.end() || iter->second == nullptr)
+  {
+    reject_reason = VISUAL_GEOM_REJECT_NO_PLANE;
+    return false;
+  }
+
+  VoxelOctoTree *octo = iter->second->find_correspond(p_w);
+  if (octo == nullptr || octo->plane_ptr_ == nullptr)
+  {
+    reject_reason = VISUAL_GEOM_REJECT_NO_PLANE;
+    return false;
+  }
+
+  const VoxelPlane &plane = *octo->plane_ptr_;
+  if (!plane.is_plane_)
+  {
+    reject_reason = VISUAL_GEOM_REJECT_NOT_PLANE;
+    return false;
+  }
+  if (visual_geom_filter_min_plane_points > 0 && plane.points_size_ < visual_geom_filter_min_plane_points)
+  {
+    reject_reason = VISUAL_GEOM_REJECT_PLANE_SIZE;
+    return false;
+  }
+  if (!plane.center_.array().isFinite().all() || !plane.normal_.array().isFinite().all() ||
+      !std::isfinite(static_cast<double>(plane.d_)))
+  {
+    reject_reason = VISUAL_GEOM_REJECT_NOT_PLANE;
+    return false;
+  }
+
+  V3D normal = plane.normal_;
+  const double normal_norm = normal.norm();
+  if (!std::isfinite(normal_norm) || normal_norm <= 1.0e-12)
+  {
+    reject_reason = VISUAL_GEOM_REJECT_NOT_PLANE;
+    return false;
+  }
+  normal /= normal_norm;
+
+  const double candidate_normal_norm = candidate.normal.norm();
+  if (std::isfinite(candidate_normal_norm) && candidate_normal_norm > 1.0e-12 &&
+      std::isfinite(visual_geom_filter_min_normal_cos) && visual_geom_filter_min_normal_cos > 0.0)
+  {
+    const double normal_cos = std::fabs((candidate.normal / candidate_normal_norm).dot(normal));
+    if (!std::isfinite(normal_cos) || normal_cos < visual_geom_filter_min_normal_cos)
+    {
+      reject_reason = VISUAL_GEOM_REJECT_NORMAL;
+      return false;
+    }
+  }
+
+  if (!candidate.var.array().isFinite().all())
+  {
+    reject_reason = VISUAL_GEOM_REJECT_COV;
+    return false;
+  }
+  const double point_cov_trace = candidate.var.trace();
+  if (visual_geom_filter_require_point_cov && (!std::isfinite(point_cov_trace) || point_cov_trace <= min_sigma))
+  {
+    reject_reason = VISUAL_GEOM_REJECT_COV;
+    return false;
+  }
+  if (std::isfinite(visual_geom_filter_max_point_cov_trace) && visual_geom_filter_max_point_cov_trace > 0.0 &&
+      point_cov_trace > visual_geom_filter_max_point_cov_trace)
+  {
+    reject_reason = VISUAL_GEOM_REJECT_COV;
+    return false;
+  }
+
+  const double normal_cov = normal.dot(candidate.var * normal);
+  if (visual_geom_filter_require_point_cov && (!std::isfinite(normal_cov) || normal_cov <= min_sigma))
+  {
+    reject_reason = VISUAL_GEOM_REJECT_COV;
+    return false;
+  }
+  if (std::isfinite(visual_geom_filter_max_normal_cov) && visual_geom_filter_max_normal_cov > 0.0 &&
+      normal_cov > visual_geom_filter_max_normal_cov)
+  {
+    reject_reason = VISUAL_GEOM_REJECT_COV;
+    return false;
+  }
+
+  const double signed_dis = normal.dot(p_w) + static_cast<double>(plane.d_);
+  if (!std::isfinite(signed_dis))
+  {
+    reject_reason = VISUAL_GEOM_REJECT_BAD_POINT;
+    return false;
+  }
+  const double dis_to_plane = std::fabs(signed_dis);
+  const V3D center_delta = p_w - plane.center_;
+  double tangent_sq = center_delta.squaredNorm() - signed_dis * signed_dis;
+  if (!std::isfinite(tangent_sq) || tangent_sq < -1.0e-8)
+  {
+    reject_reason = VISUAL_GEOM_REJECT_RANGE;
+    return false;
+  }
+  tangent_sq = std::max(0.0, tangent_sq);
+  const double tangent_dist = std::sqrt(tangent_sq);
+  if (std::isfinite(static_cast<double>(plane.radius_)) && plane.radius_ > 0.0f &&
+      std::isfinite(visual_geom_filter_radius_multiplier) && visual_geom_filter_radius_multiplier > 0.0 &&
+      tangent_dist > visual_geom_filter_radius_multiplier * static_cast<double>(plane.radius_))
+  {
+    reject_reason = VISUAL_GEOM_REJECT_RANGE;
+    return false;
+  }
+
+  if (!plane.plane_var_.array().isFinite().all())
+  {
+    reject_reason = VISUAL_GEOM_REJECT_SIGMA;
+    return false;
+  }
+  Eigen::Matrix<double, 1, 6> J_nq;
+  J_nq.block<1, 3>(0, 0) = p_w - plane.center_;
+  J_nq.block<1, 3>(0, 3) = -normal;
+  const double plane_sigma = (J_nq * plane.plane_var_ * J_nq.transpose())(0, 0);
+  const double sigma_l = plane_sigma + normal_cov;
+  if (!std::isfinite(sigma_l) || sigma_l <= min_sigma)
+  {
+    reject_reason = VISUAL_GEOM_REJECT_SIGMA;
+    return false;
+  }
+
+  const double chi2 = dis_to_plane * dis_to_plane / sigma_l;
+  if (!std::isfinite(chi2) || (std::isfinite(visual_geom_filter_max_chi2) && visual_geom_filter_max_chi2 > 0.0 &&
+                               chi2 > visual_geom_filter_max_chi2))
+  {
+    reject_reason = VISUAL_GEOM_REJECT_CHI2;
+    return false;
+  }
+
+  return true;
+}
 void VIOManager::computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J)
 {
   if (raw_camera_model_jacobian_en)
@@ -5180,12 +5336,31 @@ void VIOManager::updateStateVirtualS2(cv::Mat img, int level)
   for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
 }
 
-void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg)
+void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
+                                                 const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
   if (pg.size() <= 10) return;
 
+  std::array<int, VISUAL_GEOM_REJECT_COUNT> geom_reject_counts = {};
+  int geom_checked = 0;
+  int geom_passed = 0;
+  auto pass_candidate_geometry = [&](const pointWithVar &candidate) {
+    if (!visual_geom_filter_en) return true;
+    ++geom_checked;
+    VisualGeomRejectReason reason = VISUAL_GEOM_REJECT_NONE;
+    if (!passVisualGeometryFilter(candidate, plane_map, reason))
+    {
+      const int reason_index = static_cast<int>(reason);
+      if (reason_index > VISUAL_GEOM_REJECT_NONE && reason_index < VISUAL_GEOM_REJECT_COUNT)
+        ++geom_reject_counts[reason_index];
+      return false;
+    }
+    ++geom_passed;
+    return true;
+  };
   auto consider_candidate = [&](const pointWithVar &candidate, int source_type, int source_index) {
     if (candidate.normal == V3D::Zero()) return;
+    if (!pass_candidate_geometry(candidate)) return;
     V2D raw_px;
     if (!projectRawFisheyeIfValid(ctx, ctx.new_frame->w2f(candidate.point_w), border, raw_px)) return;
     const int grid_col = static_cast<int>(raw_px[0] / ctx.grid_size);
@@ -5249,22 +5424,51 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
     pending.inv_expo_time = state->inv_expo_time[ctx.camera_id];
     ctx.pending_new_points.push_back(std::move(pending));
   }
+  if (visual_geom_filter_en && visual_geom_filter_log_en)
+  {
+    printf("[ VIO Geom Filter ] camera_id=%d mode=virtual checked=%d pass=%d bad=%d no_plane=%d not_plane=%d plane_size=%d range=%d normal=%d cov=%d sigma=%d chi2=%d pending=%zu\n",
+           ctx.camera_id, geom_checked, geom_passed,
+           geom_reject_counts[VISUAL_GEOM_REJECT_BAD_POINT], geom_reject_counts[VISUAL_GEOM_REJECT_NO_PLANE],
+           geom_reject_counts[VISUAL_GEOM_REJECT_NOT_PLANE], geom_reject_counts[VISUAL_GEOM_REJECT_PLANE_SIZE],
+           geom_reject_counts[VISUAL_GEOM_REJECT_RANGE], geom_reject_counts[VISUAL_GEOM_REJECT_NORMAL],
+           geom_reject_counts[VISUAL_GEOM_REJECT_COV], geom_reject_counts[VISUAL_GEOM_REJECT_SIGMA],
+           geom_reject_counts[VISUAL_GEOM_REJECT_CHI2], ctx.pending_new_points.size());
+  }
   printf("[ VIO Virtual ] camera_id=%d selected %zu pending observations\n", ctx.camera_id, ctx.pending_new_points.size());
 }
 
-void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg)
+void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
+                                     const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
   if (virtual_fisheye_patch_en)
   {
-    generateVisualMapPointsVirtual(ctx, img, pg);
+    generateVisualMapPointsVirtual(ctx, img, pg, plane_map);
     return;
   }
   if (pg.size() <= 10) return;
 
+  std::array<int, VISUAL_GEOM_REJECT_COUNT> geom_reject_counts = {};
+  int geom_checked = 0;
+  int geom_passed = 0;
+  auto pass_candidate_geometry = [&](const pointWithVar &candidate) {
+    if (!visual_geom_filter_en) return true;
+    ++geom_checked;
+    VisualGeomRejectReason reason = VISUAL_GEOM_REJECT_NONE;
+    if (!passVisualGeometryFilter(candidate, plane_map, reason))
+    {
+      const int reason_index = static_cast<int>(reason);
+      if (reason_index > VISUAL_GEOM_REJECT_NONE && reason_index < VISUAL_GEOM_REJECT_COUNT)
+        ++geom_reject_counts[reason_index];
+      return false;
+    }
+    ++geom_passed;
+    return true;
+  };
   // double t0 = omp_get_wtime();
   for (int i = 0; i < pg.size(); i++)
   {
     if (pg[i].normal == V3D(0, 0, 0)) continue;
+    if (!pass_candidate_geometry(pg[i])) continue;
 
     V3D pt = pg[i].point_w;
     V2D pc(ctx.new_frame->w2c(pt));
@@ -5291,7 +5495,9 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
 
   for (int j = 0; j < ctx.visual_submap->add_from_voxel_map.size(); j++)
   {
-    V3D pt = ctx.visual_submap->add_from_voxel_map[j].point_w;
+    const pointWithVar &candidate = ctx.visual_submap->add_from_voxel_map[j];
+    if (!pass_candidate_geometry(candidate)) continue;
+    V3D pt = candidate.point_w;
     V2D pc(ctx.new_frame->w2c(pt));
 
     if (ctx.cam->isInFrame(pc.cast<int>(), border))
@@ -5304,7 +5510,7 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
         if (cur_value > ctx.scan_value[index])
         {
           ctx.scan_value[index] = cur_value;
-          ctx.append_voxel_points[index] = ctx.visual_submap->add_from_voxel_map[j];
+          ctx.append_voxel_points[index] = candidate;
           ctx.append_voxel_source_type[index] = SOURCE_RAYCAST_PLANE;
           ctx.append_voxel_source_index[index] = -1;
           ctx.grid_num[index] = TYPE_POINTCLOUD;
@@ -5348,6 +5554,16 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
 
   // double t_b2 = omp_get_wtime() - t0;
 
+  if (visual_geom_filter_en && visual_geom_filter_log_en)
+  {
+    printf("[ VIO Geom Filter ] camera_id=%d mode=raw checked=%d pass=%d bad=%d no_plane=%d not_plane=%d plane_size=%d range=%d normal=%d cov=%d sigma=%d chi2=%d pending=%zu\n",
+           ctx.camera_id, geom_checked, geom_passed,
+           geom_reject_counts[VISUAL_GEOM_REJECT_BAD_POINT], geom_reject_counts[VISUAL_GEOM_REJECT_NO_PLANE],
+           geom_reject_counts[VISUAL_GEOM_REJECT_NOT_PLANE], geom_reject_counts[VISUAL_GEOM_REJECT_PLANE_SIZE],
+           geom_reject_counts[VISUAL_GEOM_REJECT_RANGE], geom_reject_counts[VISUAL_GEOM_REJECT_NORMAL],
+           geom_reject_counts[VISUAL_GEOM_REJECT_COV], geom_reject_counts[VISUAL_GEOM_REJECT_SIGMA],
+           geom_reject_counts[VISUAL_GEOM_REJECT_CHI2], ctx.pending_new_points.size());
+  }
   printf("[ VIO ] camera_id=%d selected %zu pending observations\n", ctx.camera_id, ctx.pending_new_points.size());
   // printf("pg.size: %d \n", pg.size());
   // printf("B1. : %.6lf \n", t_b1);
@@ -7275,7 +7491,7 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     // fflush(stdout);
     // printf("[ VIO Debug ] generate begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
     // fflush(stdout);
-    generateVisualMapPoints(ctx, ctx.new_frame->img_, pg);
+    generateVisualMapPoints(ctx, ctx.new_frame->img_, pg, plane_map);
     // printf("[ VIO Debug ] generate end camera_id=%d frame=%d pending=%zu\n",
     //        ctx.camera_id, mf.frame_id, ctx.pending_new_points.size());
     // fflush(stdout);
