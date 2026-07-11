@@ -665,6 +665,9 @@ void VIOManager::initializeVIO()
   if (virtual_sparse_patch_en)
     printf("[ VIO Virtual Sparse ] enabled: sparse current sampling and lazy reference support\n");
 
+  if (visual_ref_post_ekf_build_en)
+    printf("[ VIO Ref Build ] New VisualPoint references are materialized from the post-EKF camera pose.\n");
+
   if (ref_patch_dump_en && !virtual_fisheye_patch_en)
   {
     printf("[ VIO Ref Patch Dump ] Disabled because virtual_fisheye_patch_en is false.\n");
@@ -5392,6 +5395,21 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
     V2D raw_px;
     if (!projectRawFisheyeIfValid(ctx, ctx.new_frame->w2f(pt_var.point_w), 1, raw_px)) continue;
 
+    if (visual_ref_post_ekf_build_en)
+    {
+      PendingNewPointObservation pending;
+      pending.camera_id = ctx.camera_id;
+      pending.source_type = ctx.append_voxel_source_type[i];
+      pending.source_index = ctx.append_voxel_source_index[i];
+      pending.pt_var = pt_var;
+      pending.px = raw_px;
+      pending.bearing = ctx.cam->cam2world(raw_px);
+      pending.T_f_w = ctx.new_frame->T_f_w_;
+      pending.inv_expo_time = state->inv_expo_time[ctx.camera_id];
+      ctx.pending_new_points.push_back(std::move(pending));
+      continue;
+    }
+
     std::vector<float> patch(patch_size_total);
     cv::Mat virtual_support_img;
     cv::Point virtual_source_origin;
@@ -5536,6 +5554,21 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
       // if(std::fabs(cos_theta)<0.34) continue; // 70 degree
       V2D pc(ctx.new_frame->w2c(pt));
 
+      if (visual_ref_post_ekf_build_en)
+      {
+        PendingNewPointObservation pending;
+        pending.camera_id = ctx.camera_id;
+        pending.source_type = ctx.append_voxel_source_type[i];
+        pending.source_index = ctx.append_voxel_source_index[i];
+        pending.pt_var = pt_var;
+        pending.px = pc;
+        pending.bearing = ctx.cam->cam2world(pc);
+        pending.T_f_w = ctx.new_frame->T_f_w_;
+        pending.inv_expo_time = state->inv_expo_time[ctx.camera_id];
+        ctx.pending_new_points.push_back(std::move(pending));
+        continue;
+      }
+
       PendingNewPointObservation pending;
       pending.camera_id = ctx.camera_id;
       pending.source_type = ctx.append_voxel_source_type[i];
@@ -5568,6 +5601,88 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
   // printf("pg.size: %d \n", pg.size());
   // printf("B1. : %.6lf \n", t_b1);
   // printf("B2. : %.6lf \n", t_b2);
+}
+
+void VIOManager::materializePendingNewPointObservations(PerCameraData &ctx, const cv::Mat &img)
+{
+  if (!visual_ref_post_ekf_build_en || ctx.pending_new_points.empty()) return;
+
+  std::vector<PendingNewPointObservation> materialized;
+  materialized.reserve(ctx.pending_new_points.size());
+  int projection_reject = 0;
+  int support_reject = 0;
+
+  for (PendingNewPointObservation &pending : ctx.pending_new_points)
+  {
+    pending.patch.assign(patch_size_total, 0.0f);
+    pending.img.release();
+    pending.virtual_source_origin = cv::Point();
+    pending.T_f_w = ctx.new_frame->T_f_w_;
+    pending.inv_expo_time = state->inv_expo_time[ctx.camera_id];
+    pending.virtual_patch_valid = false;
+    pending.T_v_w = pending.T_f_w;
+    pending.R_v_from_c.setIdentity();
+    pending.R_c_from_v.setIdentity();
+
+    if (virtual_fisheye_patch_en)
+    {
+      V2D raw_px;
+      if (!projectRawFisheyeIfValid(ctx, ctx.new_frame->w2f(pending.pt_var.point_w), 1, raw_px))
+      {
+        ++projection_reject;
+        continue;
+      }
+
+      cv::Mat virtual_support_img;
+      cv::Point virtual_source_origin;
+      SE3<double> T_v_w;
+      M3D R_v_from_c, R_c_from_v;
+      if (!createVirtualFeaturePatch(ctx, img, pending.T_f_w, pending.pt_var.point_w, pending.patch.data(),
+                                     virtual_support_img, virtual_source_origin, T_v_w,
+                                     R_v_from_c, R_c_from_v))
+      {
+        ++support_reject;
+        ++rejected_virtual_support_oob_;
+        continue;
+      }
+
+      pending.px = raw_px;
+      pending.bearing = ctx.cam->cam2world(raw_px);
+      pending.img = virtual_support_img;
+      pending.virtual_source_origin = virtual_source_origin;
+      pending.T_v_w = T_v_w;
+      pending.R_v_from_c = R_v_from_c;
+      pending.R_c_from_v = R_c_from_v;
+      pending.virtual_patch_valid = true;
+      if (ref_patch_dump_en)
+        maybeInitializeRefPatchDumpProbe(ctx, pending.pt_var.point_w, pending.pt_var.normal,
+                                        pending.px, pending.bearing, pending.patch.data());
+    }
+    else
+    {
+      const V2D pc = ctx.new_frame->w2c(pending.pt_var.point_w);
+      if (!pc.array().isFinite().all() || !ctx.cam->isInFrame(pc.cast<int>(), border))
+      {
+        ++projection_reject;
+        continue;
+      }
+
+      pending.px = pc;
+      pending.bearing = ctx.cam->cam2world(pc);
+      getImagePatch(ctx, img, pc, pending.patch.data(), 0);
+      pending.img = img;
+    }
+
+    materialized.push_back(std::move(pending));
+  }
+
+  ctx.pending_new_points.swap(materialized);
+  if (visual_geom_filter_log_en || visual_ref_post_ekf_build_en)
+  {
+    printf("[ VIO Ref Build ] camera_id=%d mode=%s post_ekf_materialized=%zu projection_reject=%d support_reject=%d\n",
+           ctx.camera_id, virtual_fisheye_patch_en ? "virtual" : "raw",
+           ctx.pending_new_points.size(), projection_reject, support_reject);
+  }
 }
 
 void VIOManager::commitPendingNewPoints()
@@ -7505,15 +7620,24 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   // fflush(stdout);
   const double ekf_end = omp_get_wtime();
 
+  if (visual_ref_post_ekf_build_en)
+  {
+    for (PerCameraData &ctx : cameras_)
+      materializePendingNewPointObservations(ctx, ctx.new_frame->img_);
+  }
+
   if (ref_patch_dump_en && !cameras_.empty())
     processRefPatchDumpProbe(cameras_[kRefPatchDumpCameraId], cameras_[kRefPatchDumpCameraId].new_frame->img_);
 
   for (PerCameraData &ctx : cameras_)
   {
-    for (PendingNewPointObservation &pending : ctx.pending_new_points)
+    if (!visual_ref_post_ekf_build_en)
     {
-      pending.T_f_w = ctx.new_frame->T_f_w_;
-      if (pending.virtual_patch_valid) pending.T_v_w = composeVirtualPose(pending.R_v_from_c, pending.T_f_w);
+      for (PendingNewPointObservation &pending : ctx.pending_new_points)
+      {
+        pending.T_f_w = ctx.new_frame->T_f_w_;
+        if (pending.virtual_patch_valid) pending.T_v_w = composeVirtualPose(pending.R_v_from_c, pending.T_f_w);
+      }
     }
     // printf("[ VIO Debug ] updateVisualMap begin camera_id=%d frame=%d pending=%zu\n",
     //        ctx.camera_id, mf.frame_id, ctx.pending_new_points.size());

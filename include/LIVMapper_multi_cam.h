@@ -181,6 +181,7 @@ public:
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
   bool virtual_s2_optimize_en = false;
+  bool visual_ref_post_ekf_build_en = false;
   bool raw_camera_model_jacobian_en = false;
   bool cross_camera_reference_en = false;
   bool online_extrinsic_en = false;

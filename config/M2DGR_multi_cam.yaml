@@ -150,6 +150,9 @@
       raw_camera_model_jacobian_en: true
       virtual_s2_optimize_en: false
       virtual_sparse_patch_en: false
+      # Build new VisualPoint references from the current frame's post-EKF pose.
+      # This timing switch is independent of visual map management.
+      visual_ref_post_ekf_build_en: false
       virtual_focal_length: 500.0
       virtual_patch_margin: 4
       virtual_max_search_level: 0
