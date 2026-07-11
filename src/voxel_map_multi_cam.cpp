@@ -83,6 +83,7 @@ void loadVoxelConfig(rclcpp::Node::SharedPtr &node, VoxelMapConfig &voxel_config
 
 void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane)
 {
+  ++plane->revision_;
   plane->plane_var_ = Eigen::Matrix<double, 6, 6>::Zero();
   plane->covariance_ = Eigen::Matrix3d::Zero();
   plane->center_ = Eigen::Vector3d::Zero();

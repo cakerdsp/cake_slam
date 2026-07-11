@@ -574,6 +574,7 @@ void VIOManager::limitOnlineExtrinsicUpdate(Eigen::VectorXd &solution, bool allo
 void VIOManager::initializeVIO()
 {
   if (cameras_.empty()) throw std::runtime_error("VIOManager cameras were not configured");
+  validateVisualMapManageConfig();
   patch_size_total = patch_size * patch_size;
   patch_size_half = static_cast<int>(patch_size / 2);
   patch_buffer.resize(patch_size_total);
@@ -667,6 +668,18 @@ void VIOManager::initializeVIO()
 
   if (visual_ref_post_ekf_build_en)
     printf("[ VIO Ref Build ] New VisualPoint references are materialized from the post-EKF camera pose.\n");
+
+  if (visual_map_manage_en)
+  {
+    printf("[ VIO Map Config ] manage=1 shadow=%d ref_select=%d fallback=%d lifecycle=%d coverage=%d nis=%d seed=%d footprint=%d information=%d replacement=%d retirement=%d post_ekf=%d mode=%s\n",
+           visual_map_manage_shadow_en ? 1 : 0, visual_ref_current_select_en ? 1 : 0,
+           visual_ref_fallback_en ? 1 : 0, visual_ref_lifecycle_en ? 1 : 0,
+           visual_ref_view_coverage_en ? 1 : 0, visual_ref_nis_en ? 1 : 0,
+           visual_point_seed_validation_en ? 1 : 0, visual_point_footprint_redundancy_en ? 1 : 0,
+           visual_point_information_prune_en ? 1 : 0, visual_point_replacement_en ? 1 : 0,
+           visual_map_retirement_apply_en ? 1 : 0, visual_ref_post_ekf_build_en ? 1 : 0,
+           virtual_fisheye_patch_en ? "virtual" : "raw");
+  }
 
   if (ref_patch_dump_en && !virtual_fisheye_patch_en)
   {
@@ -1016,6 +1029,275 @@ bool VIOManager::passVisualGeometryFilter(const pointWithVar &candidate,
   }
 
   return true;
+}
+
+void VIOManager::validateVisualMapManageConfig() const
+{
+  if (!visual_map_manage_en) return;
+  auto require = [](bool condition, const char *message) {
+    if (!condition) throw std::invalid_argument(message);
+  };
+  require(!visual_ref_fallback_en || visual_ref_current_select_en,
+          "visual_ref_fallback_en requires visual_ref_current_select_en");
+  require(!visual_point_seed_validation_en || visual_ref_lifecycle_en,
+          "visual_point_seed_validation_en requires visual_ref_lifecycle_en");
+  require(!visual_point_information_prune_en || visual_point_footprint_redundancy_en,
+          "visual_point_information_prune_en requires visual_point_footprint_redundancy_en");
+  require(!visual_point_replacement_en ||
+              (visual_ref_lifecycle_en && visual_point_seed_validation_en &&
+               visual_point_footprint_redundancy_en),
+          "visual_point_replacement_en requires ref lifecycle, seed validation, and footprint redundancy");
+  require(visual_ref_max_candidates >= 1 && visual_ref_max_candidates <= 4,
+          "visual_ref_max_candidates must be in [1, 4]");
+  require(visual_ref_validate_min_tests >= 1 && visual_point_seed_min_tests >= 1 &&
+              visual_ref_retire_reject_count >= 1 && visual_point_suspect_reject_count >= 1,
+          "visual map validation and rejection counts must be positive");
+  require(visual_ref_max_count >= 1,
+          "visual_ref_max_count must be positive");
+  require(visual_ref_validate_min_ratio >= 0.0 && visual_ref_validate_min_ratio <= 1.0 &&
+              visual_point_seed_min_ratio >= 0.0 && visual_point_seed_min_ratio <= 1.0,
+          "visual map validation ratios must be in [0, 1]");
+  require(std::isfinite(visual_ref_coverage_angle_deg) && visual_ref_coverage_angle_deg > 0.0 &&
+              visual_ref_coverage_angle_deg <= 180.0,
+          "visual_ref_coverage_angle_deg must be in (0, 180]");
+  require(std::isfinite(visual_ref_max_anisotropy) && visual_ref_max_anisotropy >= 1.0,
+          "visual_ref_max_anisotropy must be at least 1");
+  require(std::isfinite(visual_ref_nis_max_per_dof) && visual_ref_nis_max_per_dof > 0.0,
+          "visual_ref_nis_max_per_dof must be positive");
+  require(visual_point_footprint_iou >= 0.0 && visual_point_footprint_iou <= 1.0,
+          "visual_point_footprint_iou must be in [0, 1]");
+  require(visual_point_information_retain > 0.0 && visual_point_information_retain <= 1.0,
+          "visual_point_information_retain must be in (0, 1]");
+  require(visual_point_stale_frames >= 1,
+          "visual_point_stale_frames must be positive");
+}
+
+bool VIOManager::associateVisualPointSurface(
+    const V3D &point_w, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+    int64_t &voxel_x, int64_t &voxel_y, int64_t &voxel_z, const VoxelPlane *&plane) const
+{
+  plane = nullptr;
+  if (!point_w.array().isFinite().all()) return false;
+  const double voxel_size = std::isfinite(visual_geom_filter_voxel_size) &&
+                                    visual_geom_filter_voxel_size > 1.0e-6
+                                ? visual_geom_filter_voxel_size
+                                : 0.5;
+  voxel_x = static_cast<int64_t>(std::floor(point_w[0] / voxel_size));
+  voxel_y = static_cast<int64_t>(std::floor(point_w[1] / voxel_size));
+  voxel_z = static_cast<int64_t>(std::floor(point_w[2] / voxel_size));
+  const auto found = plane_map.find(VOXEL_LOCATION(voxel_x, voxel_y, voxel_z));
+  if (found == plane_map.end() || found->second == nullptr) return false;
+  VoxelOctoTree *octo = found->second->find_correspond(point_w);
+  if (octo == nullptr || octo->plane_ptr_ == nullptr || !octo->plane_ptr_->is_plane_) return false;
+  const VoxelPlane &candidate = *octo->plane_ptr_;
+  if (!candidate.normal_.array().isFinite().all() || candidate.normal_.norm() <= 1.0e-9) return false;
+  plane = &candidate;
+  return true;
+}
+
+bool VIOManager::computeManagedFootprint(const PerCameraData &ctx, const SE3<double> &T_c_w,
+                                         const V3D &point_w, const V3D &normal_w,
+                                         const Feature *feature, const VoxelPlane &plane,
+                                         std::array<V3D, 4> &corners_w) const
+{
+  (void)normal_w;
+  if (ctx.cam == nullptr || !point_w.array().isFinite().all()) return false;
+  const bool use_virtual = virtual_fisheye_patch_en;
+  V2D raw_center;
+  const V3D point_c = T_c_w * point_w;
+  if (!projectRawFisheyeIfValid(ctx, point_c, use_virtual ? 1 : border, raw_center)) return false;
+
+  M3D R_c_from_v = M3D::Identity();
+  if (use_virtual)
+  {
+    if (feature != nullptr && feature->virtual_patch_valid_)
+      R_c_from_v = feature->R_c_from_v_;
+    else
+    {
+      M3D R_v_from_c;
+      if (!buildVirtualFrameRotation(ctx, point_c, raw_center, R_v_from_c, R_c_from_v)) return false;
+    }
+  }
+
+  const V3D camera_w = T_c_w.inverse().translation();
+  const M3D R_w_from_c = T_c_w.rotationMatrix().transpose();
+  V3D n = plane.normal_.normalized();
+  const double d = -n.dot(plane.center_);
+  const double half = static_cast<double>(patch_size_half);
+  const std::array<V2D, 4> offsets = {V2D(-half, -half), V2D(half, -half),
+                                      V2D(half, half), V2D(-half, half)};
+  for (size_t i = 0; i < offsets.size(); ++i)
+  {
+    V3D ray_c;
+    if (use_virtual)
+    {
+      const V2D virtual_px(virtual_support_radius + offsets[i][0],
+                           virtual_support_radius + offsets[i][1]);
+      ray_c = R_c_from_v * virtualCam2World(virtual_px);
+    }
+    else
+    {
+      ray_c = ctx.cam->cam2world(raw_center + offsets[i]);
+    }
+    if (!ray_c.array().isFinite().all() || ray_c.norm() <= 1.0e-9) return false;
+    const V3D ray_w = (R_w_from_c * ray_c.normalized()).normalized();
+    const double denominator = n.dot(ray_w);
+    if (!std::isfinite(denominator) || std::fabs(denominator) <= 1.0e-8) return false;
+    const double distance = -(n.dot(camera_w) + d) / denominator;
+    if (!std::isfinite(distance) || distance <= 0.0) return false;
+    corners_w[i] = camera_w + distance * ray_w;
+  }
+  return true;
+}
+
+double VIOManager::managedFootprintIoU(const std::array<V3D, 4> &a,
+                                       const std::array<V3D, 4> &b,
+                                       const VoxelPlane &plane) const
+{
+  V3D x = plane.x_normal_.normalized();
+  V3D y = plane.y_normal_.normalized();
+  if (!x.array().isFinite().all() || !y.array().isFinite().all() ||
+      x.norm() <= 1.0e-9 || y.norm() <= 1.0e-9)
+    return 0.0;
+  auto project = [&](const std::array<V3D, 4> &corners) {
+    std::vector<V2D> polygon;
+    polygon.reserve(4);
+    for (const V3D &corner : corners)
+    {
+      const V3D delta = corner - plane.center_;
+      polygon.emplace_back(delta.dot(x), delta.dot(y));
+    }
+    double signed_area = 0.0;
+    for (int i = 0; i < 4; ++i)
+      signed_area += polygon[i][0] * polygon[(i + 1) % 4][1] -
+                     polygon[(i + 1) % 4][0] * polygon[i][1];
+    if (signed_area < 0.0) std::reverse(polygon.begin(), polygon.end());
+    return polygon;
+  };
+  auto area = [](const std::vector<V2D> &polygon) {
+    if (polygon.size() < 3) return 0.0;
+    double value = 0.0;
+    for (size_t i = 0; i < polygon.size(); ++i)
+      value += polygon[i][0] * polygon[(i + 1) % polygon.size()][1] -
+               polygon[(i + 1) % polygon.size()][0] * polygon[i][1];
+    return 0.5 * std::fabs(value);
+  };
+  std::vector<V2D> subject = project(a);
+  const std::vector<V2D> clip = project(b);
+  for (size_t edge = 0; edge < clip.size() && !subject.empty(); ++edge)
+  {
+    const V2D c0 = clip[edge];
+    const V2D c1 = clip[(edge + 1) % clip.size()];
+    auto inside = [&](const V2D &p) {
+      return (c1[0] - c0[0]) * (p[1] - c0[1]) -
+                 (c1[1] - c0[1]) * (p[0] - c0[0]) >= -1.0e-10;
+    };
+    auto intersection = [&](const V2D &p0, const V2D &p1) {
+      const V2D r = p1 - p0;
+      const V2D s = c1 - c0;
+      const double denominator = r[0] * s[1] - r[1] * s[0];
+      if (std::fabs(denominator) <= 1.0e-12) return p1;
+      const V2D delta = c0 - p0;
+      const double t = (delta[0] * s[1] - delta[1] * s[0]) / denominator;
+      return p0 + std::clamp(t, 0.0, 1.0) * r;
+    };
+    std::vector<V2D> output;
+    V2D previous = subject.back();
+    bool previous_inside = inside(previous);
+    for (const V2D &current : subject)
+    {
+      const bool current_inside = inside(current);
+      if (current_inside != previous_inside) output.push_back(intersection(previous, current));
+      if (current_inside) output.push_back(current);
+      previous = current;
+      previous_inside = current_inside;
+    }
+    subject.swap(output);
+  }
+  const double area_a = area(project(a));
+  const double area_b = area(project(b));
+  const double intersection_area = area(subject);
+  const double union_area = area_a + area_b - intersection_area;
+  return union_area > 1.0e-12 ? std::clamp(intersection_area / union_area, 0.0, 1.0) : 0.0;
+}
+
+VisualPoint *VIOManager::findRedundantVisualPoint(
+    const PendingNewPointObservation &pending,
+    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+    double &best_iou)
+{
+  best_iou = 0.0;
+  if (!visual_map_manage_en || !visual_point_footprint_redundancy_en ||
+      !pending.surface_valid || !pending.footprint_valid)
+    return nullptr;
+  const auto surface = plane_map.find(VOXEL_LOCATION(pending.surface_voxel_x,
+                                                     pending.surface_voxel_y,
+                                                     pending.surface_voxel_z));
+  if (surface == plane_map.end() || surface->second == nullptr) return nullptr;
+  VoxelOctoTree *octo = surface->second->find_correspond(pending.pt_var.point_w);
+  if (octo == nullptr || octo->plane_ptr_ == nullptr || !octo->plane_ptr_->is_plane_ ||
+      octo->plane_ptr_->id_ != pending.surface_plane_id)
+    return nullptr;
+  const VoxelPlane &plane = *octo->plane_ptr_;
+
+  const double map_voxel_size = 0.5;
+  const int64_t center_x = static_cast<int64_t>(std::floor(pending.pt_var.point_w[0] / map_voxel_size));
+  const int64_t center_y = static_cast<int64_t>(std::floor(pending.pt_var.point_w[1] / map_voxel_size));
+  const int64_t center_z = static_cast<int64_t>(std::floor(pending.pt_var.point_w[2] / map_voxel_size));
+  VisualPoint *best = nullptr;
+  for (int dx = -1; dx <= 1; ++dx)
+    for (int dy = -1; dy <= 1; ++dy)
+      for (int dz = -1; dz <= 1; ++dz)
+      {
+        const auto found = feat_map.find(VOXEL_LOCATION(center_x + dx, center_y + dy, center_z + dz));
+        if (found == feat_map.end() || found->second == nullptr) continue;
+        for (VisualPoint *point : found->second->voxel_points)
+        {
+          if (point == nullptr || point->pending_delete_ || point->surface_plane_id_ != pending.surface_plane_id) continue;
+          for (Feature *feature : point->obs_)
+          {
+            if (feature == nullptr || feature->pending_delete_ || !feature->footprint_valid_ ||
+                feature->surface_plane_id_ != pending.surface_plane_id)
+              continue;
+            ++visual_map_manage_stats_.footprint_compared;
+            const double iou = managedFootprintIoU(pending.footprint_corners_w,
+                                                   feature->footprint_corners_w_, plane);
+            if (iou > best_iou)
+            {
+              best_iou = iou;
+              best = point;
+            }
+          }
+        }
+      }
+  return best_iou >= visual_point_footprint_iou ? best : nullptr;
+}
+
+bool VIOManager::shouldReplaceRedundantPoint(const PendingNewPointObservation &pending,
+                                             const VisualPoint &existing) const
+{
+  if (existing.pending_delete_) return false;
+  const bool candidate_geometry_valid = std::isfinite(pending.geometry_chi2) &&
+      (!(std::isfinite(visual_geom_filter_max_chi2) && visual_geom_filter_max_chi2 > 0.0) ||
+       pending.geometry_chi2 <= visual_geom_filter_max_chi2);
+  const bool candidate_geometry_better = candidate_geometry_valid &&
+      (!std::isfinite(existing.geometry_chi2_) || pending.geometry_chi2 < existing.geometry_chi2_);
+  if (visual_point_replacement_en && existing.state_ == VisualPoint::State::SUSPECT)
+    return candidate_geometry_better;
+  if (!visual_point_information_prune_en) return false;
+  Eigen::Matrix<double, 6, 6> information =
+      existing.accumulated_pose_information_ / std::max(1, existing.accepted_test_count_);
+  information.diagonal().array() += 1.0e-9;
+  const Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(information);
+  if (solver.info() != Eigen::Success) return true;
+  const double max_eigenvalue = solver.eigenvalues().maxCoeff();
+  const double min_eigenvalue = solver.eigenvalues().minCoeff();
+  const double isotropic_retention = max_eigenvalue > 1.0e-12 ? min_eigenvalue / max_eigenvalue : 0.0;
+  const double candidate_geometry = std::isfinite(pending.geometry_chi2)
+                                        ? 1.0 / (1.0 + std::max(0.0, pending.geometry_chi2))
+                                        : 0.0;
+  return isotropic_retention < 1.0 - visual_point_information_retain &&
+         candidate_geometry > 0.0 && candidate_geometry_better;
 }
 void VIOManager::computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J)
 {
@@ -2799,13 +3081,26 @@ void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
 {
   V3D pt_w(pt_new->pos_[0], pt_new->pos_[1], pt_new->pos_[2]);
   double voxel_size = 0.5;
-  float loc_xyz[3];
-  for (int j = 0; j < 3; j++)
+  const bool apply_map_management = visual_map_manage_en && !visual_map_manage_shadow_en;
+  int64_t location[3];
+  for (int j = 0; j < 3; ++j)
   {
-    loc_xyz[j] = pt_w[j] / voxel_size;
-    if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
+    if (apply_map_management)
+      location[j] = static_cast<int64_t>(std::floor(pt_w[j] / voxel_size));
+    else
+    {
+      float legacy_location = static_cast<float>(pt_w[j] / voxel_size);
+      if (legacy_location < 0.0f) legacy_location -= 1.0f;
+      location[j] = static_cast<int64_t>(legacy_location);
+    }
   }
-  VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+  VOXEL_LOCATION position(location[0], location[1], location[2]);
+  if (visual_map_manage_en)
+  {
+    pt_new->map_voxel_x_ = position.x;
+    pt_new->map_voxel_y_ = position.y;
+    pt_new->map_voxel_z_ = position.z;
+  }
   auto iter = feat_map.find(position);
   if (iter != feat_map.end())
   {
@@ -2814,7 +3109,7 @@ void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
   }
   else
   {
-    VOXEL_POINTS *ot = new VOXEL_POINTS(0);
+    VOXEL_POINTS *ot = new VOXEL_POINTS(apply_map_management ? 1 : 0);
     ot->voxel_points.push_back(pt_new);
     feat_map[position] = ot;
   }
@@ -3764,6 +4059,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     Feature *reference = nullptr;
     V3D point_c_seed = V3D::Zero();
     V2D current_raw_center_px = V2D::Zero();
+    int reference_rank = 0;
   };
   enum VirtualRejectReason
   {
@@ -3890,6 +4186,38 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       continue;
     }
 
+    if (visual_map_manage_en && visual_ref_current_select_en && visual_map_manage_shadow_en)
+    {
+      const int candidate_limit = visual_ref_fallback_en ? visual_ref_max_candidates : 1;
+      if (!selectManagedReferenceCandidates(ctx, *pt, candidate_limit).empty())
+        ++visual_map_manage_stats_.dynamic_selected;
+    }
+    if (visual_map_manage_en && visual_ref_current_select_en && !visual_map_manage_shadow_en)
+    {
+      const int candidate_limit = visual_ref_fallback_en ? visual_ref_max_candidates : 1;
+      std::vector<Feature *> managed_refs = selectManagedReferenceCandidates(ctx, *pt, candidate_limit);
+      if (managed_refs.empty())
+      {
+        ++virtual_candidate_ref_missing_count_;
+        recordRejectedPoint(raw_px, REJECT_DRAW_REF_MISSING);
+        continue;
+      }
+      for (int rank = 0; rank < static_cast<int>(managed_refs.size()); ++rank)
+      {
+        Feature *managed_ref = managed_refs[rank];
+        if (managed_ref == nullptr || !managed_ref->virtual_patch_valid_) continue;
+        VirtualCandidate candidate;
+        candidate.point = pt;
+        candidate.reference = managed_ref;
+        candidate.point_c_seed = pt_c_seed;
+        candidate.current_raw_center_px = raw_px;
+        candidate.reference_rank = rank;
+        candidates.push_back(candidate);
+      }
+      ++visual_map_manage_stats_.dynamic_selected;
+      continue;
+    }
+
     Feature *ref_ftr = nullptr;
     if (normal_en)
     {
@@ -3973,13 +4301,28 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
 
   vector<VirtualCandidateResult> results(candidates.size());
   const double parallel_track_start = omp_get_wtime();
+  for (int fallback_pass = 0; fallback_pass < 2; ++fallback_pass)
+  {
 #ifdef MP_EN
-  omp_set_num_threads(MP_PROC_NUM);
+    omp_set_num_threads(MP_PROC_NUM);
 #pragma omp parallel for
 #endif
-  for (int candidate_index = 0; candidate_index < static_cast<int>(candidates.size()); ++candidate_index)
-  {
+    for (int candidate_index = 0; candidate_index < static_cast<int>(candidates.size()); ++candidate_index)
+    {
     const VirtualCandidate &candidate = candidates[candidate_index];
+    const bool is_primary = candidate.reference_rank == 0;
+    if (is_primary != (fallback_pass == 0)) continue;
+    if (!is_primary)
+    {
+      int primary_index = candidate_index - 1;
+      while (primary_index >= 0 && candidates[primary_index].point == candidate.point &&
+             candidates[primary_index].reference_rank != 0)
+        --primary_index;
+      if (primary_index < 0 || candidates[primary_index].point != candidate.point) continue;
+      const int primary_rejection = results[primary_index].rejection;
+      if (primary_rejection != VIRTUAL_REJECT_NCC && primary_rejection != VIRTUAL_REJECT_PHOTOMETRIC)
+        continue;
+    }
     VirtualCandidateResult &result = results[candidate_index];
     VisualPoint *pt = candidate.point;
     Feature *ref_ftr = candidate.reference;
@@ -4011,6 +4354,17 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     {
       result.rejection = VIRTUAL_REJECT_AFFINE_MATRIX;
       continue;
+    }
+    if (visual_map_manage_en && visual_ref_current_select_en)
+    {
+      const Eigen::JacobiSVD<Matrix2d> affine_svd(result.track.A_cur_ref);
+      const V2D singular = affine_svd.singularValues();
+      if (!singular.array().isFinite().all() || singular[1] <= 1.0e-9 ||
+          singular[0] / singular[1] > visual_ref_max_anisotropy)
+      {
+        result.rejection = VIRTUAL_REJECT_AFFINE_MATRIX;
+        continue;
+      }
     }
     result.track.search_level = getBestSearchLevel(result.track.A_cur_ref, virtual_max_search_level);
     result.search_level = result.track.search_level;
@@ -4109,6 +4463,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     result.inverse_reference_exposure = ref_ftr->inv_expo_time_;
     result.track.valid = true;
     result.valid = true;
+    }
   }
   virtual_parallel_track_time_ = omp_get_wtime() - parallel_track_start;
 
@@ -4116,8 +4471,17 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
   vector<int> virtual_search_level_count(std::max(virtual_max_search_level + 1, 1), 0);
   vector<int> virtual_warp_fail_search_level_count(std::max(virtual_max_search_level + 1, 1), 0);
   vector<int> virtual_warp_fail_pyramid_level_count(std::max(patch_pyrimid_level, 1), 0);
+  std::set<VisualPoint *> accepted_managed_points;
+  std::set<VisualPoint *> fallback_allowed_points;
   for (int candidate_index = 0; candidate_index < static_cast<int>(candidates.size()); ++candidate_index)
   {
+    const VirtualCandidate &collect_candidate = candidates[candidate_index];
+    if (collect_candidate.reference_rank > 0)
+    {
+      if (accepted_managed_points.count(collect_candidate.point) != 0) continue;
+      if (fallback_allowed_points.count(collect_candidate.point) == 0) continue;
+      ++visual_map_manage_stats_.fallback_attempted;
+    }
     VirtualCandidateResult &result = results[candidate_index];
     if (usage_stats_en)
     {
@@ -4137,6 +4501,12 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       ++virtual_search_level_count[result.search_level];
     if (!result.valid)
     {
+      if (collect_candidate.reference_rank == 0 &&
+          (result.rejection == VIRTUAL_REJECT_NCC || result.rejection == VIRTUAL_REJECT_PHOTOMETRIC))
+        fallback_allowed_points.insert(collect_candidate.point);
+      if (result.rejection == VIRTUAL_REJECT_NCC || result.rejection == VIRTUAL_REJECT_PHOTOMETRIC)
+        recordManagedReferenceRejection(*collect_candidate.point, *collect_candidate.reference,
+                                        ctx.new_frame->id_, ctx.camera_id);
       if (result.rejection != VIRTUAL_REJECT_NONE)
         recordRejectedPoint(candidates[candidate_index].current_raw_center_px, drawReasonFromVirtualReject(result.rejection));
       switch (result.rejection)
@@ -4180,6 +4550,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     }
 
     ++virtual_valid_track_count_;
+    if (collect_candidate.reference_rank > 0) ++visual_map_manage_stats_.fallback_accepted;
+    accepted_managed_points.insert(collect_candidate.point);
     if (usage_stats_en)
     {
       const VirtualCandidate &candidate = candidates[candidate_index];
@@ -4212,6 +4584,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     ctx.visual_submap->warp_patch.push_back(std::move(result.warped_reference));
     ctx.visual_submap->inv_expo_list.push_back(result.inverse_reference_exposure);
     ctx.visual_submap->virtual_track_patches.push_back(std::move(result.track));
+    appendManagedSubmapMetadata(ctx, *candidates[candidate_index].point,
+                                *candidates[candidate_index].reference);
   }
   virtual_result_collect_time_ = omp_get_wtime() - result_collect_start;
 
@@ -4578,7 +4952,6 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       // t_2 += omp_get_wtime() - t_1;
 
       // t_1 = omp_get_wtime();
-      Feature *ref_ftr;
       std::vector<float> patch_wrap(warp_len);
 
       int search_level;
@@ -4586,65 +4959,87 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
 
       if (!pt->is_normal_initialized_) continue;
 
-      if (normal_en)
+      std::vector<Feature *> reference_candidates;
+      if (visual_map_manage_en && visual_ref_current_select_en && visual_map_manage_shadow_en)
       {
-        pt->ensureCameraCount(numCameras());
-        float phtometric_errors_min = std::numeric_limits<float>::max();
-        ref_ftr = pt->referencePatch(ctx.camera_id, cross_camera_reference_en);
-        if (ref_ftr == nullptr)
-        {
-          for (auto it = pt->obs_.begin(), ite = pt->obs_.end(); it != ite; ++it)
-          {
-            Feature *ref_patch_temp = *it;
-            if (ref_patch_temp == nullptr) continue;
-            if (!cross_camera_reference_en && ref_patch_temp->camera_id_ != ctx.camera_id) continue;
-            float *patch_temp = ref_patch_temp->patch_;
-            float phtometric_errors = 0.0;
-            int count = 0;
-            for (auto itm = pt->obs_.begin(), itme = pt->obs_.end(); itm != itme; ++itm)
-            {
-              if (*itm == nullptr || *itm == ref_patch_temp) continue;
-              if (!cross_camera_reference_en && (*itm)->camera_id_ != ctx.camera_id) continue;
-              float *patch_cache = (*itm)->patch_;
-
-              for (int ind = 0; ind < patch_size_total; ind++)
-              {
-                phtometric_errors += (patch_temp[ind] - patch_cache[ind]) * (patch_temp[ind] - patch_cache[ind]);
-              }
-              count++;
-            }
-            if (count > 0) phtometric_errors /= count;
-            if (phtometric_errors < phtometric_errors_min)
-            {
-              phtometric_errors_min = phtometric_errors;
-              ref_ftr = ref_patch_temp;
-            }
-          }
-          if (ref_ftr != nullptr)
-          {
-            if (cross_camera_reference_en)
-            {
-              pt->ref_patch = ref_ftr;
-              pt->has_ref_patch_ = true;
-            }
-            else
-            {
-              pt->ref_patch_by_camera_[ctx.camera_id] = ref_ftr;
-              pt->has_ref_patch_by_camera_[ctx.camera_id] = 1;
-            }
-          }
-        }
+        const int candidate_limit = visual_ref_fallback_en ? visual_ref_max_candidates : 1;
+        if (!selectManagedReferenceCandidates(ctx, *pt, candidate_limit).empty())
+          ++visual_map_manage_stats_.dynamic_selected;
+      }
+      if (visual_map_manage_en && visual_ref_current_select_en && !visual_map_manage_shadow_en)
+      {
+        const int candidate_limit = visual_ref_fallback_en ? visual_ref_max_candidates : 1;
+        reference_candidates = selectManagedReferenceCandidates(ctx, *pt, candidate_limit);
+        ++visual_map_manage_stats_.dynamic_selected;
       }
       else
       {
-        if (!pt->getCloseViewObs(ctx.new_frame->pos(), ref_ftr, pc,
-                                 cross_camera_reference_en ? -1 : ctx.camera_id)) continue;
+        Feature *ref_ftr = nullptr;
+        if (normal_en)
+        {
+          pt->ensureCameraCount(numCameras());
+          float phtometric_errors_min = std::numeric_limits<float>::max();
+          ref_ftr = pt->referencePatch(ctx.camera_id, cross_camera_reference_en);
+          if (ref_ftr == nullptr)
+          {
+            for (auto it = pt->obs_.begin(), ite = pt->obs_.end(); it != ite; ++it)
+            {
+              Feature *ref_patch_temp = *it;
+              if (ref_patch_temp == nullptr || ref_patch_temp->pending_delete_ ||
+                  ref_patch_temp->ref_state_ == Feature::RefState::RETIRED)
+                continue;
+              if (!cross_camera_reference_en && ref_patch_temp->camera_id_ != ctx.camera_id) continue;
+              float *patch_temp = ref_patch_temp->patch_;
+              float phtometric_errors = 0.0;
+              int count = 0;
+              for (auto itm = pt->obs_.begin(), itme = pt->obs_.end(); itm != itme; ++itm)
+              {
+                if (*itm == nullptr || *itm == ref_patch_temp || (*itm)->pending_delete_) continue;
+                if (!cross_camera_reference_en && (*itm)->camera_id_ != ctx.camera_id) continue;
+                float *patch_cache = (*itm)->patch_;
+                for (int ind = 0; ind < patch_size_total; ind++)
+                  phtometric_errors += (patch_temp[ind] - patch_cache[ind]) *
+                                       (patch_temp[ind] - patch_cache[ind]);
+                count++;
+              }
+              if (count > 0) phtometric_errors /= count;
+              if (phtometric_errors < phtometric_errors_min)
+              {
+                phtometric_errors_min = phtometric_errors;
+                ref_ftr = ref_patch_temp;
+              }
+            }
+            if (ref_ftr != nullptr)
+            {
+              if (cross_camera_reference_en)
+              {
+                pt->ref_patch = ref_ftr;
+                pt->has_ref_patch_ = true;
+              }
+              else
+              {
+                pt->ref_patch_by_camera_[ctx.camera_id] = ref_ftr;
+                pt->has_ref_patch_by_camera_[ctx.camera_id] = 1;
+              }
+            }
+          }
+        }
+        else if (!pt->getCloseViewObs(ctx.new_frame->pos(), ref_ftr, pc,
+                                      cross_camera_reference_en ? -1 : ctx.camera_id))
+          ref_ftr = nullptr;
+        if (ref_ftr != nullptr) reference_candidates.push_back(ref_ftr);
       }
-      if (ref_ftr == nullptr || ref_ftr->camera_id_ < 0 || ref_ftr->camera_id_ >= numCameras())
+      if (reference_candidates.empty()) continue;
+
+      for (int reference_rank = 0; reference_rank < static_cast<int>(reference_candidates.size()); ++reference_rank)
       {
-        ++debug_ref_invalid;
-        continue;
-      }
+        Feature *ref_ftr = reference_candidates[reference_rank];
+        if (reference_rank > 0) ++visual_map_manage_stats_.fallback_attempted;
+        if (ref_ftr == nullptr || ref_ftr->camera_id_ < 0 || ref_ftr->camera_id_ >= numCameras())
+        {
+          ++debug_ref_invalid;
+          break;
+        }
       const PerCameraData &ref_ctx = cameras_[ref_ftr->camera_id_];
       if (ref_ftr->camera_id_ != ctx.camera_id) ++debug_cross_refs;
 
@@ -4702,6 +5097,15 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
           // fflush(stdout);
         }
       }
+      if (visual_map_manage_en && visual_ref_current_select_en)
+      {
+        if (!debug_affine_ok) break;
+        const Eigen::JacobiSVD<Matrix2d> affine_svd(A_cur_ref_zero);
+        const V2D singular = affine_svd.singularValues();
+        if (!singular.array().isFinite().all() || singular[1] <= 1.0e-9 ||
+            singular[0] / singular[1] > visual_ref_max_anisotropy)
+          break;
+      }
       if (debug_warp_logs < 8)
       {
         // printf("[ VIO Debug ] retrieve warp camera_id=%d ref_camera_id=%d search_level=%d det=%.6e finite=%d ref_px=(%.2f,%.2f) ref_img=%dx%d ref_level=%d\n",
@@ -4722,7 +5126,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
           break;
         }
       }
-      if (!warp_ok) continue;
+      if (!warp_ok) break;
 
       getImagePatch(ctx, img, pc, patch_buffer.data(), 0);
 
@@ -4741,10 +5145,15 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
         if (ncc_en && usage_ncc < ncc_thre)
         {
           // grid_num[i] = TYPE_UNKNOWN;
+          recordManagedReferenceRejection(*pt, *ref_ftr, ctx.new_frame->id_, ctx.camera_id);
           continue;
         }
       }
-      if (error > outlier_threshold * patch_size_total) continue;
+      if (error > outlier_threshold * patch_size_total)
+      {
+        recordManagedReferenceRejection(*pt, *ref_ftr, ctx.new_frame->id_, ctx.camera_id);
+        continue;
+      }
 
       if (runtime_support_dump_en && pt != nullptr)
       {
@@ -4775,8 +5184,11 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       ctx.visual_submap->errors.push_back(error);
       ctx.visual_submap->warp_patch.push_back(patch_wrap);
       ctx.visual_submap->inv_expo_list.push_back(ref_ftr->inv_expo_time_);
+      appendManagedSubmapMetadata(ctx, *pt, *ref_ftr);
+      if (reference_rank > 0) ++visual_map_manage_stats_.fallback_accepted;
 
       ++debug_accepted;
+      break;
 
       // t_5 += omp_get_wtime() - t_1;
     }
@@ -4930,9 +5342,45 @@ void VIOManager::computeJacobianAndUpdateEKF()
           const std::vector<float> &reference_patch = ctx.visual_submap->warp_patch[point_index];
           const double reference_exposure = ctx.visual_submap->inv_expo_list[point_index];
           double patch_error = 0.0;
-          Feature *usage_reference = nullptr;
-          if (usage_stats_en && point_index < static_cast<int>(ctx.visual_submap->reference_features.size()))
-            usage_reference = ctx.visual_submap->reference_features[point_index];
+          const bool contributes_to_ekf = point_index >= static_cast<int>(ctx.visual_submap->contributes_to_ekf.size()) ||
+                                          ctx.visual_submap->contributes_to_ekf[point_index] != 0;
+          Eigen::Matrix<double, 6, 6> local_pose_information = Eigen::Matrix<double, 6, 6>::Zero();
+          Eigen::MatrixXd local_hessian;
+          Eigen::VectorXd local_gradient;
+          if (visual_map_manage_en)
+          {
+            local_hessian = Eigen::MatrixXd::Zero(state_dim, state_dim);
+            local_gradient = Eigen::VectorXd::Zero(state_dim);
+          }
+          double local_squared_error = 0.0;
+          int local_dof = 0;
+          auto accumulateObservation = [&](const Eigen::VectorXd &jacobian, double residual) {
+            if (visual_map_manage_en)
+            {
+              if (iteration == 0 && jacobian.size() >= 6)
+              {
+                const Eigen::Matrix<double, 6, 1> pose_jacobian = jacobian.head<6>();
+                local_pose_information.noalias() += pose_jacobian * pose_jacobian.transpose();
+              }
+              local_squared_error += residual * residual;
+              ++local_dof;
+            }
+            if (visual_map_manage_en)
+            {
+              local_hessian.noalias() += jacobian * jacobian.transpose();
+              local_gradient.noalias() += jacobian * residual;
+            }
+            else
+            {
+              hessian.noalias() += jacobian * jacobian.transpose();
+              gradient.noalias() += jacobian * residual;
+              ++measurement_count;
+            }
+            patch_error += residual * residual;
+          };
+          Feature *usage_reference = point_index < static_cast<int>(ctx.visual_submap->reference_features.size())
+                                         ? ctx.visual_submap->reference_features[point_index]
+                                         : nullptr;
           bool pose_patch_counted = false;
           auto maybeRecordPoseInfo = [&](const V2D &usage_cur_px,
                                          const Eigen::Matrix<double, 1, 3> &JdR_pose,
@@ -4995,10 +5443,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   if (allow_extrinsic_translation)
                     jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = J_photo_center.transpose();
                 }
-                hessian.noalias() += jacobian * jacobian.transpose();
-                gradient.noalias() += jacobian * residual;
-                patch_error += residual * residual;
-                ++measurement_count;
+                accumulateObservation(jacobian, residual);
               }
             }
             else
@@ -5061,10 +5506,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   if (allow_extrinsic_translation)
                     jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = Jimg_Jpi_R.transpose();
                 }
-                hessian.noalias() += jacobian * jacobian.transpose();
-                gradient.noalias() += jacobian * residual;
-                patch_error += residual * residual;
-                ++measurement_count;
+                accumulateObservation(jacobian, residual);
               }
             }
           }
@@ -5148,15 +5590,74 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   if (allow_extrinsic_translation)
                     jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = Jimg_Jpi.transpose();
                 }
-                hessian.noalias() += jacobian * jacobian.transpose();
-                gradient.noalias() += jacobian * residual;
-                patch_error += residual * residual;
-                ++measurement_count;
+                accumulateObservation(jacobian, residual);
               }
             }
           }
           ctx.visual_submap->errors[point_index] = patch_error;
-          error += patch_error;
+          if (!visual_map_manage_en)
+          {
+            error += patch_error;
+            continue;
+          }
+          double nis = std::numeric_limits<double>::quiet_NaN();
+          if (!visual_ref_nis_en)
+          {
+            // Photometric acceptance is used below; avoid the full-state NIS solve.
+          }
+          else if (iteration > 0 && point_index < static_cast<int>(ctx.visual_submap->observation_nis.size()))
+            nis = ctx.visual_submap->observation_nis[point_index];
+          else if (local_dof > 0 && std::isfinite(img_point_cov) && img_point_cov > 0.0)
+          {
+            const double inv_r = 1.0 / img_point_cov;
+            const Eigen::MatrixXd A = inv_r * local_hessian;
+            const Eigen::VectorXd b = inv_r * local_gradient;
+            const double c = inv_r * local_squared_error;
+            Eigen::MatrixXd P = state->cov;
+            if (usage_reference != nullptr && usage_reference->birth_pose_cov_.array().isFinite().all())
+            {
+              const SE3<double> T_cur_w(ctx.Rcw, ctx.Pcw);
+              const SE3<double> T_cur_ref = T_cur_w * usage_reference->T_f_w_.inverse();
+              const M3D R = T_cur_ref.rotationMatrix();
+              const V3D t = T_cur_ref.translation();
+              Eigen::Matrix<double, 6, 6> adjoint = Eigen::Matrix<double, 6, 6>::Zero();
+              M3D t_hat;
+              t_hat << SKEW_SYM_MATRX(t);
+              adjoint.block<3, 3>(0, 0) = R;
+              adjoint.block<3, 3>(3, 0) = t_hat * R;
+              adjoint.block<3, 3>(3, 3) = R;
+              P.block<6, 6>(0, 0) +=
+                  adjoint * usage_reference->birth_pose_cov_ * adjoint.transpose();
+            }
+            if (point->covariance_.array().isFinite().all())
+              P.block<3, 3>(3, 3) += point->covariance_;
+            P.diagonal().array() += 1.0e-12;
+            const Eigen::LDLT<Eigen::MatrixXd> p_ldlt(P);
+            if (p_ldlt.info() == Eigen::Success)
+            {
+              const Eigen::MatrixXd system =
+                  p_ldlt.solve(Eigen::MatrixXd::Identity(state_dim, state_dim)) + A;
+              const Eigen::LDLT<Eigen::MatrixXd> system_ldlt(system);
+              if (system_ldlt.info() == Eigen::Success)
+                nis = std::max(0.0, c - b.dot(system_ldlt.solve(b)));
+            }
+          }
+          if (iteration == 0 && point_index < static_cast<int>(ctx.visual_submap->pose_information.size()))
+          {
+            ctx.visual_submap->pose_information[point_index] = local_pose_information;
+            ctx.visual_submap->observation_dof[point_index] = local_dof;
+            ctx.visual_submap->observation_nis[point_index] = nis;
+          }
+          const bool nis_pass = !visual_map_manage_en || visual_map_manage_shadow_en || !visual_ref_nis_en ||
+                                (local_dof > 0 && std::isfinite(nis) &&
+                                 nis / static_cast<double>(local_dof) <= visual_ref_nis_max_per_dof);
+          if (contributes_to_ekf && nis_pass)
+          {
+            hessian.noalias() += local_hessian;
+            gradient.noalias() += local_gradient;
+            measurement_count += local_dof;
+            error += patch_error;
+          }
         }
       }
 
@@ -5357,6 +5858,7 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
       if (reason_index > VISUAL_GEOM_REJECT_NONE && reason_index < VISUAL_GEOM_REJECT_COUNT)
         ++geom_reject_counts[reason_index];
       return false;
+      }
     }
     ++geom_passed;
     return true;
@@ -5402,6 +5904,7 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
       pending.source_type = ctx.append_voxel_source_type[i];
       pending.source_index = ctx.append_voxel_source_index[i];
       pending.pt_var = pt_var;
+      pending.texture_score = ctx.scan_value[i];
       pending.px = raw_px;
       pending.bearing = ctx.cam->cam2world(raw_px);
       pending.T_f_w = ctx.new_frame->T_f_w_;
@@ -5427,6 +5930,7 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
     pending.source_type = ctx.append_voxel_source_type[i];
     pending.source_index = ctx.append_voxel_source_index[i];
     pending.pt_var = pt_var;
+    pending.texture_score = ctx.scan_value[i];
     pending.px = raw_px;
     pending.bearing = ctx.cam->cam2world(raw_px);
     pending.patch = std::move(patch);
@@ -5561,6 +6065,7 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
         pending.source_type = ctx.append_voxel_source_type[i];
         pending.source_index = ctx.append_voxel_source_index[i];
         pending.pt_var = pt_var;
+        pending.texture_score = ctx.scan_value[i];
         pending.px = pc;
         pending.bearing = ctx.cam->cam2world(pc);
         pending.T_f_w = ctx.new_frame->T_f_w_;
@@ -5574,6 +6079,7 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
       pending.source_type = ctx.append_voxel_source_type[i];
       pending.source_index = ctx.append_voxel_source_index[i];
       pending.pt_var = pt_var;
+      pending.texture_score = ctx.scan_value[i];
       pending.px = pc;
       pending.bearing = ctx.cam->cam2world(pc);
       pending.patch.resize(patch_size_total);
@@ -5603,7 +6109,524 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
   // printf("B2. : %.6lf \n", t_b2);
 }
 
-void VIOManager::materializePendingNewPointObservations(PerCameraData &ctx, const cv::Mat &img)
+std::vector<Feature *> VIOManager::selectManagedReferenceCandidates(const PerCameraData &ctx,
+                                                                    VisualPoint &point,
+                                                                    int max_candidates) const
+{
+  std::vector<Feature *> selected;
+  if (point.pending_delete_ || point.state_ == VisualPoint::State::RETIRED) return selected;
+  const int requested = std::max(1, max_candidates);
+  if (!visual_map_manage_en || !visual_ref_current_select_en)
+  {
+    Feature *legacy = point.referencePatch(ctx.camera_id, cross_camera_reference_en);
+    if (legacy != nullptr) selected.push_back(legacy);
+    else
+    {
+      Feature *closest = nullptr;
+      point.getCloseViewObs(ctx.new_frame->pos(), closest, V2D::Zero(),
+                            cross_camera_reference_en ? -1 : ctx.camera_id);
+      if (closest != nullptr) selected.push_back(closest);
+    }
+    return selected;
+  }
+
+  const bool allow_candidate = visual_point_seed_validation_en && point.state_ == VisualPoint::State::SEED;
+  const V3D current_direction = (ctx.new_frame->pos() - point.pos_).normalized();
+  std::vector<std::pair<double, Feature *>> ranked_validated;
+  std::vector<std::pair<double, Feature *>> ranked_candidate;
+  ranked_validated.reserve(point.obs_.size());
+  ranked_candidate.reserve(point.obs_.size());
+  for (Feature *feature : point.obs_)
+  {
+    if (feature == nullptr || feature->pending_delete_ || feature->ref_state_ == Feature::RefState::RETIRED) continue;
+    if (visual_map_manage_shadow_en && shadow_retired_ref_suggestions_.count(feature->ref_id_) != 0) continue;
+    if (!cross_camera_reference_en && feature->camera_id_ != ctx.camera_id) continue;
+    if (virtual_fisheye_patch_en && !feature->virtual_patch_valid_) continue;
+    V3D reference_direction = feature->view_direction_w_;
+    if (!reference_direction.array().isFinite().all() || reference_direction.norm() <= 1.0e-9)
+      reference_direction = feature->pos() - point.pos_;
+    if (!reference_direction.array().isFinite().all() || reference_direction.norm() <= 1.0e-9) continue;
+    reference_direction.normalize();
+    const double angle = std::acos(std::clamp(current_direction.dot(reference_direction), -1.0, 1.0));
+    if (feature->ref_state_ == Feature::RefState::VALIDATED)
+      ranked_validated.emplace_back(angle, feature);
+    else if (feature->ref_state_ == Feature::RefState::CANDIDATE)
+      ranked_candidate.emplace_back(angle, feature);
+  }
+  auto rank = [](auto &items) {
+    std::stable_sort(items.begin(), items.end(), [](const auto &lhs, const auto &rhs) {
+    if (lhs.first != rhs.first) return lhs.first < rhs.first;
+    return lhs.second->accepted_test_count_ > rhs.second->accepted_test_count_;
+    });
+  };
+  rank(ranked_validated);
+  rank(ranked_candidate);
+
+  std::vector<std::pair<double, Feature *>> ranked;
+  const double coverage_angle = visual_ref_coverage_angle_deg / kRadiansToDegrees;
+  const bool candidate_needed = allow_candidate || ranked_validated.empty() ||
+                                (!ranked_candidate.empty() &&
+                                 ranked_validated.front().first > coverage_angle &&
+                                 ranked_candidate.front().first < ranked_validated.front().first);
+  if (candidate_needed) ranked.insert(ranked.end(), ranked_candidate.begin(), ranked_candidate.end());
+  ranked.insert(ranked.end(), ranked_validated.begin(), ranked_validated.end());
+  for (const auto &item : ranked)
+  {
+    selected.push_back(item.second);
+    if (static_cast<int>(selected.size()) >= requested) break;
+  }
+  return selected;
+}
+
+bool VIOManager::shouldReferenceContributeToEkf(const VisualPoint &point,
+                                                const Feature &reference) const
+{
+  if (!visual_map_manage_en || visual_map_manage_shadow_en) return true;
+  if (point.pending_delete_ || reference.pending_delete_) return false;
+  if (point.state_ == VisualPoint::State::RETIRED || reference.ref_state_ == Feature::RefState::RETIRED) return false;
+  if (visual_point_seed_validation_en && point.state_ == VisualPoint::State::SEED) return false;
+  if (visual_ref_lifecycle_en && reference.ref_state_ != Feature::RefState::VALIDATED) return false;
+  return true;
+}
+
+void VIOManager::appendManagedSubmapMetadata(PerCameraData &ctx, VisualPoint &point,
+                                             Feature &reference)
+{
+  if (!visual_map_manage_en || ctx.visual_submap == nullptr) return;
+  ctx.visual_submap->contributes_to_ekf.push_back(
+      shouldReferenceContributeToEkf(point, reference) ? 1 : 0);
+  ctx.visual_submap->pose_information.push_back(Eigen::Matrix<double, 6, 6>::Zero());
+  ctx.visual_submap->observation_nis.push_back(std::numeric_limits<double>::quiet_NaN());
+  ctx.visual_submap->observation_dof.push_back(0);
+  point.last_visible_frame_ = ctx.new_frame != nullptr ? ctx.new_frame->id_ : frame_count;
+}
+
+void VIOManager::initializeManagedReference(Feature &feature, VisualPoint &point,
+                                             const PerCameraData &ctx,
+                                             bool initial_point_reference)
+{
+  (void)initial_point_reference;
+  if (!visual_map_manage_en) return;
+  feature.ref_id_ = next_visual_ref_id_++;
+  feature.birth_frame_id_ = ctx.new_frame != nullptr ? ctx.new_frame->id_ : frame_count;
+  feature.last_test_frame_id_ = -1;
+  feature.last_test_camera_id_ = -1;
+  feature.last_success_frame_id_ = -1;
+  feature.ref_state_ = visual_ref_lifecycle_en
+                           ? Feature::RefState::CANDIDATE
+                           : Feature::RefState::VALIDATED;
+  const V3D camera_w = feature.pos();
+  const V3D view = camera_w - point.pos_;
+  feature.view_range_ = view.norm();
+  feature.view_direction_w_ = feature.view_range_ > 1.0e-9 ? view / feature.view_range_ : V3D::Zero();
+  feature.birth_pose_cov_.setZero();
+  if (state != nullptr && state->cov.rows() >= 6 && state->cov.cols() >= 6)
+    feature.birth_pose_cov_ = state->cov.block<6, 6>(0, 0);
+}
+
+void VIOManager::queueReferenceRetirement(VisualPoint &point, Feature &feature)
+{
+  if (feature.pending_delete_) return;
+  if (visual_map_manage_shadow_en || !visual_map_retirement_apply_en)
+  {
+    if (shadow_retired_ref_suggestions_.insert(feature.ref_id_).second)
+      ++visual_map_manage_stats_.ref_retired;
+    return;
+  }
+  feature.ref_state_ = Feature::RefState::RETIRED;
+  feature.pending_delete_ = true;
+  ++visual_map_manage_stats_.ref_retired;
+  if (!visual_map_manage_shadow_en) retired_visual_refs_.emplace_back(&point, &feature);
+}
+
+void VIOManager::queuePointRetirement(VisualPoint &point)
+{
+  if (point.pending_delete_) return;
+  if (visual_map_manage_shadow_en || !visual_map_retirement_apply_en)
+  {
+    if (shadow_retired_point_suggestions_.insert(point.point_id_).second)
+      ++visual_map_manage_stats_.point_retired;
+    return;
+  }
+  point.state_ = VisualPoint::State::RETIRED;
+  point.pending_delete_ = true;
+  ++visual_map_manage_stats_.point_retired;
+  if (!visual_map_manage_shadow_en) retired_visual_points_.push_back(&point);
+}
+
+void VIOManager::flushVisualMapRetirements()
+{
+  if (!visual_map_manage_en || !visual_map_retirement_apply_en || visual_map_manage_shadow_en)
+  {
+    retired_visual_refs_.clear();
+    retired_visual_points_.clear();
+    return;
+  }
+
+  std::set<VisualPoint *> retiring_points(retired_visual_points_.begin(), retired_visual_points_.end());
+  if (!retiring_points.empty())
+  {
+    for (auto &voxel : feat_map)
+    {
+      if (voxel.second == nullptr) continue;
+      for (VisualPoint *point : voxel.second->voxel_points)
+      {
+        if (point != nullptr && point->challenger_of_ != nullptr &&
+            retiring_points.count(point->challenger_of_) != 0)
+          point->challenger_of_ = nullptr;
+      }
+    }
+  }
+  for (const auto &entry : retired_visual_refs_)
+  {
+    VisualPoint *point = entry.first;
+    Feature *feature = entry.second;
+    if (point == nullptr || feature == nullptr || retiring_points.count(point) != 0) continue;
+    point->deleteFeatureRef(feature);
+  }
+  retired_visual_refs_.clear();
+
+  for (VisualPoint *point : retired_visual_points_)
+  {
+    if (point == nullptr) continue;
+    const VOXEL_LOCATION key(point->map_voxel_x_, point->map_voxel_y_, point->map_voxel_z_);
+    auto found = feat_map.find(key);
+    if (found == feat_map.end() || found->second == nullptr ||
+        std::find(found->second->voxel_points.begin(), found->second->voxel_points.end(), point) ==
+            found->second->voxel_points.end())
+    {
+      found = std::find_if(feat_map.begin(), feat_map.end(), [&](const auto &entry) {
+        return entry.second != nullptr &&
+               std::find(entry.second->voxel_points.begin(), entry.second->voxel_points.end(), point) !=
+                   entry.second->voxel_points.end();
+      });
+    }
+    if (found != feat_map.end() && found->second != nullptr)
+    {
+      auto &points = found->second->voxel_points;
+      points.erase(std::remove(points.begin(), points.end(), point), points.end());
+      found->second->count = static_cast<int>(points.size());
+      if (points.empty())
+      {
+        delete found->second;
+        feat_map.erase(found);
+      }
+    }
+    if (runtime_support_dump_best_point_ == point) runtime_support_dump_best_point_ = nullptr;
+    delete point;
+  }
+  retired_visual_points_.clear();
+}
+
+void VIOManager::printVisualMapManageStats(int frame_id) const
+{
+  if (!visual_map_manage_en || !visual_map_manage_log_en) return;
+  printf("[ VIO Map Manage ] frame=%d mode=%s shadow=%d selected=%lld fallback=%lld/%lld seed=%lld/%lld ref_validated=%lld ref_retired=%lld footprint=%lld redundant=%lld information_admitted=%lld replacement=%lld point_retired=%lld\n",
+         frame_id, virtual_fisheye_patch_en ? "virtual" : "raw", visual_map_manage_shadow_en ? 1 : 0,
+         visual_map_manage_stats_.dynamic_selected, visual_map_manage_stats_.fallback_accepted,
+         visual_map_manage_stats_.fallback_attempted, visual_map_manage_stats_.seed_confirmed,
+         visual_map_manage_stats_.seed_tested, visual_map_manage_stats_.ref_validated,
+         visual_map_manage_stats_.ref_retired, visual_map_manage_stats_.footprint_compared,
+         visual_map_manage_stats_.redundant_rejected, visual_map_manage_stats_.information_admitted,
+         visual_map_manage_stats_.replacement_suggested,
+         visual_map_manage_stats_.point_retired);
+}
+
+void VIOManager::updateManagedObservationEvidence(PerCameraData &ctx)
+{
+  if (!visual_map_manage_en || ctx.visual_submap == nullptr) return;
+  const int count = std::min({static_cast<int>(ctx.visual_submap->voxel_points.size()),
+                              static_cast<int>(ctx.visual_submap->reference_features.size()),
+                              static_cast<int>(ctx.visual_submap->errors.size())});
+  for (int i = 0; i < count; ++i)
+  {
+    VisualPoint *point = ctx.visual_submap->voxel_points[i];
+    Feature *reference = ctx.visual_submap->reference_features[i];
+    if (point == nullptr || reference == nullptr || point->pending_delete_ || reference->pending_delete_) continue;
+    if (visual_map_manage_shadow_en &&
+        (shadow_retired_point_suggestions_.count(point->point_id_) != 0 ||
+         shadow_retired_ref_suggestions_.count(reference->ref_id_) != 0))
+      continue;
+    const int dof = i < static_cast<int>(ctx.visual_submap->observation_dof.size())
+                        ? ctx.visual_submap->observation_dof[i]
+                        : patch_size_total;
+    const double nis = i < static_cast<int>(ctx.visual_submap->observation_nis.size())
+                           ? ctx.visual_submap->observation_nis[i]
+                           : std::numeric_limits<double>::quiet_NaN();
+    const double normalized_nis = dof > 0 && std::isfinite(nis)
+                                      ? nis / static_cast<double>(dof)
+                                      : std::numeric_limits<double>::quiet_NaN();
+    const bool accepted = visual_ref_nis_en
+                              ? std::isfinite(normalized_nis) && normalized_nis <= visual_ref_nis_max_per_dof
+                              : std::isfinite(ctx.visual_submap->errors[i]) &&
+                                    ctx.visual_submap->errors[i] <= outlier_threshold * patch_size_total;
+
+    reference->last_test_frame_id_ = ctx.new_frame->id_;
+    reference->last_test_camera_id_ = ctx.camera_id;
+    reference->last_nis_ = nis;
+    if (std::isfinite(normalized_nis))
+      reference->nis_ema_ = reference->independent_test_count_ == 0
+                                ? normalized_nis
+                                : 0.9 * reference->nis_ema_ + 0.1 * normalized_nis;
+    ++reference->independent_test_count_;
+    ++point->independent_test_count_;
+    if (point->state_ == VisualPoint::State::SEED) ++visual_map_manage_stats_.seed_tested;
+
+    if (accepted)
+    {
+      reference->consecutive_reject_count_ = 0;
+      ++reference->accepted_test_count_;
+      ++point->accepted_test_count_;
+      reference->last_success_frame_id_ = ctx.new_frame->id_;
+      point->last_success_frame_ = ctx.new_frame->id_;
+      const V3D view = ctx.new_frame->pos() - point->pos_;
+      if (view.array().isFinite().all() && view.norm() > 1.0e-9)
+      {
+        const V3D direction = view.normalized();
+        bool represented = false;
+        const double sample_separation = 3.0 / kRadiansToDegrees;
+        for (const V3D &sample : point->view_samples_)
+        {
+          if (std::acos(std::clamp(direction.dot(sample), -1.0, 1.0)) <= sample_separation)
+          {
+            represented = true;
+            break;
+          }
+        }
+        if (!represented)
+        {
+          point->view_samples_.push_back(direction);
+          if (point->view_samples_.size() > 64) point->view_samples_.erase(point->view_samples_.begin());
+        }
+      }
+      if (i < static_cast<int>(ctx.visual_submap->pose_information.size()))
+      {
+        const Eigen::Matrix<double, 6, 6> &information = ctx.visual_submap->pose_information[i];
+        reference->mean_pose_information_ +=
+            (information - reference->mean_pose_information_) /
+            static_cast<double>(reference->accepted_test_count_);
+        point->accumulated_pose_information_ += information;
+        Eigen::Matrix<double, 6, 6> regularized = information;
+        regularized.diagonal().array() += 1.0e-9;
+        const double determinant = regularized.determinant();
+        if (std::isfinite(determinant) && determinant > 0.0)
+          reference->fisher_log_p_sum_ += std::log(determinant);
+      }
+    }
+    else
+    {
+      ++reference->consecutive_reject_count_;
+      ++reference->rejected_test_count_;
+      ++point->rejected_test_count_;
+    }
+
+    if (visual_ref_lifecycle_en && reference->ref_state_ == Feature::RefState::CANDIDATE &&
+        reference->independent_test_count_ >= visual_ref_validate_min_tests)
+    {
+      const double ratio = static_cast<double>(reference->accepted_test_count_) /
+                           std::max(1, reference->independent_test_count_);
+      if (ratio >= visual_ref_validate_min_ratio)
+      {
+        reference->ref_state_ = Feature::RefState::VALIDATED;
+        ++visual_map_manage_stats_.ref_validated;
+      }
+      else if (reference->rejected_test_count_ >= visual_ref_retire_reject_count)
+      {
+        queueReferenceRetirement(*point, *reference);
+      }
+    }
+    else if (visual_ref_lifecycle_en && reference->ref_state_ == Feature::RefState::VALIDATED &&
+             reference->consecutive_reject_count_ >= visual_ref_retire_reject_count)
+    {
+      queueReferenceRetirement(*point, *reference);
+    }
+
+    if (visual_point_seed_validation_en && point->state_ == VisualPoint::State::SEED &&
+        point->independent_test_count_ >= visual_point_seed_min_tests)
+    {
+      const double ratio = static_cast<double>(point->accepted_test_count_) /
+                           std::max(1, point->independent_test_count_);
+      if (ratio >= visual_point_seed_min_ratio)
+      {
+        point->state_ = VisualPoint::State::CONFIRMED;
+        ++visual_map_manage_stats_.seed_confirmed;
+        if (point->challenger_of_ != nullptr && !point->challenger_of_->pending_delete_)
+        {
+          VisualPoint *existing = point->challenger_of_;
+          if (existing->state_ == VisualPoint::State::SUSPECT)
+          {
+            queuePointRetirement(*existing);
+          }
+          else if (visual_point_information_prune_en)
+          {
+            Eigen::Matrix<double, 6, 6> old_info =
+                existing->accumulated_pose_information_ / std::max(1, existing->accepted_test_count_);
+            Eigen::Matrix<double, 6, 6> new_info =
+                point->accumulated_pose_information_ / std::max(1, point->accepted_test_count_);
+            Eigen::Matrix<double, 6, 6> all_info = old_info + new_info;
+            old_info.diagonal().array() += 1.0e-9;
+            new_info.diagonal().array() += 1.0e-9;
+            all_info.diagonal().array() += 1.0e-9;
+            auto retention = [&](const Eigen::Matrix<double, 6, 6> &subset) {
+              const Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(subset, all_info);
+              return solver.info() == Eigen::Success ? solver.eigenvalues().minCoeff() : 0.0;
+            };
+            const double old_retention = retention(old_info);
+            const double new_retention = retention(new_info);
+            if (new_retention >= visual_point_information_retain &&
+                new_retention > old_retention)
+              queuePointRetirement(*existing);
+            else if (old_retention >= visual_point_information_retain)
+              queuePointRetirement(*point);
+          }
+          point->challenger_of_ = nullptr;
+        }
+      }
+      else if (point->rejected_test_count_ >= visual_point_suspect_reject_count)
+      {
+        point->state_ = VisualPoint::State::SUSPECT;
+      }
+    }
+    else if (visual_ref_lifecycle_en && point->state_ == VisualPoint::State::CONFIRMED &&
+             point->rejected_test_count_ >= visual_point_suspect_reject_count &&
+             point->accepted_test_count_ * 2 < point->rejected_test_count_)
+    {
+      point->state_ = VisualPoint::State::SUSPECT;
+    }
+    bool has_usable_reference = point->hasUsableReference(0, true, false);
+    if (visual_map_manage_shadow_en && has_usable_reference)
+    {
+      has_usable_reference = false;
+      for (Feature *feature : point->obs_)
+      {
+        if (feature != nullptr && feature->ref_state_ == Feature::RefState::VALIDATED &&
+            !feature->pending_delete_ && shadow_retired_ref_suggestions_.count(feature->ref_id_) == 0)
+        {
+          has_usable_reference = true;
+          break;
+        }
+      }
+    }
+    if (point->state_ == VisualPoint::State::SUSPECT && !has_usable_reference)
+      queuePointRetirement(*point);
+  }
+}
+
+void VIOManager::recordManagedReferenceRejection(VisualPoint &point, Feature &reference,
+                                                 int frame_id, int camera_id)
+{
+  if (!visual_map_manage_en || reference.pending_delete_ || point.pending_delete_) return;
+  if (visual_map_manage_shadow_en &&
+      (shadow_retired_point_suggestions_.count(point.point_id_) != 0 ||
+       shadow_retired_ref_suggestions_.count(reference.ref_id_) != 0))
+    return;
+  if (reference.last_test_frame_id_ == frame_id && reference.last_test_camera_id_ == camera_id) return;
+  reference.last_test_frame_id_ = frame_id;
+  reference.last_test_camera_id_ = camera_id;
+  ++reference.independent_test_count_;
+  ++reference.rejected_test_count_;
+  ++reference.consecutive_reject_count_;
+  ++point.independent_test_count_;
+  ++point.rejected_test_count_;
+  if (point.state_ == VisualPoint::State::SEED) ++visual_map_manage_stats_.seed_tested;
+  if (visual_ref_lifecycle_en && reference.ref_state_ == Feature::RefState::CANDIDATE &&
+      reference.independent_test_count_ >= visual_ref_validate_min_tests &&
+      reference.rejected_test_count_ >= visual_ref_retire_reject_count)
+    queueReferenceRetirement(point, reference);
+  else if (visual_ref_lifecycle_en && reference.ref_state_ == Feature::RefState::VALIDATED &&
+           reference.consecutive_reject_count_ >= visual_ref_retire_reject_count)
+    queueReferenceRetirement(point, reference);
+  if (visual_ref_lifecycle_en && point.rejected_test_count_ >= visual_point_suspect_reject_count &&
+      point.accepted_test_count_ * 2 < point.rejected_test_count_)
+    point.state_ = VisualPoint::State::SUSPECT;
+}
+
+bool VIOManager::shouldCreateManagedReference(const PerCameraData &ctx,
+                                              const VisualPoint &point,
+                                              const V2D &current_px,
+                                              const Matrix2d &current_affine) const
+{
+  (void)current_px;
+  if (!visual_map_manage_en || !visual_ref_view_coverage_en) return true;
+  Eigen::JacobiSVD<Matrix2d> svd(current_affine);
+  const auto singular = svd.singularValues();
+  if (!singular.array().isFinite().all() || singular[1] <= 1.0e-9) return false;
+  if (singular[0] / singular[1] > visual_ref_max_anisotropy) return true;
+  const V3D current_direction = (ctx.new_frame->pos() - point.pos_).normalized();
+  const double threshold = visual_ref_coverage_angle_deg / kRadiansToDegrees;
+  for (Feature *feature : point.obs_)
+  {
+    if (feature == nullptr || feature->pending_delete_ || feature->ref_state_ == Feature::RefState::RETIRED) continue;
+    if (!cross_camera_reference_en && feature->camera_id_ != ctx.camera_id) continue;
+    V3D direction = feature->view_direction_w_;
+    if (!direction.array().isFinite().all() || direction.norm() <= 1.0e-9)
+      direction = feature->pos() - point.pos_;
+    if (!direction.array().isFinite().all() || direction.norm() <= 1.0e-9) continue;
+    direction.normalize();
+    const double angle = std::acos(std::clamp(current_direction.dot(direction), -1.0, 1.0));
+    if (angle <= threshold) return false;
+  }
+  return true;
+}
+
+void VIOManager::manageReferenceBank(VisualPoint &point)
+{
+  if (!visual_map_manage_en || !visual_ref_view_coverage_en ||
+      static_cast<int>(point.obs_.size()) <= visual_ref_max_count)
+    return;
+  std::vector<Feature *> refs;
+  for (Feature *feature : point.obs_)
+    if (feature != nullptr && !feature->pending_delete_ &&
+        feature->ref_state_ == Feature::RefState::VALIDATED)
+      refs.push_back(feature);
+  if (static_cast<int>(refs.size()) <= visual_ref_max_count) return;
+
+  const double threshold = visual_ref_coverage_angle_deg / kRadiansToDegrees;
+  std::set<Feature *> kept;
+  std::vector<V3D> samples = point.view_samples_;
+  if (samples.empty())
+    for (Feature *feature : refs) samples.push_back(feature->view_direction_w_);
+  std::vector<uint8_t> covered(samples.size(), 0);
+  while (static_cast<int>(kept.size()) < visual_ref_max_count)
+  {
+    Feature *best = nullptr;
+    int best_gain = -1;
+    int best_success = -1;
+    for (Feature *candidate : refs)
+    {
+      if (kept.count(candidate) != 0) continue;
+      int gain = 0;
+      for (size_t i = 0; i < samples.size(); ++i)
+      {
+        if (covered[i]) continue;
+        const double angle = std::acos(std::clamp(candidate->view_direction_w_.dot(
+            samples[i]), -1.0, 1.0));
+        if (angle <= threshold) ++gain;
+      }
+      if (gain > best_gain || (gain == best_gain && candidate->accepted_test_count_ > best_success))
+      {
+        best = candidate;
+        best_gain = gain;
+        best_success = candidate->accepted_test_count_;
+      }
+    }
+    if (best == nullptr) break;
+    kept.insert(best);
+    for (size_t i = 0; i < samples.size(); ++i)
+    {
+      const double angle = std::acos(std::clamp(best->view_direction_w_.dot(
+          samples[i]), -1.0, 1.0));
+      if (angle <= threshold) covered[i] = 1;
+    }
+    if (std::all_of(covered.begin(), covered.end(), [](uint8_t value) { return value != 0; })) break;
+  }
+  for (Feature *feature : refs)
+    if (kept.count(feature) == 0) queueReferenceRetirement(point, *feature);
+}
+
+void VIOManager::materializePendingNewPointObservations(
+    PerCameraData &ctx, const cv::Mat &img,
+    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
   if (!visual_ref_post_ekf_build_en || ctx.pending_new_points.empty()) return;
 
@@ -5673,6 +6696,32 @@ void VIOManager::materializePendingNewPointObservations(PerCameraData &ctx, cons
       pending.img = img;
     }
 
+    if (visual_map_manage_en && visual_point_footprint_redundancy_en)
+    {
+      const VoxelPlane *plane = nullptr;
+      pending.surface_valid = associateVisualPointSurface(
+          pending.pt_var.point_w, plane_map, pending.surface_voxel_x,
+          pending.surface_voxel_y, pending.surface_voxel_z, plane);
+      if (pending.surface_valid && plane != nullptr)
+      {
+        pending.surface_plane_id = plane->id_;
+        pending.surface_revision = plane->revision_;
+        V3D surface_normal = plane->normal_.normalized();
+        Eigen::Matrix<double, 1, 6> J_nq;
+        J_nq.block<1, 3>(0, 0) = pending.pt_var.point_w - plane->center_;
+        J_nq.block<1, 3>(0, 3) = -surface_normal;
+        const double sigma = (J_nq * plane->plane_var_ * J_nq.transpose())(0, 0) +
+                             surface_normal.dot(pending.pt_var.var * surface_normal);
+        const double distance = std::fabs(surface_normal.dot(pending.pt_var.point_w - plane->center_));
+        pending.geometry_chi2 = sigma > visual_geom_filter_min_sigma
+                                    ? distance * distance / sigma
+                                    : std::numeric_limits<double>::infinity();
+        pending.footprint_valid = computeManagedFootprint(
+            ctx, pending.T_f_w, pending.pt_var.point_w, pending.pt_var.normal,
+            nullptr, *plane, pending.footprint_corners_w);
+      }
+    }
+
     materialized.push_back(std::move(pending));
   }
 
@@ -5685,15 +6734,91 @@ void VIOManager::materializePendingNewPointObservations(PerCameraData &ctx, cons
   }
 }
 
-void VIOManager::commitPendingNewPoints()
+void VIOManager::commitPendingNewPoints(
+    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
   std::unordered_map<int, VisualPoint *> created_from_pg;
   std::vector<VisualPoint *> created_points;
+  struct CreatedPendingSurfacePoint
+  {
+    VisualPoint *point = nullptr;
+    int plane_id = -1;
+    std::array<V3D, 4> footprint;
+  };
+  std::vector<CreatedPendingSurfacePoint> created_from_surface;
   for (PerCameraData &ctx : cameras_)
   {
     for (PendingNewPointObservation &pending : ctx.pending_new_points)
     {
       VisualPoint *point = nullptr;
+      if (visual_map_manage_en && visual_point_footprint_redundancy_en && !pending.surface_valid)
+      {
+        const VoxelPlane *plane = nullptr;
+        pending.surface_valid = associateVisualPointSurface(
+            pending.pt_var.point_w, plane_map, pending.surface_voxel_x,
+            pending.surface_voxel_y, pending.surface_voxel_z, plane);
+        if (pending.surface_valid && plane != nullptr)
+        {
+          pending.surface_plane_id = plane->id_;
+          pending.surface_revision = plane->revision_;
+          V3D surface_normal = plane->normal_.normalized();
+          Eigen::Matrix<double, 1, 6> J_nq;
+          J_nq.block<1, 3>(0, 0) = pending.pt_var.point_w - plane->center_;
+          J_nq.block<1, 3>(0, 3) = -surface_normal;
+          const double sigma = (J_nq * plane->plane_var_ * J_nq.transpose())(0, 0) +
+                               surface_normal.dot(pending.pt_var.var * surface_normal);
+          const double distance = std::fabs(surface_normal.dot(pending.pt_var.point_w - plane->center_));
+          pending.geometry_chi2 = sigma > visual_geom_filter_min_sigma
+                                      ? distance * distance / sigma
+                                      : std::numeric_limits<double>::infinity();
+          pending.footprint_valid = computeManagedFootprint(
+              ctx, pending.T_f_w, pending.pt_var.point_w, pending.pt_var.normal,
+              nullptr, *plane, pending.footprint_corners_w);
+        }
+      }
+      VisualPoint *redundant_point = nullptr;
+      double redundant_iou = 0.0;
+      if (visual_map_manage_en && visual_point_footprint_redundancy_en)
+      {
+        redundant_point = findRedundantVisualPoint(pending, plane_map, redundant_iou);
+        const bool admit_redundant = redundant_point != nullptr &&
+                                      shouldReplaceRedundantPoint(pending, *redundant_point);
+        if (redundant_point != nullptr && !admit_redundant)
+        {
+          ++visual_map_manage_stats_.redundant_rejected;
+          if (!visual_map_manage_shadow_en) continue;
+        }
+        else if (admit_redundant && visual_point_information_prune_en)
+        {
+          ++visual_map_manage_stats_.information_admitted;
+        }
+      }
+      if (visual_map_manage_en && !visual_map_manage_shadow_en &&
+          pending.source_type == SOURCE_RAYCAST_PLANE &&
+          pending.surface_valid && pending.footprint_valid)
+      {
+        const auto surface = plane_map.find(VOXEL_LOCATION(pending.surface_voxel_x,
+                                                           pending.surface_voxel_y,
+                                                           pending.surface_voxel_z));
+        if (surface != plane_map.end() && surface->second != nullptr)
+        {
+          VoxelOctoTree *octo = surface->second->find_correspond(pending.pt_var.point_w);
+          if (octo != nullptr && octo->plane_ptr_ != nullptr && octo->plane_ptr_->is_plane_)
+          {
+            for (const CreatedPendingSurfacePoint &created : created_from_surface)
+            {
+              if (created.point == nullptr || created.plane_id != pending.surface_plane_id) continue;
+              const double iou = managedFootprintIoU(pending.footprint_corners_w,
+                                                     created.footprint, *octo->plane_ptr_);
+              if (iou >= visual_point_footprint_iou)
+              {
+                point = created.point;
+                break;
+              }
+            }
+          }
+        }
+      }
       if (pending.source_type == SOURCE_PG && pending.source_index >= 0)
       {
         const auto found = created_from_pg.find(pending.source_index);
@@ -5709,9 +6834,33 @@ void VIOManager::commitPendingNewPoints()
         const V3D normal_c = pending.T_f_w.rotationMatrix() * pending.pt_var.normal;
         point->normal_ = dir.normalized().dot(normal_c) < 0.0 ? -pending.pt_var.normal : pending.pt_var.normal;
         point->previous_normal_ = point->normal_;
+        if (visual_map_manage_en)
+        {
+          point->point_id_ = next_visual_point_id_++;
+          point->state_ = visual_point_seed_validation_en
+                              ? VisualPoint::State::SEED
+                              : VisualPoint::State::CONFIRMED;
+          point->surface_voxel_x_ = pending.surface_voxel_x;
+          point->surface_voxel_y_ = pending.surface_voxel_y;
+          point->surface_voxel_z_ = pending.surface_voxel_z;
+          point->surface_plane_id_ = pending.surface_plane_id;
+          point->surface_revision_ = pending.surface_revision;
+          point->surface_valid_ = pending.surface_valid;
+          point->geometry_chi2_ = pending.geometry_chi2;
+          if (!visual_map_manage_shadow_en && visual_point_replacement_en &&
+              redundant_point != nullptr &&
+              shouldReplaceRedundantPoint(pending, *redundant_point))
+          {
+            point->challenger_of_ = redundant_point;
+            ++visual_map_manage_stats_.replacement_suggested;
+          }
+        }
         created_points.push_back(point);
         if (pending.source_type == SOURCE_PG && pending.source_index >= 0)
           created_from_pg[pending.source_index] = point;
+        if (pending.surface_valid && pending.footprint_valid)
+          created_from_surface.push_back({point, pending.surface_plane_id,
+                                          pending.footprint_corners_w});
       }
 
       float *patch = new float[pending.patch.size()];
@@ -5735,6 +6884,14 @@ void VIOManager::commitPendingNewPoints()
       feature->R_v_from_c_ = pending.R_v_from_c;
       feature->R_c_from_v_ = pending.R_c_from_v;
       feature->virtual_patch_valid_ = pending.virtual_patch_valid;
+      if (visual_map_manage_en)
+      {
+        initializeManagedReference(*feature, *point, ctx, true);
+        feature->surface_plane_id_ = pending.surface_plane_id;
+        feature->surface_revision_ = pending.surface_revision;
+        feature->footprint_valid_ = pending.footprint_valid;
+        feature->footprint_corners_w_ = pending.footprint_corners_w;
+      }
       point->addFrameRef(feature);
       if (cross_camera_reference_en)
       {
@@ -5764,8 +6921,8 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
   for (int i = 0; i < ctx.total_points; ++i)
   {
     VisualPoint *pt = ctx.visual_submap->voxel_points[i];
-    if (pt == nullptr) continue;
-    if (pt->is_converged_)
+    if (pt == nullptr || pt->pending_delete_) continue;
+    if (pt->is_converged_ && (!visual_map_manage_en || visual_map_manage_shadow_en))
     {
       pt->deleteNonRefPatchFeatures();
       continue;
@@ -5786,7 +6943,15 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
       if (delta_p > 0.5 || delta_theta > 0.3 || (raw_px - last_feature->px_).norm() > 40.0) add_flag = true;
     }
 
-    if (pt->obs_.size() >= 30)
+    if (visual_map_manage_en && visual_ref_view_coverage_en && !visual_map_manage_shadow_en)
+    {
+      const Matrix2d affine = i < static_cast<int>(ctx.visual_submap->warp_affines.size())
+                                  ? ctx.visual_submap->warp_affines[i]
+                                  : Matrix2d::Identity();
+      add_flag = shouldCreateManagedReference(ctx, *pt, raw_px, affine);
+    }
+
+    if ((!visual_map_manage_en || visual_map_manage_shadow_en) && pt->obs_.size() >= 30)
     {
       Feature *ref_ftr;
       pt->findMinScoreFeature(ctx.new_frame->pos(), ref_ftr);
@@ -5826,7 +6991,9 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
     ftr_new->R_v_from_c_ = R_v_from_c;
     ftr_new->R_c_from_v_ = R_c_from_v;
     ftr_new->virtual_patch_valid_ = true;
+    initializeManagedReference(*ftr_new, *pt, ctx, false);
     pt->addFrameRef(ftr_new);
+    manageReferenceBank(*pt);
     ctx.update_flag[i] = 1;
     ++update_num;
   }
@@ -5847,8 +7014,8 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
   for (int i = 0; i < ctx.total_points; i++)
   {
     VisualPoint *pt = ctx.visual_submap->voxel_points[i];
-    if (pt == nullptr) continue;
-    if (pt->is_converged_)
+    if (pt == nullptr || pt->pending_delete_) continue;
+    if (pt->is_converged_ && (!visual_map_manage_en || visual_map_manage_shadow_en))
     { 
       pt->deleteNonRefPatchFeatures();
       continue;
@@ -5857,8 +7024,7 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
     V2D pc(ctx.new_frame->w2c(pt->pos_));
     bool add_flag = false;
     
-    float *patch_temp = new float[patch_size_total];
-    getImagePatch(ctx, img, pc, patch_temp, 0);
+    float *patch_temp = nullptr;
     // TODO: condition: distance and view_angle
     // Step 1: time
     Feature *last_feature = nullptr;
@@ -5877,8 +7043,16 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
       if (delta_p > 0.5 || delta_theta > 0.3 || (pc - last_feature->px_).norm() > 40) add_flag = true;
     }
 
+    if (visual_map_manage_en && visual_ref_view_coverage_en && !visual_map_manage_shadow_en)
+    {
+      const Matrix2d affine = i < static_cast<int>(ctx.visual_submap->warp_affines.size())
+                                  ? ctx.visual_submap->warp_affines[i]
+                                  : Matrix2d::Identity();
+      add_flag = shouldCreateManagedReference(ctx, *pt, pc, affine);
+    }
+
     // Maintain the size of 3D point observation features.
-    if (pt->obs_.size() >= 30)
+    if ((!visual_map_manage_en || visual_map_manage_shadow_en) && pt->obs_.size() >= 30)
     {
       Feature *ref_ftr;
       pt->findMinScoreFeature(ctx.new_frame->pos(), ref_ftr);
@@ -5887,6 +7061,8 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
     }
     if (add_flag)
     {
+      patch_temp = new float[patch_size_total];
+      getImagePatch(ctx, img, pc, patch_temp, 0);
       update_num += 1;
       ctx.update_flag[i] = 1;
       Vector3d f = ctx.cam->cam2world(pc);
@@ -5895,7 +7071,9 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
       ftr_new->img_ = img;
       ftr_new->id_ = ctx.new_frame->id_;
       ftr_new->inv_expo_time_ = state->inv_expo_time[ctx.camera_id];
+      initializeManagedReference(*ftr_new, *pt, ctx, false);
       pt->addFrameRef(ftr_new);
+      manageReferenceBank(*pt);
     }
     else
     {
@@ -5913,7 +7091,79 @@ void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VO
   {
     VisualPoint *pt = ctx.visual_submap->voxel_points[i];
 
-    if (!pt->is_normal_initialized_) continue;
+    if (pt == nullptr || pt->pending_delete_ || !pt->is_normal_initialized_) continue;
+    if (visual_map_manage_en)
+    {
+      if (pt->point_id_ == 0) pt->point_id_ = next_visual_point_id_++;
+      pt->map_voxel_x_ = static_cast<int64_t>(std::floor(pt->pos_[0] / 0.5));
+      pt->map_voxel_y_ = static_cast<int64_t>(std::floor(pt->pos_[1] / 0.5));
+      pt->map_voxel_z_ = static_cast<int64_t>(std::floor(pt->pos_[2] / 0.5));
+      for (Feature *feature : pt->obs_)
+      {
+        if (feature == nullptr || feature->pending_delete_) continue;
+        if (feature->ref_id_ == 0)
+        {
+          feature->ref_id_ = next_visual_ref_id_++;
+          feature->birth_frame_id_ = feature->id_;
+          feature->ref_state_ = Feature::RefState::VALIDATED;
+        }
+        if (!feature->view_direction_w_.array().isFinite().all() ||
+            feature->view_direction_w_.norm() <= 1.0e-9)
+        {
+          const V3D view = feature->pos() - pt->pos_;
+          feature->view_range_ = view.norm();
+          feature->view_direction_w_ = feature->view_range_ > 1.0e-9
+                                           ? view / feature->view_range_
+                                           : V3D::Zero();
+        }
+      }
+      const VoxelPlane *plane = nullptr;
+      int64_t voxel_x = 0, voxel_y = 0, voxel_z = 0;
+      const bool associated = visual_point_footprint_redundancy_en &&
+                              associateVisualPointSurface(pt->pos_, plane_map,
+                                                          voxel_x, voxel_y, voxel_z, plane);
+      pt->surface_valid_ = associated;
+      if (associated && plane != nullptr)
+      {
+        pt->surface_voxel_x_ = voxel_x;
+        pt->surface_voxel_y_ = voxel_y;
+        pt->surface_voxel_z_ = voxel_z;
+        pt->surface_plane_id_ = plane->id_;
+        pt->surface_revision_ = plane->revision_;
+        V3D normal = plane->normal_.normalized();
+        if (pt->normal_.dot(normal) < 0.0) normal = -normal;
+        if (!visual_map_manage_shadow_en) pt->normal_ = normal;
+        Eigen::Matrix<double, 1, 6> J_nq;
+        J_nq.block<1, 3>(0, 0) = pt->pos_ - plane->center_;
+        J_nq.block<1, 3>(0, 3) = -normal;
+        const double sigma = (J_nq * plane->plane_var_ * J_nq.transpose())(0, 0) +
+                             normal.dot(pt->covariance_ * normal);
+        const double distance = std::fabs(normal.dot(pt->pos_ - plane->center_));
+        pt->geometry_chi2_ = sigma > visual_geom_filter_min_sigma
+                                 ? distance * distance / sigma
+                                 : std::numeric_limits<double>::infinity();
+        if (visual_point_replacement_en &&
+            std::isfinite(visual_geom_filter_max_chi2) && visual_geom_filter_max_chi2 > 0.0 &&
+            pt->geometry_chi2_ > visual_geom_filter_max_chi2 && !visual_map_manage_shadow_en)
+          pt->state_ = VisualPoint::State::SUSPECT;
+
+        for (Feature *feature : pt->obs_)
+        {
+          if (feature == nullptr || feature->pending_delete_) continue;
+          if (feature->surface_plane_id_ == plane->id_ &&
+              feature->surface_revision_ == plane->revision_ && feature->footprint_valid_)
+            continue;
+          if (feature->camera_id_ < 0 || feature->camera_id_ >= numCameras()) continue;
+          const PerCameraData &ref_ctx = cameras_[feature->camera_id_];
+          feature->footprint_valid_ = computeManagedFootprint(
+              ref_ctx, feature->T_f_w_, pt->pos_, normal, feature,
+              *plane, feature->footprint_corners_w_);
+          feature->surface_plane_id_ = plane->id_;
+          feature->surface_revision_ = plane->revision_;
+        }
+      }
+      manageReferenceBank(*pt);
+    }
     if (pt->is_converged_) continue;
     if (pt->obs_.size() <= 5) continue;
     if (ctx.update_flag[i] == 0) continue;
@@ -7594,6 +8844,7 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     //        ctx.camera_id, mf.frame_id, image.cols, image.rows, image.type(), ctx.camera_namespace.c_str());
     // fflush(stdout);
   }
+  flushVisualMapRetirements();
   const double frame_setup_end = omp_get_wtime();
 
   for (PerCameraData &ctx : cameras_)
@@ -7620,10 +8871,13 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   // fflush(stdout);
   const double ekf_end = omp_get_wtime();
 
+  if (visual_map_manage_en)
+    for (PerCameraData &ctx : cameras_) updateManagedObservationEvidence(ctx);
+
   if (visual_ref_post_ekf_build_en)
   {
     for (PerCameraData &ctx : cameras_)
-      materializePendingNewPointObservations(ctx, ctx.new_frame->img_);
+      materializePendingNewPointObservations(ctx, ctx.new_frame->img_, plane_map);
   }
 
   if (ref_patch_dump_en && !cameras_.empty())
@@ -7649,7 +8903,7 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   const double map_update_end = omp_get_wtime();
   // printf("[ VIO Debug ] commitPendingNewPoints begin frame=%d\n", mf.frame_id);
   // fflush(stdout);
-  commitPendingNewPoints();
+  commitPendingNewPoints(plane_map);
   // printf("[ VIO Debug ] commitPendingNewPoints end frame=%d feat_map=%zu\n", mf.frame_id, feat_map.size());
   // fflush(stdout);
   const double commit_end = omp_get_wtime();
@@ -7664,6 +8918,38 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     plotTrackedPoints(ctx);
     if (plot_flag) projectPatchFromRefToCur(ctx, plane_map);
   }
+  if (visual_map_manage_en && mf.frame_id % 20 == 0)
+  {
+    for (auto &voxel : feat_map)
+    {
+      if (voxel.second == nullptr) continue;
+      for (VisualPoint *point : voxel.second->voxel_points)
+      {
+        if (point == nullptr || point->pending_delete_) continue;
+        if (point->state_ == VisualPoint::State::SUSPECT &&
+            point->last_success_frame_ >= 0 &&
+            mf.frame_id - point->last_success_frame_ >= visual_point_stale_frames)
+        {
+          bool has_usable_reference = point->hasUsableReference(0, true, false);
+          if (visual_map_manage_shadow_en && has_usable_reference)
+          {
+            has_usable_reference = false;
+            for (Feature *feature : point->obs_)
+            {
+              if (feature != nullptr && feature->ref_state_ == Feature::RefState::VALIDATED &&
+                  !feature->pending_delete_ && shadow_retired_ref_suggestions_.count(feature->ref_id_) == 0)
+              {
+                has_usable_reference = true;
+                break;
+              }
+            }
+          }
+          if (!has_usable_reference) queuePointRetirement(*point);
+        }
+      }
+    }
+  }
+  printVisualMapManageStats(mf.frame_id);
   if (colmap_output_en && numCameras() == 1) dumpDataForColmap();
   const double reference_end = omp_get_wtime();
   ++frame_count;

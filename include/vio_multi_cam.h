@@ -89,6 +89,10 @@ struct SubSparseMap
   vector<double> inv_expo_list;
   vector<pointWithVar> add_from_voxel_map;
   vector<VirtualTrackPatch> virtual_track_patches;
+  vector<uint8_t> contributes_to_ekf;
+  vector<Eigen::Matrix<double, 6, 6>, Eigen::aligned_allocator<Eigen::Matrix<double, 6, 6>>> pose_information;
+  vector<double> observation_nis;
+  vector<int> observation_dof;
 
   SubSparseMap()
   {
@@ -102,6 +106,10 @@ struct SubSparseMap
     inv_expo_list.reserve(SIZE_LARGE);
     add_from_voxel_map.reserve(SIZE_SMALL);
     virtual_track_patches.reserve(SIZE_LARGE);
+    contributes_to_ekf.reserve(SIZE_LARGE);
+    pose_information.reserve(SIZE_LARGE);
+    observation_nis.reserve(SIZE_LARGE);
+    observation_dof.reserve(SIZE_LARGE);
   };
 
   void reset()
@@ -116,6 +124,10 @@ struct SubSparseMap
     inv_expo_list.clear();
     add_from_voxel_map.clear();
     virtual_track_patches.clear();
+    contributes_to_ekf.clear();
+    pose_information.clear();
+    observation_nis.clear();
+    observation_dof.clear();
   }
 };
 
@@ -194,6 +206,16 @@ struct PendingNewPointObservation
   bool virtual_patch_valid = false;
   int level = 0;
   double inv_expo_time = 1.0;
+  float texture_score = 0.0f;
+  int64_t surface_voxel_x = 0;
+  int64_t surface_voxel_y = 0;
+  int64_t surface_voxel_z = 0;
+  int surface_plane_id = -1;
+  uint64_t surface_revision = 0;
+  bool surface_valid = false;
+  double geometry_chi2 = 0.0;
+  std::array<V3D, 4> footprint_corners_w;
+  bool footprint_valid = false;
 };
 
 struct FixedTemplateGradientCache
@@ -298,6 +320,19 @@ public:
   bool virtual_sparse_patch_en = false;
   bool virtual_s2_optimize_en = false;
   bool visual_ref_post_ekf_build_en = false;
+  bool visual_map_manage_en = false;
+  bool visual_map_manage_log_en = true;
+  bool visual_map_manage_shadow_en = false;
+  bool visual_ref_current_select_en = true;
+  bool visual_ref_fallback_en = true;
+  bool visual_ref_lifecycle_en = true;
+  bool visual_ref_view_coverage_en = true;
+  bool visual_ref_nis_en = true;
+  bool visual_point_seed_validation_en = true;
+  bool visual_point_footprint_redundancy_en = true;
+  bool visual_point_information_prune_en = true;
+  bool visual_point_replacement_en = true;
+  bool visual_map_retirement_apply_en = true;
   bool raw_camera_model_jacobian_en = false;
   bool cross_camera_reference_en = false;
   bool online_extrinsic_en = false;
@@ -341,6 +376,20 @@ public:
   double visual_geom_filter_min_sigma = 1.0e-12;
   double visual_geom_filter_max_point_cov_trace = -1.0;
   double visual_geom_filter_max_normal_cov = -1.0;
+  int visual_ref_max_candidates = 2;
+  int visual_ref_validate_min_tests = 3;
+  double visual_ref_validate_min_ratio = 0.67;
+  int visual_ref_retire_reject_count = 5;
+  int visual_ref_max_count = 8;
+  double visual_ref_coverage_angle_deg = 12.0;
+  double visual_ref_max_anisotropy = 4.0;
+  double visual_ref_nis_max_per_dof = 3.0;
+  int visual_point_seed_min_tests = 3;
+  double visual_point_seed_min_ratio = 0.67;
+  double visual_point_footprint_iou = 0.60;
+  double visual_point_information_retain = 0.90;
+  int visual_point_suspect_reject_count = 8;
+  int visual_point_stale_frames = 200;
   bool draw_rejected_points_en = false;
   bool usage_stats_en = false;
   int usage_stats_window = 100;
@@ -362,6 +411,28 @@ public:
   double virtual_ref_support_materialize_time_ = 0.0;
   std::vector<V3F> virtual_support_ray_lut_;
   std::vector<V2F> core_patch_offsets_;
+  uint64_t next_visual_point_id_ = 1;
+  uint64_t next_visual_ref_id_ = 1;
+  std::vector<VisualPoint *> retired_visual_points_;
+  std::vector<std::pair<VisualPoint *, Feature *>> retired_visual_refs_;
+  std::set<uint64_t> shadow_retired_point_suggestions_;
+  std::set<uint64_t> shadow_retired_ref_suggestions_;
+
+  struct VisualMapManageStats
+  {
+    long long dynamic_selected = 0;
+    long long fallback_attempted = 0;
+    long long fallback_accepted = 0;
+    long long seed_tested = 0;
+    long long seed_confirmed = 0;
+    long long ref_validated = 0;
+    long long ref_retired = 0;
+    long long footprint_compared = 0;
+    long long redundant_rejected = 0;
+    long long information_admitted = 0;
+    long long replacement_suggested = 0;
+    long long point_retired = 0;
+  } visual_map_manage_stats_;
 
   struct RefPatchDumpProbeState
   {
@@ -713,8 +784,39 @@ public:
   void updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img);
   void updateStateVirtualS2(cv::Mat img, int level);
   void insertPointIntoVoxelMap(VisualPoint *pt_new);
-  void materializePendingNewPointObservations(PerCameraData &ctx, const cv::Mat &img);
-  void commitPendingNewPoints();
+  void materializePendingNewPointObservations(PerCameraData &ctx, const cv::Mat &img,
+                                               const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+  void commitPendingNewPoints(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+  void validateVisualMapManageConfig() const;
+  std::vector<Feature *> selectManagedReferenceCandidates(const PerCameraData &ctx, VisualPoint &point,
+                                                           int max_candidates) const;
+  bool shouldReferenceContributeToEkf(const VisualPoint &point, const Feature &reference) const;
+  void appendManagedSubmapMetadata(PerCameraData &ctx, VisualPoint &point, Feature &reference);
+  void updateManagedObservationEvidence(PerCameraData &ctx);
+  void recordManagedReferenceRejection(VisualPoint &point, Feature &reference,
+                                       int frame_id, int camera_id);
+  bool shouldCreateManagedReference(const PerCameraData &ctx, const VisualPoint &point,
+                                    const V2D &current_px, const Matrix2d &current_affine) const;
+  void initializeManagedReference(Feature &feature, VisualPoint &point, const PerCameraData &ctx,
+                                  bool initial_point_reference);
+  bool associateVisualPointSurface(const V3D &point_w,
+                                   const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+                                   int64_t &voxel_x, int64_t &voxel_y, int64_t &voxel_z,
+                                   const VoxelPlane *&plane) const;
+  bool computeManagedFootprint(const PerCameraData &ctx, const SE3<double> &T_c_w, const V3D &point_w,
+                               const V3D &normal_w, const Feature *feature, const VoxelPlane &plane,
+                               std::array<V3D, 4> &corners_w) const;
+  double managedFootprintIoU(const std::array<V3D, 4> &a, const std::array<V3D, 4> &b,
+                             const VoxelPlane &plane) const;
+  VisualPoint *findRedundantVisualPoint(const PendingNewPointObservation &pending,
+                                        const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+                                        double &best_iou);
+  bool shouldReplaceRedundantPoint(const PendingNewPointObservation &pending, const VisualPoint &existing) const;
+  void manageReferenceBank(VisualPoint &point);
+  void queueReferenceRetirement(VisualPoint &point, Feature &feature);
+  void queuePointRetirement(VisualPoint &point);
+  void flushVisualMapRetirements();
+  void printVisualMapManageStats(int frame_id) const;
   void plotTrackedPoints(PerCameraData &ctx);
   void updateFrameState(PerCameraData &ctx, const StatesGroup &state_value);
   void projectPatchFromRefToCur(PerCameraData &ctx, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);

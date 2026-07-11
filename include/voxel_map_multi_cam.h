@@ -83,6 +83,7 @@ typedef struct VoxelPlane
   bool is_plane_ = false;
   bool is_init_ = false;
   int id_ = 0;
+  uint64_t revision_ = 0;
   bool is_update_ = false;
   VoxelPlane()
   {

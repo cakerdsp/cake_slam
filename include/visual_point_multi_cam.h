@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #define LIVO_POINT_MULTI_CAM_H_
 
 #include <boost/noncopyable.hpp>
+#include <cstdint>
 #include "common_lib_multi_cam.h"
 #include "frame_multi_cam.h"
 
@@ -24,6 +25,14 @@ class VisualPoint : boost::noncopyable
 {
 public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+  enum class State
+  {
+    SEED = 0,
+    CONFIRMED,
+    SUSPECT,
+    RETIRED
+  };
 
   Vector3d pos_;                //!< 3d pos of the point in the world coordinate frame.
   Vector3d normal_;             //!< Surface normal at point.
@@ -39,12 +48,34 @@ public:
   std::vector<uint8_t> has_ref_patch_by_camera_;
   int runtime_support_track_count_ = 0;
   int runtime_support_dump_id_ = -1;
+  State state_;
+  uint64_t point_id_;
+  int64_t map_voxel_x_;
+  int64_t map_voxel_y_;
+  int64_t map_voxel_z_;
+  int64_t surface_voxel_x_;
+  int64_t surface_voxel_y_;
+  int64_t surface_voxel_z_;
+  int surface_plane_id_;
+  uint64_t surface_revision_;
+  bool surface_valid_;
+  double geometry_chi2_;
+  Eigen::Matrix<double, 6, 6> accumulated_pose_information_;
+  std::vector<Vector3d> view_samples_;
+  int last_visible_frame_;
+  int last_success_frame_;
+  int independent_test_count_;
+  int accepted_test_count_;
+  int rejected_test_count_;
+  bool pending_delete_;
+  VisualPoint *challenger_of_;
 
   VisualPoint(const Vector3d &pos);
   ~VisualPoint();
   void findMinScoreFeature(const Vector3d &framepos, Feature *&ftr) const;
   void ensureCameraCount(int num_cameras);
   Feature *referencePatch(int camera_id, bool cross_camera_reference) const;
+  bool hasUsableReference(int camera_id, bool cross_camera_reference, bool allow_candidate) const;
   void deleteNonRefPatchFeatures();
   void deleteFeatureRef(Feature *ftr);
   void addFrameRef(Feature *ftr);

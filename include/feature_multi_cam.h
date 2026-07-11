@@ -14,6 +14,9 @@ which is included as part of this source code package.
 #define LIVO_FEATURE_MULTI_CAM_H_
 
 #include "visual_point_multi_cam.h"
+#include <array>
+#include <cstdint>
+#include <limits>
 #include <mutex>
 
 // A salient image region tracked using either a raw image patch or a local
@@ -21,6 +24,13 @@ which is included as part of this source code package.
 struct Feature
 {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+  enum class RefState
+  {
+    CANDIDATE = 0,
+    VALIDATED,
+    RETIRED
+  };
 
   enum FeatureType
   {
@@ -58,14 +68,47 @@ struct Feature
   bool virtual_support_materialized_;
   bool virtual_support_materialization_failed_;
   mutable std::mutex virtual_support_mutex_;
+
+  RefState ref_state_;
+  uint64_t ref_id_;
+  int birth_frame_id_;
+  int last_test_frame_id_;
+  int last_test_camera_id_;
+  int last_success_frame_id_;
+  Vector3d view_direction_w_;
+  double view_range_;
+  Eigen::Matrix<double, 6, 6> birth_pose_cov_;
+  std::array<Vector3d, 4> footprint_corners_w_;
+  bool footprint_valid_;
+  int surface_plane_id_;
+  uint64_t surface_revision_;
+  double nis_ema_;
+  double last_nis_;
+  double fisher_log_p_sum_;
+  int independent_test_count_;
+  int accepted_test_count_;
+  int rejected_test_count_;
+  int consecutive_reject_count_;
+  Eigen::Matrix<double, 6, 6> mean_pose_information_;
+  bool pending_delete_;
   
   Feature(VisualPoint *_point, float *_patch, const Vector2d &_px, const Vector3d &_f, const SE3<double> &_T_f_w, int _level,
           int _camera_id = 0, double _timestamp = 0.0)
       : id_(-1), camera_id_(_camera_id), timestamp_(_timestamp), type_(CORNER), px_(_px), f_(_f), level_(_level), point_(_point), T_f_w_(_T_f_w), patch_(_patch), score_(0), mean_(0),
         inv_expo_time_(0), T_v_w_(_T_f_w), R_v_from_c_(Matrix3d::Identity()), R_c_from_v_(Matrix3d::Identity()),
         virtual_patch_valid_(false), virtual_source_origin_(0, 0), virtual_support_materialized_(false),
-        virtual_support_materialization_failed_(false)
+        virtual_support_materialization_failed_(false), ref_state_(RefState::VALIDATED), ref_id_(0),
+        birth_frame_id_(-1), last_test_frame_id_(-1), last_test_camera_id_(-1),
+        last_success_frame_id_(-1),
+        view_direction_w_(Vector3d::Zero()), view_range_(0.0),
+        birth_pose_cov_(Eigen::Matrix<double, 6, 6>::Zero()), footprint_valid_(false),
+        surface_plane_id_(-1), surface_revision_(0), nis_ema_(0.0),
+        last_nis_(std::numeric_limits<double>::quiet_NaN()), fisher_log_p_sum_(0.0),
+        independent_test_count_(0), accepted_test_count_(0), rejected_test_count_(0),
+        consecutive_reject_count_(0),
+        mean_pose_information_(Eigen::Matrix<double, 6, 6>::Zero()), pending_delete_(false)
   {
+    for (Vector3d &corner : footprint_corners_w_) corner.setZero();
   }
 
   inline Vector3d pos() const { return T_f_w_.inverse().translation(); }

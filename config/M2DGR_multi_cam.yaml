@@ -153,6 +153,35 @@
       # Build new VisualPoint references from the current frame's post-EKF pose.
       # This timing switch is independent of visual map management.
       visual_ref_post_ekf_build_en: false
+      # Advanced visual reference/landmark management. Submodules are effective
+      # only when this master switch is enabled.
+      visual_map_manage_en: false
+      visual_map_manage_log_en: true
+      visual_map_manage_shadow_en: false
+      visual_ref_current_select_en: true
+      visual_ref_fallback_en: true
+      visual_ref_lifecycle_en: true
+      visual_ref_view_coverage_en: true
+      visual_ref_nis_en: true
+      visual_point_seed_validation_en: true
+      visual_point_footprint_redundancy_en: true
+      visual_point_information_prune_en: true
+      visual_point_replacement_en: true
+      visual_map_retirement_apply_en: true
+      visual_ref_max_candidates: 2
+      visual_ref_validate_min_tests: 3
+      visual_ref_validate_min_ratio: 0.67
+      visual_ref_retire_reject_count: 5
+      visual_ref_max_count: 8
+      visual_ref_coverage_angle_deg: 12.0
+      visual_ref_max_anisotropy: 4.0
+      visual_ref_nis_max_per_dof: 3.0
+      visual_point_seed_min_tests: 3
+      visual_point_seed_min_ratio: 0.67
+      visual_point_footprint_iou: 0.60
+      visual_point_information_retain: 0.90
+      visual_point_suspect_reject_count: 8
+      visual_point_stale_frames: 200
       virtual_focal_length: 500.0
       virtual_patch_margin: 4
       virtual_max_search_level: 0
