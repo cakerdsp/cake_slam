@@ -1192,14 +1192,14 @@ double VIOManager::managedFootprintIoU(const std::array<V3D, 4> &a,
       return (c1[0] - c0[0]) * (p[1] - c0[1]) -
                  (c1[1] - c0[1]) * (p[0] - c0[0]) >= -1.0e-10;
     };
-    auto intersection = [&](const V2D &p0, const V2D &p1) {
+    auto intersection = [&](const V2D &p0, const V2D &p1) -> V2D {
       const V2D r = p1 - p0;
       const V2D s = c1 - c0;
       const double denominator = r[0] * s[1] - r[1] * s[0];
       if (std::fabs(denominator) <= 1.0e-12) return p1;
       const V2D delta = c0 - p0;
       const double t = (delta[0] * s[1] - delta[1] * s[0]) / denominator;
-      return p0 + std::clamp(t, 0.0, 1.0) * r;
+      return (p0 + std::clamp(t, 0.0, 1.0) * r).eval();
     };
     std::vector<V2D> output;
     V2D previous = subject.back();
@@ -5191,6 +5191,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       break;
 
       // t_5 += omp_get_wtime() - t_1;
+      }
     }
   }
   ctx.total_points = ctx.visual_submap->voxel_points.size();
@@ -5406,7 +5407,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
               Jpc_dRcl = -ctx.Rcl * point_l_hat;
             }
             const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
-            const V2D usage_cur_px = point_c.array().isFinite().all() ? ctx.cam->world2cam(point_c) : V2D::Zero();
+            V2D usage_cur_px = V2D::Zero();
+            if (point_c.array().isFinite().all()) usage_cur_px = ctx.cam->world2cam(point_c);
             if (virtual_s2_optimize_en)
             {
               if (!point_c.array().isFinite().all()) continue;
@@ -5858,7 +5860,6 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
       if (reason_index > VISUAL_GEOM_REJECT_NONE && reason_index < VISUAL_GEOM_REJECT_COUNT)
         ++geom_reject_counts[reason_index];
       return false;
-      }
     }
     ++geom_passed;
     return true;
@@ -6218,7 +6219,10 @@ void VIOManager::initializeManagedReference(Feature &feature, VisualPoint &point
   const V3D camera_w = feature.pos();
   const V3D view = camera_w - point.pos_;
   feature.view_range_ = view.norm();
-  feature.view_direction_w_ = feature.view_range_ > 1.0e-9 ? view / feature.view_range_ : V3D::Zero();
+  if (feature.view_range_ > 1.0e-9)
+    feature.view_direction_w_ = view / feature.view_range_;
+  else
+    feature.view_direction_w_.setZero();
   feature.birth_pose_cov_.setZero();
   if (state != nullptr && state->cov.rows() >= 6 && state->cov.cols() >= 6)
     feature.birth_pose_cov_ = state->cov.block<6, 6>(0, 0);
@@ -7112,9 +7116,10 @@ void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VO
         {
           const V3D view = feature->pos() - pt->pos_;
           feature->view_range_ = view.norm();
-          feature->view_direction_w_ = feature->view_range_ > 1.0e-9
-                                           ? view / feature->view_range_
-                                           : V3D::Zero();
+          if (feature->view_range_ > 1.0e-9)
+            feature->view_direction_w_ = view / feature->view_range_;
+          else
+            feature->view_direction_w_.setZero();
         }
       }
       const VoxelPlane *plane = nullptr;
