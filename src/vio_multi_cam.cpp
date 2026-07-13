@@ -3709,7 +3709,7 @@ void VIOManager::recordUsagePoseFrameInfo(const Eigen::MatrixXd &prior_cov, cons
     return gain;
   };
 
-  auto posteriorFromHessian = [&](const Eigen::MatrixXd &hessian) {
+  auto posteriorFromHessian = [&](const Eigen::MatrixXd &hessian) -> Eigen::MatrixXd {
     Eigen::MatrixXd empty;
     if (hessian.rows() != prior_cov.rows() || hessian.cols() != prior_cov.cols()) return empty;
     Eigen::MatrixXd prior_spd = symmetrize(prior_cov);
@@ -3724,7 +3724,7 @@ void VIOManager::recordUsagePoseFrameInfo(const Eigen::MatrixXd &prior_cov, cons
     const Eigen::LDLT<Eigen::MatrixXd> info_ldlt(information);
     if (info_ldlt.info() != Eigen::Success) return empty;
     Eigen::MatrixXd posterior = info_ldlt.solve(Eigen::MatrixXd::Identity(information.rows(), information.cols()));
-    return symmetrize(posterior);
+    return symmetrize(posterior).eval();
   };
 
   const Gain realized_gain = computeCovarianceGain(prior_cov, posterior_cov);
