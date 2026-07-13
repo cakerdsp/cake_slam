@@ -93,6 +93,11 @@ struct SubSparseMap
   vector<Eigen::Matrix<double, 6, 6>, Eigen::aligned_allocator<Eigen::Matrix<double, 6, 6>>> pose_information;
   vector<double> observation_nis;
   vector<int> observation_dof;
+  // Retrieval-time texture metrics kept per accepted track so the exact EKF-used subset can be reported
+  // without recomputing NCC at a different optimization state.
+  vector<vector<double>> usage_ncc_levels;
+  vector<vector<double>> usage_sse_levels;
+  vector<vector<uint8_t>> usage_level_valid;
 
   SubSparseMap()
   {
@@ -110,6 +115,9 @@ struct SubSparseMap
     pose_information.reserve(SIZE_LARGE);
     observation_nis.reserve(SIZE_LARGE);
     observation_dof.reserve(SIZE_LARGE);
+    usage_ncc_levels.reserve(SIZE_LARGE);
+    usage_sse_levels.reserve(SIZE_LARGE);
+    usage_level_valid.reserve(SIZE_LARGE);
   };
 
   void reset()
@@ -128,6 +136,9 @@ struct SubSparseMap
     pose_information.clear();
     observation_nis.clear();
     observation_dof.clear();
+    usage_ncc_levels.clear();
+    usage_sse_levels.clear();
+    usage_level_valid.clear();
   }
 };
 
@@ -473,30 +484,69 @@ public:
   double virtual_warp_time_ = 0.0;
   double virtual_current_core_time_ = 0.0;
 
-  static constexpr int kUsageNccBinCount = 11;
+  // PRE_GATE: after geometry/warp construction, before NCC/photometric gates.
+  // ACCEPTED: after all active retrieval gates. EKF: accepted level-patches admitted to linearization.
+  static constexpr int kUsageStageCount = 3;
+  static constexpr int kUsagePreGateStage = 0;
+  static constexpr int kUsageAcceptedStage = 1;
+  static constexpr int kUsageEkfStage = 2;
+  static constexpr int kUsageNccBinCount = 20;
+  static constexpr int kUsageRmsBinCount = 10;
   static constexpr int kUsagePoseDim = 6;
 
-  struct UsageLevelStats
+  struct UsageMetricStats
   {
-    long long candidate_ncc_count = 0;
-    long long accepted_ncc_count = 0;
-    long long accepted_sse_samples = 0;
-    double candidate_ncc_sum = 0.0;
-    double accepted_ncc_sum = 0.0;
-    double accepted_sse = 0.0;
-    std::array<long long, kUsageNccBinCount> candidate_ncc_hist = {};
-    std::array<long long, kUsageNccBinCount> accepted_ncc_hist = {};
+    long long ncc_count = 0;
+    long long ncc_gate_pass_count = 0;
+    long long sse_samples = 0;
+    long long rms_count = 0;
+    double ncc_sum = 0.0;
+    double sse_sum = 0.0;
+    std::array<long long, kUsageNccBinCount> ncc_hist = {};
+    std::array<long long, kUsageRmsBinCount> rms_hist = {};
 
     void reset()
     {
-      candidate_ncc_count = 0;
-      accepted_ncc_count = 0;
-      accepted_sse_samples = 0;
-      candidate_ncc_sum = 0.0;
-      accepted_ncc_sum = 0.0;
-      accepted_sse = 0.0;
-      candidate_ncc_hist.fill(0);
-      accepted_ncc_hist.fill(0);
+      ncc_count = 0;
+      ncc_gate_pass_count = 0;
+      sse_samples = 0;
+      rms_count = 0;
+      ncc_sum = 0.0;
+      sse_sum = 0.0;
+      ncc_hist.fill(0);
+      rms_hist.fill(0);
+    }
+  };
+
+  struct UsageLevelStats
+  {
+    std::array<UsageMetricStats, kUsageStageCount> stages;
+
+    void reset()
+    {
+      for (UsageMetricStats &stage : stages) stage.reset();
+    }
+  };
+
+  struct UsageJointStats
+  {
+    long long count = 0;
+    long long min_gate_pass_count = 0;
+    long long macro_gate_pass_count = 0;
+    double ncc_min_sum = 0.0;
+    double ncc_macro_sum = 0.0;
+    std::array<long long, kUsageNccBinCount> ncc_min_hist = {};
+    std::array<long long, kUsageNccBinCount> ncc_macro_hist = {};
+
+    void reset()
+    {
+      count = 0;
+      min_gate_pass_count = 0;
+      macro_gate_pass_count = 0;
+      ncc_min_sum = 0.0;
+      ncc_macro_sum = 0.0;
+      ncc_min_hist.fill(0);
+      ncc_macro_hist.fill(0);
     }
   };
 
@@ -507,13 +557,7 @@ public:
     long long theoretical_residuals = 0;
     long long ekf_patches = 0;
     long long ekf_residuals = 0;
-    long long candidate_all_level_count = 0;
-    long long accepted_all_level_count = 0;
-    double candidate_ncc_min_sum = 0.0;
-    double candidate_ncc_macro_sum = 0.0;
-    double accepted_ncc_min_sum = 0.0;
-    double accepted_ncc_macro_sum = 0.0;
-    double accepted_rms_macro_sum = 0.0;
+    std::array<UsageJointStats, 2> joint_stages;
     std::vector<UsageLevelStats> levels;
 
     void ensureLevels(int level_count)
@@ -530,34 +574,28 @@ public:
       theoretical_residuals = 0;
       ekf_patches = 0;
       ekf_residuals = 0;
-      candidate_all_level_count = 0;
-      accepted_all_level_count = 0;
-      candidate_ncc_min_sum = 0.0;
-      candidate_ncc_macro_sum = 0.0;
-      accepted_ncc_min_sum = 0.0;
-      accepted_ncc_macro_sum = 0.0;
-      accepted_rms_macro_sum = 0.0;
+      for (UsageJointStats &stage : joint_stages) stage.reset();
       for (UsageLevelStats &level : levels) level.reset();
     }
   };
 
   struct PoseInfoStatsCell
   {
-    long long frames = 0;
     long long active_frames = 0;
     long long patches = 0;
     long long residuals = 0;
     double information_gain_sum = 0.0;
-    double worst_direction_gain_sum = 0.0;
+    double worst_direction_ig_sum = 0.0;
+    std::vector<double> active_information_gains;
 
     void reset()
     {
-      frames = 0;
       active_frames = 0;
       patches = 0;
       residuals = 0;
       information_gain_sum = 0.0;
-      worst_direction_gain_sum = 0.0;
+      worst_direction_ig_sum = 0.0;
+      active_information_gains.clear();
     }
   };
 
@@ -565,8 +603,6 @@ public:
   long long usage_stats_total_frames_ = 0;
   std::vector<UsageStatsCell> usage_camera_pairs_;
   std::vector<UsageStatsCell> usage_total_camera_pairs_;
-  std::array<UsageStatsCell, 16> usage_region_pairs_;
-  std::array<UsageStatsCell, 16> usage_total_region_pairs_;
   std::array<UsageStatsCell, 32> usage_cross_region_pairs_;
   std::array<UsageStatsCell, 32> usage_total_cross_region_pairs_;
   std::array<UsageStatsCell, 5> usage_view_angle_bins_;
@@ -581,12 +617,6 @@ public:
   PoseInfoStatsCell usage_total_pose_all_;
   PoseInfoStatsCell usage_total_pose_same_;
   PoseInfoStatsCell usage_total_pose_cross_;
-  std::vector<PoseInfoStatsCell> usage_pose_camera_pairs_;
-  std::vector<PoseInfoStatsCell> usage_total_pose_camera_pairs_;
-  std::array<PoseInfoStatsCell, 16> usage_pose_region_pairs_;
-  std::array<PoseInfoStatsCell, 16> usage_total_pose_region_pairs_;
-  std::array<PoseInfoStatsCell, 32> usage_pose_cross_region_pairs_;
-  std::array<PoseInfoStatsCell, 32> usage_total_pose_cross_region_pairs_;
   int virtual_map_grid_count_ = 0;
   int virtual_candidate_null_count_ = 0;
   int virtual_candidate_normal_uninit_count_ = 0;
@@ -874,6 +904,7 @@ public:
   int usageFootprintBin(const Matrix2d &A_cur_ref) const;
   int usageAnisotropyBin(const Matrix2d &A_cur_ref) const;
   int usageNccBin(double ncc) const;
+  int usageRmsBin(double rms) const;
   void resetUsageStatsWindow();
   void resetUsageStatsTotals();
   void recordUsageObservation(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
@@ -881,14 +912,17 @@ public:
                               const std::vector<double> &sse_levels = std::vector<double>(),
                               const std::vector<double> &ncc_levels = std::vector<double>(),
                               const std::vector<uint8_t> &level_valid = std::vector<uint8_t>());
-  void recordUsageCandidateNcc(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
-                               const V2D &cur_px, const Matrix2d &A_cur_ref,
-                               const std::vector<double> &ncc_levels,
-                               const std::vector<uint8_t> &level_valid);
-  void recordUsageEkfContribution(const PerCameraData &ctx, const Feature &ref_ftr, const V2D &cur_px,
-                                  int level_patches, int residuals);
-  void recordUsagePoseFrameInfo(const Eigen::MatrixXd &prior_cov, const Eigen::MatrixXd &h_all,
-                                const Eigen::MatrixXd &h_same, const Eigen::MatrixXd &h_cross,
+  void recordUsagePreGateMetrics(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
+                                 const V2D &cur_px, const Matrix2d &A_cur_ref,
+                                 const std::vector<double> &sse_levels,
+                                 const std::vector<double> &ncc_levels,
+                                 const std::vector<uint8_t> &level_valid);
+  void recordUsageEkfContribution(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
+                                  const V2D &cur_px, const Matrix2d &A_cur_ref, int pyramid_level,
+                                  int residuals, double sse, double ncc, bool level_valid);
+  void recordUsagePoseFrameInfo(const Eigen::MatrixXd &prior_cov, const Eigen::MatrixXd &posterior_cov,
+                                const Eigen::MatrixXd &h_base, const Eigen::MatrixXd &h_same,
+                                const Eigen::MatrixXd &h_cross,
                                 long long patches_all, long long residuals_all,
                                 long long patches_same, long long residuals_same,
                                 long long patches_cross, long long residuals_cross);
