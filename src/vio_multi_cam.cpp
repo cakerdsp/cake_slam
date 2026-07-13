@@ -4813,10 +4813,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     }
 
     const double current_core_start = omp_get_wtime();
-    vector<float> current_core_all(warp_len, 0.0f);
-    result.level_sse.assign(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
-    result.level_ncc.assign(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
-    result.level_valid.assign(std::max(1, patch_pyrimid_level), 0);
+    const int usage_levels = std::max(1, patch_pyrimid_level);
+    vector<float> current_core_all(usage_stats_en ? warp_len : patch_size_total, 0.0f);
+    result.level_sse.assign(usage_levels, std::numeric_limits<double>::quiet_NaN());
+    result.level_ncc.assign(usage_levels, std::numeric_limits<double>::quiet_NaN());
+    result.level_valid.assign(usage_levels, 0);
     const V3D point_vcur = result.track.T_vcur_w_seed * pt->pos_;
     if (point_vcur[2] <= virtual_min_z)
     {
@@ -4825,52 +4826,71 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       continue;
     }
     const V2D virtual_center = virtualProject(point_vcur);
-    bool current_core_ok = true;
-    for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
-    {
-      const int scale = 1 << pyramid_level;
-      const bool level_ok = virtual_sparse_patch_en
-          ? sampleSparseVirtualCorePatch(ctx, img, result.track.R_ccur_from_vcur_seed,
-                                         virtual_center, scale,
-                                         current_core_all.data() + patch_size_total * pyramid_level)
-          : sampleVirtualCorePatch(result.track.cur_support, virtual_center, scale,
-                                   current_core_all.data() + patch_size_total * pyramid_level);
-      result.level_valid[pyramid_level] = level_ok ? 1 : 0;
-      if (!level_ok)
-      {
-        current_core_ok = false;
-        break;
-      }
-    }
+    const bool current_core_ok = virtual_sparse_patch_en
+        ? sampleSparseVirtualCorePatch(ctx, img, result.track.R_ccur_from_vcur_seed,
+                                       virtual_center, 1, current_core_all.data())
+        : sampleVirtualCorePatch(result.track.cur_support, virtual_center, 1, current_core_all.data());
+    result.level_valid[0] = current_core_ok ? 1 : 0;
     if (!current_core_ok)
     {
       result.current_core_time = omp_get_wtime() - current_core_start;
       result.rejection = VIRTUAL_REJECT_CURRENT_CORE;
       continue;
     }
-
-    for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+    if (usage_stats_en)
     {
-      double level_error = 0.0;
-      const int offset = patch_size_total * pyramid_level;
-      for (int k = 0; k < patch_size_total; ++k)
+      for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
       {
-        const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[offset + k] -
-                                state->inv_expo_time[ctx.camera_id] * current_core_all[offset + k];
-        level_error += residual * residual;
+        const int scale = 1 << pyramid_level;
+        const bool level_ok = virtual_sparse_patch_en
+            ? sampleSparseVirtualCorePatch(ctx, img, result.track.R_ccur_from_vcur_seed,
+                                           virtual_center, scale,
+                                           current_core_all.data() + patch_size_total * pyramid_level)
+            : sampleVirtualCorePatch(result.track.cur_support, virtual_center, scale,
+                                     current_core_all.data() + patch_size_total * pyramid_level);
+        result.level_valid[pyramid_level] = level_ok ? 1 : 0;
       }
-      result.level_sse[pyramid_level] = level_error;
-      if (pyramid_level == 0) result.error = static_cast<float>(level_error);
+    }
+
+    double level0_error = 0.0;
+    for (int k = 0; k < patch_size_total; ++k)
+    {
+      const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[k] -
+                              state->inv_expo_time[ctx.camera_id] * current_core_all[k];
+      level0_error += residual * residual;
+    }
+    result.error = static_cast<float>(level0_error);
+    result.level_sse[0] = level0_error;
+    if (usage_stats_en)
+    {
+      for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+      {
+        if (result.level_valid[pyramid_level] == 0) continue;
+        double level_error = 0.0;
+        const int offset = patch_size_total * pyramid_level;
+        for (int k = 0; k < patch_size_total; ++k)
+        {
+          const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[offset + k] -
+                                  state->inv_expo_time[ctx.camera_id] * current_core_all[offset + k];
+          level_error += residual * residual;
+        }
+        result.level_sse[pyramid_level] = level_error;
+      }
     }
     if (ncc_en || usage_stats_en)
     {
-      for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+      result.level_ncc[0] = calculateNCC(result.warped_reference.data(), current_core_all.data(), patch_size_total);
+      result.ncc = result.level_ncc[0];
+      if (usage_stats_en)
       {
-        const int offset = patch_size_total * pyramid_level;
-        result.level_ncc[pyramid_level] =
-            calculateNCC(result.warped_reference.data() + offset, current_core_all.data() + offset, patch_size_total);
+        for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+        {
+          if (result.level_valid[pyramid_level] == 0) continue;
+          const int offset = patch_size_total * pyramid_level;
+          result.level_ncc[pyramid_level] =
+              calculateNCC(result.warped_reference.data() + offset, current_core_all.data() + offset, patch_size_total);
+        }
       }
-      result.ncc = result.level_ncc.empty() ? std::numeric_limits<double>::quiet_NaN() : result.level_ncc[0];
       if (ncc_en && result.ncc < ncc_thre)
       {
         result.current_core_time = omp_get_wtime() - current_core_start;
@@ -5562,43 +5582,60 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       }
       if (!warp_ok) break;
 
-      std::vector<float> current_patch_all(warp_len, 0.0f);
       std::vector<double> usage_sse_levels(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
       std::vector<double> usage_ncc_levels(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
       std::vector<uint8_t> usage_level_valid(std::max(1, patch_pyrimid_level), 0);
-      for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
-      {
-        getImagePatch(ctx, img, pc, current_patch_all.data(), pyramid_level);
-        usage_level_valid[pyramid_level] = 1;
-      }
-      std::copy(current_patch_all.begin(), current_patch_all.begin() + patch_size_total, patch_buffer.begin());
+      getImagePatch(ctx, img, pc, patch_buffer.data(), 0);
+      usage_level_valid[0] = 1;
 
       float error = 0.0;
-      for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+      double level0_error = 0.0;
+      for (int ind = 0; ind < patch_size_total; ind++)
       {
-        double level_error = 0.0;
-        const int offset = patch_size_total * pyramid_level;
-        for (int ind = 0; ind < patch_size_total; ind++)
+        level0_error += (ref_ftr->inv_expo_time_ * patch_wrap[ind] -
+                         state->inv_expo_time[ctx.camera_id] * patch_buffer[ind]) *
+                        (ref_ftr->inv_expo_time_ * patch_wrap[ind] -
+                         state->inv_expo_time[ctx.camera_id] * patch_buffer[ind]);
+      }
+      error = static_cast<float>(level0_error);
+      usage_sse_levels[0] = level0_error;
+
+      std::vector<float> current_patch_all;
+      if (usage_stats_en)
+      {
+        current_patch_all.assign(warp_len, 0.0f);
+        std::copy(patch_buffer.begin(), patch_buffer.begin() + patch_size_total, current_patch_all.begin());
+        for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
         {
-          level_error += (ref_ftr->inv_expo_time_ * patch_wrap[offset + ind] -
-                          state->inv_expo_time[ctx.camera_id] * current_patch_all[offset + ind]) *
-                         (ref_ftr->inv_expo_time_ * patch_wrap[offset + ind] -
-                          state->inv_expo_time[ctx.camera_id] * current_patch_all[offset + ind]);
+          getImagePatch(ctx, img, pc, current_patch_all.data(), pyramid_level);
+          usage_level_valid[pyramid_level] = 1;
+          double level_error = 0.0;
+          const int offset = patch_size_total * pyramid_level;
+          for (int ind = 0; ind < patch_size_total; ind++)
+          {
+            level_error += (ref_ftr->inv_expo_time_ * patch_wrap[offset + ind] -
+                            state->inv_expo_time[ctx.camera_id] * current_patch_all[offset + ind]) *
+                           (ref_ftr->inv_expo_time_ * patch_wrap[offset + ind] -
+                            state->inv_expo_time[ctx.camera_id] * current_patch_all[offset + ind]);
+          }
+          usage_sse_levels[pyramid_level] = level_error;
         }
-        usage_sse_levels[pyramid_level] = level_error;
-        if (pyramid_level == 0) error = static_cast<float>(level_error);
       }
 
       double usage_ncc = std::numeric_limits<double>::quiet_NaN();
       if (ncc_en || usage_stats_en)
       {
-        for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+        usage_ncc_levels[0] = calculateNCC(patch_wrap.data(), patch_buffer.data(), patch_size_total);
+        usage_ncc = usage_ncc_levels[0];
+        if (usage_stats_en)
         {
-          const int offset = patch_size_total * pyramid_level;
-          usage_ncc_levels[pyramid_level] =
-              calculateNCC(patch_wrap.data() + offset, current_patch_all.data() + offset, patch_size_total);
+          for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+          {
+            const int offset = patch_size_total * pyramid_level;
+            usage_ncc_levels[pyramid_level] =
+                calculateNCC(patch_wrap.data() + offset, current_patch_all.data() + offset, patch_size_total);
+          }
         }
-        usage_ncc = usage_ncc_levels.empty() ? std::numeric_limits<double>::quiet_NaN() : usage_ncc_levels[0];
         if (usage_stats_en) recordUsagePreGateMetrics(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero,
                                                       usage_sse_levels, usage_ncc_levels, usage_level_valid);
         if (ncc_en && usage_ncc < ncc_thre)
