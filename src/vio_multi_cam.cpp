@@ -3317,10 +3317,13 @@ void VIOManager::resetUsageStatsWindow()
 {
   usage_stats_frames_ = 0;
   usage_camera_pairs_.assign(std::max(0, numCameras() * numCameras()), UsageStatsCell());
-  usage_current_camera_pairs_.assign(std::max(0, numCameras() * numCameras()), UsageStatsCell());
-  for (UsageStatsCell &cell : usage_current_view_angle_bins_) cell.reset();
-  for (UsageStatsCell &cell : usage_current_footprint_bins_) cell.reset();
-  for (UsageStatsCell &cell : usage_current_anisotropy_bins_) cell.reset();
+  if (cross_camera_current_residual_en)
+  {
+    usage_current_camera_pairs_.assign(std::max(0, numCameras() * numCameras()), UsageStatsCell());
+    for (UsageStatsCell &cell : usage_current_view_angle_bins_) cell.reset();
+    for (UsageStatsCell &cell : usage_current_footprint_bins_) cell.reset();
+    for (UsageStatsCell &cell : usage_current_anisotropy_bins_) cell.reset();
+  }
   for (UsageStatsCell &cell : usage_cross_region_pairs_) cell.reset();
   for (UsageStatsCell &cell : usage_view_angle_bins_) cell.reset();
   for (UsageStatsCell &cell : usage_footprint_bins_) cell.reset();
@@ -3328,17 +3331,20 @@ void VIOManager::resetUsageStatsWindow()
   usage_pose_all_.reset();
   usage_pose_same_.reset();
   usage_pose_cross_.reset();
-  usage_pose_current_cross_.reset();
+  if (cross_camera_current_residual_en) usage_pose_current_cross_.reset();
 }
 
 void VIOManager::resetUsageStatsTotals()
 {
   usage_stats_total_frames_ = 0;
   usage_total_camera_pairs_.assign(std::max(0, numCameras() * numCameras()), UsageStatsCell());
-  usage_total_current_camera_pairs_.assign(std::max(0, numCameras() * numCameras()), UsageStatsCell());
-  for (UsageStatsCell &cell : usage_total_current_view_angle_bins_) cell.reset();
-  for (UsageStatsCell &cell : usage_total_current_footprint_bins_) cell.reset();
-  for (UsageStatsCell &cell : usage_total_current_anisotropy_bins_) cell.reset();
+  if (cross_camera_current_residual_en)
+  {
+    usage_total_current_camera_pairs_.assign(std::max(0, numCameras() * numCameras()), UsageStatsCell());
+    for (UsageStatsCell &cell : usage_total_current_view_angle_bins_) cell.reset();
+    for (UsageStatsCell &cell : usage_total_current_footprint_bins_) cell.reset();
+    for (UsageStatsCell &cell : usage_total_current_anisotropy_bins_) cell.reset();
+  }
   for (UsageStatsCell &cell : usage_total_cross_region_pairs_) cell.reset();
   for (UsageStatsCell &cell : usage_total_view_angle_bins_) cell.reset();
   for (UsageStatsCell &cell : usage_total_footprint_bins_) cell.reset();
@@ -3346,7 +3352,7 @@ void VIOManager::resetUsageStatsTotals()
   usage_total_pose_all_.reset();
   usage_total_pose_same_.reset();
   usage_total_pose_cross_.reset();
-  usage_total_pose_current_cross_.reset();
+  if (cross_camera_current_residual_en) usage_total_pose_current_cross_.reset();
 }
 
 void VIOManager::recordCurrentCrossCameraUsage(const CurrentCrossCameraPair &pair, int stage,
@@ -3861,27 +3867,47 @@ void VIOManager::recordUsagePoseFrameInfo(const Eigen::MatrixXd &prior_cov, cons
 
   const Gain realized_gain = computeCovarianceGain(prior_cov, posterior_cov);
   const Eigen::MatrixXd base_posterior = posteriorFromHessian(h_base);
-  const Eigen::MatrixXd source_hessians[3] = {h_same, h_cross, h_current_cross};
-  std::array<double, 8> subset_gain = {};
-  for (int mask = 1; mask < 8; ++mask)
-  {
-    Eigen::MatrixXd subset_hessian = h_base;
-    for (int player = 0; player < 3; ++player)
-      if ((mask & (1 << player)) != 0) subset_hessian += source_hessians[player];
-    const Eigen::MatrixXd subset_posterior = posteriorFromHessian(subset_hessian);
-    const Gain gain = base_posterior.size() > 0 && subset_posterior.size() > 0
-                          ? computeCovarianceGain(base_posterior, subset_posterior) : Gain();
-    subset_gain[mask] = gain.valid ? gain.ig : 0.0;
-  }
   std::array<double, 3> shapley = {};
-  for (int player = 0; player < 3; ++player)
+  if (!cross_camera_current_residual_en)
   {
-    for (int subset = 0; subset < 8; ++subset)
+    const Eigen::MatrixXd same_posterior = posteriorFromHessian(h_base + h_same);
+    const Eigen::MatrixXd cross_posterior = posteriorFromHessian(h_base + h_cross);
+    const Eigen::MatrixXd visual_posterior = posteriorFromHessian(h_base + h_same + h_cross);
+    const Gain same_gain = base_posterior.size() > 0 && same_posterior.size() > 0
+                               ? computeCovarianceGain(base_posterior, same_posterior) : Gain();
+    const Gain cross_gain = base_posterior.size() > 0 && cross_posterior.size() > 0
+                                ? computeCovarianceGain(base_posterior, cross_posterior) : Gain();
+    const Gain visual_gain = base_posterior.size() > 0 && visual_posterior.size() > 0
+                                 ? computeCovarianceGain(base_posterior, visual_posterior) : Gain();
+    const double ig_same = same_gain.valid ? same_gain.ig : 0.0;
+    const double ig_cross = cross_gain.valid ? cross_gain.ig : 0.0;
+    const double ig_visual = visual_gain.valid ? visual_gain.ig : 0.0;
+    shapley[0] = 0.5 * (ig_same + ig_visual - ig_cross);
+    shapley[1] = 0.5 * (ig_cross + ig_visual - ig_same);
+  }
+  else
+  {
+    const Eigen::MatrixXd source_hessians[3] = {h_same, h_cross, h_current_cross};
+    std::array<double, 8> subset_gain = {};
+    for (int mask = 1; mask < 8; ++mask)
     {
-      if ((subset & (1 << player)) != 0) continue;
-      const int subset_size = ((subset & 1) != 0) + ((subset & 2) != 0) + ((subset & 4) != 0);
-      const double weight = subset_size == 0 ? 1.0 / 3.0 : (subset_size == 1 ? 1.0 / 6.0 : 1.0 / 3.0);
-      shapley[player] += weight * (subset_gain[subset | (1 << player)] - subset_gain[subset]);
+      Eigen::MatrixXd subset_hessian = h_base;
+      for (int player = 0; player < 3; ++player)
+        if ((mask & (1 << player)) != 0) subset_hessian += source_hessians[player];
+      const Eigen::MatrixXd subset_posterior = posteriorFromHessian(subset_hessian);
+      const Gain gain = base_posterior.size() > 0 && subset_posterior.size() > 0
+                            ? computeCovarianceGain(base_posterior, subset_posterior) : Gain();
+      subset_gain[mask] = gain.valid ? gain.ig : 0.0;
+    }
+    for (int player = 0; player < 3; ++player)
+    {
+      for (int subset = 0; subset < 8; ++subset)
+      {
+        if ((subset & (1 << player)) != 0) continue;
+        const int subset_size = ((subset & 1) != 0) + ((subset & 2) != 0) + ((subset & 4) != 0);
+        const double weight = subset_size == 0 ? 1.0 / 3.0 : (subset_size == 1 ? 1.0 / 6.0 : 1.0 / 3.0);
+        shapley[player] += weight * (subset_gain[subset | (1 << player)] - subset_gain[subset]);
+      }
     }
   }
 
@@ -3905,12 +3931,14 @@ void VIOManager::recordUsagePoseFrameInfo(const Eigen::MatrixXd &prior_cov, cons
   updateCell(usage_pose_all_, realized_ig, realized_worst_ig, patches_all, residuals_all);
   updateCell(usage_pose_same_, shapley[0], not_applicable, patches_same, residuals_same);
   updateCell(usage_pose_cross_, shapley[1], not_applicable, patches_cross, residuals_cross);
-  updateCell(usage_pose_current_cross_, shapley[2], not_applicable, patches_current_cross, residuals_current_cross);
+  if (cross_camera_current_residual_en)
+    updateCell(usage_pose_current_cross_, shapley[2], not_applicable, patches_current_cross, residuals_current_cross);
   updateCell(usage_total_pose_all_, realized_ig, realized_worst_ig, patches_all, residuals_all);
   updateCell(usage_total_pose_same_, shapley[0], not_applicable, patches_same, residuals_same);
   updateCell(usage_total_pose_cross_, shapley[1], not_applicable, patches_cross, residuals_cross);
-  updateCell(usage_total_pose_current_cross_, shapley[2], not_applicable,
-             patches_current_cross, residuals_current_cross);
+  if (cross_camera_current_residual_en)
+    updateCell(usage_total_pose_current_cross_, shapley[2], not_applicable,
+               patches_current_cross, residuals_current_cross);
 }
 void VIOManager::printUsageStatsTable(int frame_id)
 {
@@ -4061,7 +4089,8 @@ void VIOManager::printUsageStatsTable(int frame_id)
     total.ensureLevels(std::max(1, patch_pyrimid_level));
     same_camera.ensureLevels(std::max(1, patch_pyrimid_level));
     cross_camera.ensureLevels(std::max(1, patch_pyrimid_level));
-    current_cross_camera.ensureLevels(std::max(1, patch_pyrimid_level));
+    if (cross_camera_current_residual_en)
+      current_cross_camera.ensureLevels(std::max(1, patch_pyrimid_level));
     const int camera_count = numCameras();
     for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
     {
@@ -4077,11 +4106,12 @@ void VIOManager::printUsageStatsTable(int frame_id)
           mergeCell(cross_camera, cell);
       }
     }
-    for (const UsageStatsCell &cell : current_camera_pairs)
-    {
-      mergeCell(current_cross_camera, cell);
-      mergeCell(total, cell);
-    }
+    if (cross_camera_current_residual_en)
+      for (const UsageStatsCell &cell : current_camera_pairs)
+      {
+        mergeCell(current_cross_camera, cell);
+        mergeCell(total, cell);
+      }
 
     auto printFlowHeader = [&](const char *section_title) {
       printDivider();
@@ -4111,7 +4141,7 @@ void VIOManager::printUsageStatsTable(int frame_id)
       printDivider();
       printLine(section_title);
       printDivider();
-      printLine("Stage       Group        Metric    Samples    Mean    P10~    P50~    P90~    <0.3%    <0.5%   >=gate%  RMSmicro  RMSP50~  RMSP90~");
+      printLine("Stage       Group               Metric    Samples    Mean    P10~    P50~    P90~    <0.3%    <0.5%   >=gate%  RMSmicro  RMSP50~  RMSP90~");
       printDivider();
     };
 
@@ -4122,7 +4152,7 @@ void VIOManager::printUsageStatsTable(int frame_id)
           : std::string("-");
       std::ostringstream row;
       row << std::left << std::setw(12) << stage_name
-          << std::setw(13) << group
+          << std::setw(20) << group
           << std::setw(10) << metric_name
           << std::right << std::setw(9) << metric.ncc_count
           << std::setw(8) << meanText(metric.ncc_sum, metric.ncc_count, 3)
@@ -4145,7 +4175,7 @@ void VIOManager::printUsageStatsTable(int frame_id)
       const long long gate_pass = use_min ? joint.min_gate_pass_count : joint.macro_gate_pass_count;
       std::ostringstream row;
       row << std::left << std::setw(12) << stage_name
-          << std::setw(13) << group
+          << std::setw(20) << group
           << std::setw(10) << metric_name
           << std::right << std::setw(9) << joint.count
           << std::setw(8) << meanText(sum, joint.count, 3)
@@ -4203,12 +4233,14 @@ void VIOManager::printUsageStatsTable(int frame_id)
 
       printDivider();
       printLine("POSE_SOURCE_ATTRIBUTION_SHAPLEY");
-      printLine("pose_scope: realized gain uses actual P_before/P_after; exact 3-source Shapley uses same-camera, historical cross-camera, and current-current cross-camera Hessians from the final covariance linearization, conditioned on base factors");
+      printLine(cross_camera_current_residual_en
+                    ? "pose_scope: realized gain uses actual P_before/P_after; exact 3-source Shapley uses same-camera, historical cross-camera, and current-current cross-camera Hessians from the final covariance linearization, conditioned on base factors"
+                    : "pose_scope: realized gain uses actual P_before/P_after; exact 2-source Shapley uses same-camera and historical cross-camera Hessians from the final covariance linearization, conditioned on base factors");
       printDivider();
       printLine("Source                    RunFrames  Active  Active%  FinalLvlPatch  FinalRes  IG/frame  IG/active  MedianAct  P10Act  P90Act  Share%");
       printDivider();
       const double attribution_total = pose_same.information_gain_sum + pose_cross.information_gain_sum +
-                                       pose_current_cross.information_gain_sum;
+          (cross_camera_current_residual_en ? pose_current_cross.information_gain_sum : 0.0);
       auto printAttributionRow = [&](const std::string &name, const PoseInfoStatsCell &cell) {
         std::ostringstream row;
         row << std::left << std::setw(26) << name
@@ -4229,7 +4261,8 @@ void VIOManager::printUsageStatsTable(int frame_id)
       };
       printAttributionRow("same_cam_shapley", pose_same);
       printAttributionRow("cross_cam_shapley", pose_cross);
-      printAttributionRow("current_cross_cam_shapley", pose_current_cross);
+      if (cross_camera_current_residual_en)
+        printAttributionRow("current_cross_cam_shapley", pose_current_cross);
     };
 
     auto printNccDistribution = [&](const std::string &stage_name, const std::string &metric_name,
@@ -4246,12 +4279,14 @@ void VIOManager::printUsageStatsTable(int frame_id)
         total_count += total_hist[i];
         same_count += same_hist[i];
         cross_count += cross_hist[i];
-        current_count += current_hist[i];
+        if (cross_camera_current_residual_en) current_count += current_hist[i];
       }
       printDivider();
       printLine("NCC_DISTRIBUTION stage=" + stage_name + " metric=" + metric_name);
       printDivider();
-      printLine("NCC_bin          all_count    all%   same_count   same%  hist_cross  cross%  current_cc   curr%");
+      printLine(cross_camera_current_residual_en
+                    ? "NCC_bin          all_count    all%   same_count   same%  hist_cross  cross%  current_cc   curr%"
+                    : "NCC_bin          all_count    all%   same_count   same%  hist_cross  cross%");
       printDivider();
       for (int i = 0; i < kUsageNccBinCount; ++i)
       {
@@ -4262,9 +4297,10 @@ void VIOManager::printUsageStatsTable(int frame_id)
             << std::setw(13) << same_hist[i]
             << std::setw(8) << formatPercent(same_hist[i], same_count)
             << std::setw(13) << cross_hist[i]
-            << std::setw(8) << formatPercent(cross_hist[i], cross_count)
-            << std::setw(13) << current_hist[i]
-            << std::setw(8) << formatPercent(current_hist[i], current_count);
+            << std::setw(8) << formatPercent(cross_hist[i], cross_count);
+        if (cross_camera_current_residual_en)
+          row << std::setw(13) << current_hist[i]
+              << std::setw(8) << formatPercent(current_hist[i], current_count);
         printLine(row.str());
       }
     };
@@ -4334,12 +4370,14 @@ void VIOManager::printUsageStatsTable(int frame_id)
     printFlowHeader("TRACK_FLOW_BY_GROUP");
     printFlowRow("same_cam", same_camera);
     printFlowRow("cross_cam", cross_camera);
-    printFlowRow("current_cross_cam", current_cross_camera);
+    if (cross_camera_current_residual_en)
+      printFlowRow("current_cross_cam", current_cross_camera);
 
     printMetricSummaryHeader("MULTILEVEL_TEXTURE_HEALTH_BY_GROUP");
     printGroupMetrics("same_cam", same_camera);
     printGroupMetrics("cross_cam", cross_camera);
-    printGroupMetrics("current_cross_cam", current_cross_camera);
+    if (cross_camera_current_residual_en)
+      printGroupMetrics("current_cross_cam", current_cross_camera);
 
     printPoseSections();
 
@@ -4355,6 +4393,7 @@ void VIOManager::printUsageStatsTable(int frame_id)
         printFlowRow("cam" + std::to_string(ref_cam) + "->cam" + std::to_string(cur_cam), cell);
       }
     }
+    if (cross_camera_current_residual_en)
     for (int source_cam = 0; source_cam < camera_count; ++source_cam)
     {
       for (int target_cam = source_cam + 1; target_cam < camera_count; ++target_cam)
@@ -4377,13 +4416,17 @@ void VIOManager::printUsageStatsTable(int frame_id)
           if (level >= static_cast<int>(total.levels.size()) ||
               level >= static_cast<int>(same_camera.levels.size()) ||
               level >= static_cast<int>(cross_camera.levels.size()) ||
-              level >= static_cast<int>(current_cross_camera.levels.size()))
+              (cross_camera_current_residual_en &&
+               level >= static_cast<int>(current_cross_camera.levels.size())))
             continue;
+          static const std::array<long long, kUsageNccBinCount> empty_ncc_hist = {};
           printNccDistribution(stage_name, "L" + std::to_string(level),
                                total.levels[level].stages[stage].ncc_hist,
                                same_camera.levels[level].stages[stage].ncc_hist,
                                cross_camera.levels[level].stages[stage].ncc_hist,
-                               current_cross_camera.levels[level].stages[stage].ncc_hist);
+                               cross_camera_current_residual_en
+                                   ? current_cross_camera.levels[level].stages[stage].ncc_hist
+                                   : empty_ncc_hist);
         }
         printNccDistribution(stage_name, "MIN",
                              total.joint_stages[stage].ncc_min_hist,
@@ -4404,6 +4447,7 @@ void VIOManager::printUsageStatsTable(int frame_id)
           printDiagnosticRow("cam" + std::to_string(ref_cam) + "->cam" + std::to_string(cur_cam), cell);
         }
       }
+      if (cross_camera_current_residual_en)
       for (int source_cam = 0; source_cam < camera_count; ++source_cam)
       {
         for (int target_cam = source_cam + 1; target_cam < camera_count; ++target_cam)
@@ -4440,10 +4484,13 @@ void VIOManager::printUsageStatsTable(int frame_id)
         if (view_angle_bins[i].candidates > 0 || view_angle_bins[i].accepted > 0)
           printDiagnosticRow(angle_names[i], view_angle_bins[i]);
 
-      printDiagnosticHeader("CURRENT_CROSS_TEXTURE_BY_VIEW_ANGLE");
-      for (int i = 0; i < 5; ++i)
-        if (current_view_angle_bins[i].candidates > 0 || current_view_angle_bins[i].accepted > 0)
-          printDiagnosticRow(angle_names[i], current_view_angle_bins[i]);
+      if (cross_camera_current_residual_en)
+      {
+        printDiagnosticHeader("CURRENT_CROSS_TEXTURE_BY_VIEW_ANGLE");
+        for (int i = 0; i < 5; ++i)
+          if (current_view_angle_bins[i].candidates > 0 || current_view_angle_bins[i].accepted > 0)
+            printDiagnosticRow(angle_names[i], current_view_angle_bins[i]);
+      }
 
       static const char *footprint_names[] = {"invalid", "1-2x", "2-4x", "4-8x", ">8x"};
       printDiagnosticHeader("TEXTURE_DIAGNOSTICS_BY_FOOTPRINT");
@@ -4451,10 +4498,13 @@ void VIOManager::printUsageStatsTable(int frame_id)
         if (footprint_bins[i].candidates > 0 || footprint_bins[i].accepted > 0)
           printDiagnosticRow(footprint_names[i], footprint_bins[i]);
 
-      printDiagnosticHeader("CURRENT_CROSS_TEXTURE_BY_FOOTPRINT");
-      for (int i = 0; i < 5; ++i)
-        if (current_footprint_bins[i].candidates > 0 || current_footprint_bins[i].accepted > 0)
-          printDiagnosticRow(footprint_names[i], current_footprint_bins[i]);
+      if (cross_camera_current_residual_en)
+      {
+        printDiagnosticHeader("CURRENT_CROSS_TEXTURE_BY_FOOTPRINT");
+        for (int i = 0; i < 5; ++i)
+          if (current_footprint_bins[i].candidates > 0 || current_footprint_bins[i].accepted > 0)
+            printDiagnosticRow(footprint_names[i], current_footprint_bins[i]);
+      }
 
       static const char *anisotropy_names[] = {"1-1.5x", "1.5-2x", "2-4x", ">4x"};
       printDiagnosticHeader("TEXTURE_DIAGNOSTICS_BY_ANISOTROPY");
@@ -4462,10 +4512,13 @@ void VIOManager::printUsageStatsTable(int frame_id)
         if (anisotropy_bins[i].candidates > 0 || anisotropy_bins[i].accepted > 0)
           printDiagnosticRow(anisotropy_names[i], anisotropy_bins[i]);
 
-      printDiagnosticHeader("CURRENT_CROSS_TEXTURE_BY_ANISOTROPY");
-      for (int i = 0; i < 4; ++i)
-        if (current_anisotropy_bins[i].candidates > 0 || current_anisotropy_bins[i].accepted > 0)
-          printDiagnosticRow(anisotropy_names[i], current_anisotropy_bins[i]);
+      if (cross_camera_current_residual_en)
+      {
+        printDiagnosticHeader("CURRENT_CROSS_TEXTURE_BY_ANISOTROPY");
+        for (int i = 0; i < 4; ++i)
+          if (current_anisotropy_bins[i].candidates > 0 || current_anisotropy_bins[i].accepted > 0)
+            printDiagnosticRow(anisotropy_names[i], current_anisotropy_bins[i]);
+      }
     }
     printDivider();
   };
@@ -6206,7 +6259,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
   int total_observations = 0;
   for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
   if (total_observations == 0) return;
-  buildCurrentCrossCameraPairs();
+  if (cross_camera_current_residual_en) buildCurrentCrossCameraPairs();
   G = Eigen::MatrixXd::Zero(state->stateDim(), state->stateDim());
   const bool online_extrinsic_active = online_extrinsic_en &&
       frame_count >= online_extrinsic_start_frame &&
@@ -6226,7 +6279,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
     usage_final_h_base = Eigen::MatrixXd::Zero(usage_state_dim, usage_state_dim);
     usage_final_h_same = Eigen::MatrixXd::Zero(usage_state_dim, usage_state_dim);
     usage_final_h_cross = Eigen::MatrixXd::Zero(usage_state_dim, usage_state_dim);
-    usage_final_h_current_cross = Eigen::MatrixXd::Zero(usage_state_dim, usage_state_dim);
+    if (cross_camera_current_residual_en)
+      usage_final_h_current_cross = Eigen::MatrixXd::Zero(usage_state_dim, usage_state_dim);
   }
   long long usage_final_patches_all = 0;
   long long usage_final_patches_same = 0;
@@ -6257,7 +6311,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
         usage_iter_h_all = Eigen::MatrixXd::Zero(state_dim, state_dim);
         usage_iter_h_same = Eigen::MatrixXd::Zero(state_dim, state_dim);
         usage_iter_h_cross = Eigen::MatrixXd::Zero(state_dim, state_dim);
-        usage_iter_h_current_cross = Eigen::MatrixXd::Zero(state_dim, state_dim);
+        if (cross_camera_current_residual_en)
+          usage_iter_h_current_cross = Eigen::MatrixXd::Zero(state_dim, state_dim);
       }
       long long usage_iter_patches_all = 0;
       long long usage_iter_patches_same = 0;
@@ -6678,8 +6733,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
         }
       }
 
-      for (CurrentCrossCameraPair &pair : current_cross_camera_pairs_)
+      if (cross_camera_current_residual_en)
       {
+        // Keep the optional current-current linearization out of this already very large hot function.
+        // Otherwise GCC's whole-function register allocation and code layout can regress even when the
+        // runtime option is disabled. The closure is constructed and called only on the enabled path.
+        auto linearize_current_cross_camera = [&]() __attribute__((noinline)) {
+          for (CurrentCrossCameraPair &pair : current_cross_camera_pairs_)
+          {
         if (!pair.accepted || pair.point == nullptr) continue;
         PerCameraData &source = cameras_[pair.source_camera_id];
         PerCameraData &target = cameras_[pair.target_camera_id];
@@ -6826,6 +6887,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
           usage_iter_residuals_current_cross += pair_residuals;
           if (iteration == 0) recordCurrentCrossCameraUsage(pair, kUsageEkfStage, level, pair_residuals);
         }
+          }
+        };
+        linearize_current_cross_camera();
       }
 
       if (online_extrinsic_active && online_extrinsic_prior_factor_en)
@@ -6848,7 +6912,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
         usage_final_h_base = hessian - usage_iter_h_all;
         usage_final_h_same = usage_iter_h_same;
         usage_final_h_cross = usage_iter_h_cross;
-        usage_final_h_current_cross = usage_iter_h_current_cross;
+        if (cross_camera_current_residual_en)
+          usage_final_h_current_cross = usage_iter_h_current_cross;
         usage_final_patches_all = usage_iter_patches_all;
         usage_final_patches_same = usage_iter_patches_same;
         usage_final_patches_cross = usage_iter_patches_cross;
