@@ -244,6 +244,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("vio.usage_stats_en", false);
   try_declare.template operator()<int>("vio.usage_stats_window", 100);
   try_declare.template operator()<bool>("vio.cross_camera_reference_en", false);
+  try_declare.template operator()<bool>("vio.cross_camera_current_residual_en", false);
   try_declare.template operator()<bool>("vio.online_extrinsic_en", false);
   try_declare.template operator()<bool>("vio.online_extrinsic_rot_en", true);
   try_declare.template operator()<bool>("vio.online_extrinsic_trans_en", true);
@@ -452,6 +453,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.usage_stats_en", usage_stats_en);
   this->node->get_parameter("vio.usage_stats_window", usage_stats_window);
   this->node->get_parameter("vio.cross_camera_reference_en", cross_camera_reference_en);
+  this->node->get_parameter("vio.cross_camera_current_residual_en", cross_camera_current_residual_en);
   this->node->get_parameter("vio.online_extrinsic_en", online_extrinsic_en);
   this->node->get_parameter("vio.online_extrinsic_rot_en", online_extrinsic_rot_en);
   this->node->get_parameter("vio.online_extrinsic_trans_en", online_extrinsic_trans_en);
@@ -657,6 +659,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->visual_point_stale_frames = visual_point_stale_frames;
   vio_manager->raw_camera_model_jacobian_en = raw_camera_model_jacobian_en && !virtual_fisheye_patch_en;
   vio_manager->cross_camera_reference_en = cross_camera_reference_en;
+  vio_manager->cross_camera_current_residual_en = cross_camera_current_residual_en;
   vio_manager->online_extrinsic_en = online_extrinsic_en;
   vio_manager->online_extrinsic_rot_en = online_extrinsic_rot_en;
   vio_manager->online_extrinsic_trans_en = online_extrinsic_trans_en;

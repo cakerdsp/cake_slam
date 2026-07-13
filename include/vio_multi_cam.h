@@ -346,6 +346,7 @@ public:
   bool visual_map_retirement_apply_en = true;
   bool raw_camera_model_jacobian_en = false;
   bool cross_camera_reference_en = false;
+  bool cross_camera_current_residual_en = false;
   bool online_extrinsic_en = false;
   bool online_extrinsic_rot_en = true;
   bool online_extrinsic_trans_en = true;
@@ -599,10 +600,39 @@ public:
     }
   };
 
+  struct CurrentCrossCameraPair
+  {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    VisualPoint *point = nullptr;
+    int source_camera_id = -1;
+    int target_camera_id = -1;
+    int source_submap_index = -1;
+    int target_submap_index = -1;
+    int search_level = 0;
+    Matrix2d A_target_source = Matrix2d::Identity();
+    std::vector<double> sse_levels;
+    std::vector<double> ncc_levels;
+    std::vector<uint8_t> level_valid;
+    double hessian_weight = 1.0;
+    int view_angle_bin = -1;
+    int footprint_bin = -1;
+    int anisotropy_bin = -1;
+    bool accepted = false;
+  };
+
   long long usage_stats_frames_ = 0;
   long long usage_stats_total_frames_ = 0;
   std::vector<UsageStatsCell> usage_camera_pairs_;
   std::vector<UsageStatsCell> usage_total_camera_pairs_;
+  std::vector<UsageStatsCell> usage_current_camera_pairs_;
+  std::vector<UsageStatsCell> usage_total_current_camera_pairs_;
+  std::array<UsageStatsCell, 5> usage_current_view_angle_bins_;
+  std::array<UsageStatsCell, 5> usage_total_current_view_angle_bins_;
+  std::array<UsageStatsCell, 5> usage_current_footprint_bins_;
+  std::array<UsageStatsCell, 5> usage_total_current_footprint_bins_;
+  std::array<UsageStatsCell, 4> usage_current_anisotropy_bins_;
+  std::array<UsageStatsCell, 4> usage_total_current_anisotropy_bins_;
   std::array<UsageStatsCell, 32> usage_cross_region_pairs_;
   std::array<UsageStatsCell, 32> usage_total_cross_region_pairs_;
   std::array<UsageStatsCell, 5> usage_view_angle_bins_;
@@ -614,9 +644,12 @@ public:
   PoseInfoStatsCell usage_pose_all_;
   PoseInfoStatsCell usage_pose_same_;
   PoseInfoStatsCell usage_pose_cross_;
+  PoseInfoStatsCell usage_pose_current_cross_;
   PoseInfoStatsCell usage_total_pose_all_;
   PoseInfoStatsCell usage_total_pose_same_;
   PoseInfoStatsCell usage_total_pose_cross_;
+  PoseInfoStatsCell usage_total_pose_current_cross_;
+  std::vector<CurrentCrossCameraPair, Eigen::aligned_allocator<CurrentCrossCameraPair>> current_cross_camera_pairs_;
   int virtual_map_grid_count_ = 0;
   int virtual_candidate_null_count_ = 0;
   int virtual_candidate_normal_uninit_count_ = 0;
@@ -748,6 +781,7 @@ public:
   void computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J);
   void computeVirtualProjectionJacobian(const V3D &p_v, MD(2, 3) &J) const;
   void computeJacobianAndUpdateEKF();
+  void buildCurrentCrossCameraPairs();
   bool interpolateReferenceFeature(const Feature &reference, const V2D &px, float &value) const;
   bool computeWarpedReferenceGradient(const Feature &reference, const Matrix2d &A_cur_ref,
                                       int search_level, int level, int patch_index, V2D &gradient) const;
@@ -922,10 +956,13 @@ public:
                                   int residuals, double sse, double ncc, bool level_valid);
   void recordUsagePoseFrameInfo(const Eigen::MatrixXd &prior_cov, const Eigen::MatrixXd &posterior_cov,
                                 const Eigen::MatrixXd &h_base, const Eigen::MatrixXd &h_same,
-                                const Eigen::MatrixXd &h_cross,
+                                const Eigen::MatrixXd &h_cross, const Eigen::MatrixXd &h_current_cross,
                                 long long patches_all, long long residuals_all,
                                 long long patches_same, long long residuals_same,
-                                long long patches_cross, long long residuals_cross);
+                                long long patches_cross, long long residuals_cross,
+                                long long patches_current_cross, long long residuals_current_cross);
+  void recordCurrentCrossCameraUsage(const CurrentCrossCameraPair &pair, int stage,
+                                     int pyramid_level = -1, int residuals = 0);
   void printUsageStatsTable(int frame_id);
   void maybePrintUsageStatsTable(int frame_id);
   double calculateNCC(float *ref_patch, float *cur_patch, int patch_size);

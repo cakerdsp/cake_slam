@@ -132,6 +132,7 @@
     vio:
       frontend_mode: 0
       cross_camera_reference_en: true
+      cross_camera_current_residual_en: false
       max_iterations: 5
       outlier_threshold: 1000
       ncc_en: true

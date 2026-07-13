@@ -197,6 +197,7 @@ public:
   bool visual_map_retirement_apply_en = true;
   bool raw_camera_model_jacobian_en = false;
   bool cross_camera_reference_en = false;
+  bool cross_camera_current_residual_en = false;
   int visual_ref_max_candidates = 2;
   int visual_ref_validate_min_tests = 3;
   double visual_ref_validate_min_ratio = 0.67;
