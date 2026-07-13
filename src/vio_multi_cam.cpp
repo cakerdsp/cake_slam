@@ -3312,6 +3312,9 @@ void VIOManager::resetUsageStatsWindow()
   for (UsageStatsCell &cell : usage_view_angle_bins_) cell.reset();
   for (UsageStatsCell &cell : usage_footprint_bins_) cell.reset();
   for (UsageStatsCell &cell : usage_anisotropy_bins_) cell.reset();
+  usage_pose_all_.reset();
+  usage_pose_same_.reset();
+  usage_pose_cross_.reset();
   for (PoseInfoStatsCell &cell : usage_pose_region_pairs_) cell.reset();
   for (PoseInfoStatsCell &cell : usage_pose_cross_region_pairs_) cell.reset();
 }
@@ -3326,13 +3329,18 @@ void VIOManager::resetUsageStatsTotals()
   for (UsageStatsCell &cell : usage_total_view_angle_bins_) cell.reset();
   for (UsageStatsCell &cell : usage_total_footprint_bins_) cell.reset();
   for (UsageStatsCell &cell : usage_total_anisotropy_bins_) cell.reset();
+  usage_total_pose_all_.reset();
+  usage_total_pose_same_.reset();
+  usage_total_pose_cross_.reset();
   for (PoseInfoStatsCell &cell : usage_total_pose_region_pairs_) cell.reset();
   for (PoseInfoStatsCell &cell : usage_total_pose_cross_region_pairs_) cell.reset();
 }
 
 void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
                                         const V2D &cur_px, const Matrix2d &A_cur_ref, bool accepted,
-                                        double sse, double ncc)
+                                        const std::vector<double> &sse_levels,
+                                        const std::vector<double> &ncc_levels,
+                                        const std::vector<uint8_t> &level_valid)
 {
   if (!usage_stats_en) return;
   const int camera_count = numCameras();
@@ -3355,19 +3363,51 @@ void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature 
   const int anisotropy_bin = usageAnisotropyBin(A_cur_ref);
   const bool cross_camera = ref_ftr.camera_id_ != ctx.camera_id;
   const long long residual_count = static_cast<long long>(patch_size_total) * std::max(1, patch_pyrimid_level);
+  const int level_count = std::max(1, patch_pyrimid_level);
 
   auto updateCell = [&](UsageStatsCell &cell) {
+    cell.ensureLevels(level_count);
     if (accepted)
     {
       ++cell.accepted;
-      cell.residuals += residual_count;
-      if (std::isfinite(sse)) cell.sse += sse;
-      if (std::isfinite(ncc))
+      cell.theoretical_residuals += residual_count;
+      bool all_level_valid = true;
+      double ncc_min = std::numeric_limits<double>::infinity();
+      double ncc_sum = 0.0;
+      double rms_sum = 0.0;
+      int ncc_level_count = 0;
+      int rms_level_count = 0;
+      for (int level = 0; level < level_count; ++level)
       {
-        cell.ncc_sum += ncc;
-        ++cell.ncc_count;
-        const int ncc_bin = usageNccBin(ncc);
-        if (ncc_bin >= 0) ++cell.accepted_ncc_hist[ncc_bin];
+        const bool valid = level < static_cast<int>(level_valid.size()) && level_valid[level] != 0;
+        const double ncc = level < static_cast<int>(ncc_levels.size()) ? ncc_levels[level] : std::numeric_limits<double>::quiet_NaN();
+        const double sse = level < static_cast<int>(sse_levels.size()) ? sse_levels[level] : std::numeric_limits<double>::quiet_NaN();
+        if (!valid || !std::isfinite(ncc)) all_level_valid = false;
+        if (std::isfinite(ncc))
+        {
+          cell.levels[level].accepted_ncc_sum += ncc;
+          ++cell.levels[level].accepted_ncc_count;
+          const int ncc_bin = usageNccBin(ncc);
+          if (ncc_bin >= 0) ++cell.levels[level].accepted_ncc_hist[ncc_bin];
+          ncc_min = std::min(ncc_min, ncc);
+          ncc_sum += ncc;
+          ++ncc_level_count;
+        }
+        if (std::isfinite(sse))
+        {
+          cell.levels[level].accepted_sse += sse;
+          cell.levels[level].accepted_sse_samples += patch_size_total;
+          rms_sum += std::sqrt(std::max(0.0, sse) / static_cast<double>(std::max(1, patch_size_total)));
+          ++rms_level_count;
+        }
+      }
+      if (all_level_valid && ncc_level_count == level_count)
+      {
+        ++cell.accepted_all_level_count;
+        cell.accepted_ncc_min_sum += ncc_min;
+        cell.accepted_ncc_macro_sum += ncc_sum / static_cast<double>(level_count);
+        if (rms_level_count > 0)
+          cell.accepted_rms_macro_sum += rms_sum / static_cast<double>(rms_level_count);
       }
     }
     else
@@ -3406,11 +3446,11 @@ void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature 
 }
 
 void VIOManager::recordUsageCandidateNcc(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
-                                         const V2D &cur_px, const Matrix2d &A_cur_ref, double ncc)
+                                         const V2D &cur_px, const Matrix2d &A_cur_ref,
+                                         const std::vector<double> &ncc_levels,
+                                         const std::vector<uint8_t> &level_valid)
 {
-  if (!usage_stats_en || !std::isfinite(ncc)) return;
-  const int ncc_bin = usageNccBin(ncc);
-  if (ncc_bin < 0) return;
+  if (!usage_stats_en) return;
   const int camera_count = numCameras();
   if (camera_count <= 0 || ctx.camera_id < 0 || ctx.camera_id >= camera_count ||
       ref_ftr.camera_id_ < 0 || ref_ftr.camera_id_ >= camera_count)
@@ -3430,11 +3470,35 @@ void VIOManager::recordUsageCandidateNcc(const PerCameraData &ctx, const Feature
   const int footprint_bin = usageFootprintBin(A_cur_ref);
   const int anisotropy_bin = usageAnisotropyBin(A_cur_ref);
   const bool cross_camera = ref_ftr.camera_id_ != ctx.camera_id;
+  const int level_count = std::max(1, patch_pyrimid_level);
 
   auto updateCell = [&](UsageStatsCell &cell) {
-    ++cell.candidate_ncc_count;
-    cell.candidate_ncc_sum += ncc;
-    ++cell.candidate_ncc_hist[ncc_bin];
+    cell.ensureLevels(level_count);
+    bool all_level_valid = true;
+    double ncc_min = std::numeric_limits<double>::infinity();
+    double ncc_sum = 0.0;
+    int ncc_level_count = 0;
+    for (int level = 0; level < level_count; ++level)
+    {
+      const bool valid = level < static_cast<int>(level_valid.size()) && level_valid[level] != 0;
+      const double ncc = level < static_cast<int>(ncc_levels.size()) ? ncc_levels[level] : std::numeric_limits<double>::quiet_NaN();
+      if (!valid || !std::isfinite(ncc)) all_level_valid = false;
+      if (!std::isfinite(ncc)) continue;
+      const int ncc_bin = usageNccBin(ncc);
+      if (ncc_bin < 0) continue;
+      ++cell.levels[level].candidate_ncc_count;
+      cell.levels[level].candidate_ncc_sum += ncc;
+      ++cell.levels[level].candidate_ncc_hist[ncc_bin];
+      ncc_min = std::min(ncc_min, ncc);
+      ncc_sum += ncc;
+      ++ncc_level_count;
+    }
+    if (all_level_valid && ncc_level_count == level_count)
+    {
+      ++cell.candidate_all_level_count;
+      cell.candidate_ncc_min_sum += ncc_min;
+      cell.candidate_ncc_macro_sum += ncc_sum / static_cast<double>(level_count);
+    }
   };
 
   const int camera_pair_idx = ref_ftr.camera_id_ * camera_count + ctx.camera_id;
@@ -3466,10 +3530,10 @@ void VIOManager::recordUsageCandidateNcc(const PerCameraData &ctx, const Feature
   }
 }
 
-void VIOManager::recordUsagePoseInfo(const PerCameraData &ctx, const Feature &ref_ftr, const V2D &cur_px,
-                                     const Eigen::Matrix<double, kUsagePoseDim, 1> &j_pose, bool count_patch)
+void VIOManager::recordUsageEkfContribution(const PerCameraData &ctx, const Feature &ref_ftr, const V2D &cur_px,
+                                            int level_patches, int residuals)
 {
-  if (!usage_stats_en || !j_pose.array().isFinite().all()) return;
+  if (!usage_stats_en || residuals <= 0) return;
   const int camera_count = numCameras();
   if (camera_count <= 0 || ctx.camera_id < 0 || ctx.camera_id >= camera_count ||
       ref_ftr.camera_id_ < 0 || ref_ftr.camera_id_ >= camera_count)
@@ -3486,31 +3550,118 @@ void VIOManager::recordUsagePoseInfo(const PerCameraData &ctx, const Feature &re
   const int ref_region = usageRegionBin(ref_ctx, ref_ftr.px_);
   const int cur_region = usageRegionBin(ctx, cur_px);
   const bool cross_camera = ref_ftr.camera_id_ != ctx.camera_id;
-  const double inv_noise = (std::isfinite(img_point_cov) && img_point_cov > 1.0e-12) ? 1.0 / img_point_cov : 1.0;
 
-  auto updateCell = [&](PoseInfoStatsCell &cell) {
-    if (count_patch) ++cell.patches;
-    ++cell.residuals;
-    for (int r = 0; r < kUsagePoseDim; ++r)
-    {
-      for (int c = 0; c < kUsagePoseDim; ++c)
-        cell.h_pose[r * kUsagePoseDim + c] += inv_noise * j_pose[r] * j_pose[c];
-    }
-    cell.trace += inv_noise * j_pose.squaredNorm();
+  auto updateCell = [&](UsageStatsCell &cell) {
+    cell.ekf_patches += std::max(0, level_patches);
+    cell.ekf_residuals += residuals;
   };
 
   const int camera_pair_idx = ref_ftr.camera_id_ * camera_count + ctx.camera_id;
-  updateCell(usage_pose_camera_pairs_[camera_pair_idx]);
-  updateCell(usage_total_pose_camera_pairs_[camera_pair_idx]);
+  updateCell(usage_camera_pairs_[camera_pair_idx]);
+  updateCell(usage_total_camera_pairs_[camera_pair_idx]);
   if (ref_region >= 0 && cur_region >= 0)
   {
     const int region_pair_idx = ref_region * 4 + cur_region;
     const int cross_region_pair_idx = (cross_camera ? 16 : 0) + region_pair_idx;
-    updateCell(usage_pose_region_pairs_[region_pair_idx]);
-    updateCell(usage_total_pose_region_pairs_[region_pair_idx]);
-    updateCell(usage_pose_cross_region_pairs_[cross_region_pair_idx]);
-    updateCell(usage_total_pose_cross_region_pairs_[cross_region_pair_idx]);
+    updateCell(usage_region_pairs_[region_pair_idx]);
+    updateCell(usage_total_region_pairs_[region_pair_idx]);
+    updateCell(usage_cross_region_pairs_[cross_region_pair_idx]);
+    updateCell(usage_total_cross_region_pairs_[cross_region_pair_idx]);
   }
+}
+
+void VIOManager::recordUsagePoseFrameInfo(const Eigen::MatrixXd &prior_cov, const Eigen::MatrixXd &h_all,
+                                          const Eigen::MatrixXd &h_same, const Eigen::MatrixXd &h_cross,
+                                          long long patches_all, long long residuals_all,
+                                          long long patches_same, long long residuals_same,
+                                          long long patches_cross, long long residuals_cross)
+{
+  if (!usage_stats_en || prior_cov.rows() == 0 || prior_cov.rows() != prior_cov.cols()) return;
+
+  auto symmetrize = [](const Eigen::MatrixXd &m) {
+    return 0.5 * (m + m.transpose());
+  };
+
+  auto poseBlock = [](const Eigen::MatrixXd &m) {
+    Eigen::Matrix<double, kUsagePoseDim, kUsagePoseDim> out =
+        Eigen::Matrix<double, kUsagePoseDim, kUsagePoseDim>::Identity() * 1.0e-12;
+    const int dim = std::min<int>(kUsagePoseDim, std::min(m.rows(), m.cols()));
+    if (dim > 0) out.topLeftCorner(dim, dim) = m.topLeftCorner(dim, dim);
+    out = 0.5 * (out + out.transpose());
+    out.diagonal().array() += 1.0e-12;
+    return out;
+  };
+
+  auto logDetSpd = [](const Eigen::Matrix<double, kUsagePoseDim, kUsagePoseDim> &m) {
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, kUsagePoseDim, kUsagePoseDim>> solver(m);
+    if (solver.info() != Eigen::Success) return std::numeric_limits<double>::quiet_NaN();
+    double value = 0.0;
+    for (int i = 0; i < kUsagePoseDim; ++i)
+      value += std::log(std::max(1.0e-18, solver.eigenvalues()[i]));
+    return value;
+  };
+
+  auto computeGain = [&](const Eigen::MatrixXd &hessian, long long residuals) {
+    struct Gain
+    {
+      bool valid = false;
+      double ig = 0.0;
+      double worst = 1.0;
+    };
+    Gain gain;
+    if (residuals <= 0 || hessian.rows() != prior_cov.rows() || hessian.cols() != prior_cov.cols()) return gain;
+    Eigen::MatrixXd prior = symmetrize(prior_cov);
+    prior.diagonal().array() += 1.0e-12;
+    const Eigen::LDLT<Eigen::MatrixXd> prior_ldlt(prior);
+    if (prior_ldlt.info() != Eigen::Success) return gain;
+    const double inv_noise = (std::isfinite(img_point_cov) && img_point_cov > 1.0e-12) ? 1.0 / img_point_cov : 1.0;
+    Eigen::MatrixXd information =
+        prior_ldlt.solve(Eigen::MatrixXd::Identity(prior.rows(), prior.cols())) + inv_noise * symmetrize(hessian);
+    information = symmetrize(information);
+    information.diagonal().array() += 1.0e-12;
+    const Eigen::LDLT<Eigen::MatrixXd> info_ldlt(information);
+    if (info_ldlt.info() != Eigen::Success) return gain;
+    Eigen::MatrixXd posterior = info_ldlt.solve(Eigen::MatrixXd::Identity(information.rows(), information.cols()));
+    posterior = symmetrize(posterior);
+    const auto prior_pose = poseBlock(prior);
+    const auto posterior_pose = poseBlock(posterior);
+    const double logdet_prior = logDetSpd(prior_pose);
+    const double logdet_posterior = logDetSpd(posterior_pose);
+    if (!std::isfinite(logdet_prior) || !std::isfinite(logdet_posterior)) return gain;
+    Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::Matrix<double, kUsagePoseDim, kUsagePoseDim>>
+        solver(prior_pose, posterior_pose);
+    if (solver.info() == Eigen::Success)
+      gain.worst = std::max(0.0, solver.eigenvalues().minCoeff());
+    gain.ig = 0.5 * (logdet_prior - logdet_posterior);
+    gain.valid = std::isfinite(gain.ig);
+    return gain;
+  };
+
+  const auto gain_all = computeGain(h_all, residuals_all);
+  const auto gain_same = computeGain(h_same, residuals_same);
+  const auto gain_cross = computeGain(h_cross, residuals_cross);
+  const double ig_all = gain_all.valid ? gain_all.ig : 0.0;
+  const double ig_same = gain_same.valid ? gain_same.ig : 0.0;
+  const double ig_cross = gain_cross.valid ? gain_cross.ig : 0.0;
+  const double shapley_same = 0.5 * (ig_same + ig_all - ig_cross);
+  const double shapley_cross = 0.5 * (ig_cross + ig_all - ig_same);
+
+  auto updateCell = [](PoseInfoStatsCell &cell, double information_gain, double worst_gain,
+                       long long patches, long long residuals) {
+    ++cell.frames;
+    if (residuals > 0) ++cell.active_frames;
+    cell.patches += patches;
+    cell.residuals += residuals;
+    cell.information_gain_sum += information_gain;
+    if (residuals > 0) cell.worst_direction_gain_sum += worst_gain;
+  };
+
+  updateCell(usage_pose_all_, ig_all, gain_all.valid ? gain_all.worst : 1.0, patches_all, residuals_all);
+  updateCell(usage_pose_same_, shapley_same, gain_same.valid ? gain_same.worst : 1.0, patches_same, residuals_same);
+  updateCell(usage_pose_cross_, shapley_cross, gain_cross.valid ? gain_cross.worst : 1.0, patches_cross, residuals_cross);
+  updateCell(usage_total_pose_all_, ig_all, gain_all.valid ? gain_all.worst : 1.0, patches_all, residuals_all);
+  updateCell(usage_total_pose_same_, shapley_same, gain_same.valid ? gain_same.worst : 1.0, patches_same, residuals_same);
+  updateCell(usage_total_pose_cross_, shapley_cross, gain_cross.valid ? gain_cross.worst : 1.0, patches_cross, residuals_cross);
 }
 void VIOManager::printUsageStatsTable(int frame_id)
 {
@@ -3519,27 +3670,35 @@ void VIOManager::printUsageStatsTable(int frame_id)
   const char *color = "\033[1;35m";
   const char *reset = "\033[0m";
 
-  auto mergeCell = [](UsageStatsCell &dst, const UsageStatsCell &src) {
+  auto mergeCell = [&](UsageStatsCell &dst, const UsageStatsCell &src) {
+    const int level_count = std::max(static_cast<int>(dst.levels.size()), static_cast<int>(src.levels.size()));
+    dst.ensureLevels(level_count);
     dst.candidates += src.candidates;
     dst.accepted += src.accepted;
-    dst.residuals += src.residuals;
-    dst.candidate_ncc_count += src.candidate_ncc_count;
-    dst.ncc_count += src.ncc_count;
-    dst.sse += src.sse;
-    dst.candidate_ncc_sum += src.candidate_ncc_sum;
-    dst.ncc_sum += src.ncc_sum;
-    for (int i = 0; i < kUsageNccBinCount; ++i)
+    dst.theoretical_residuals += src.theoretical_residuals;
+    dst.ekf_patches += src.ekf_patches;
+    dst.ekf_residuals += src.ekf_residuals;
+    dst.candidate_all_level_count += src.candidate_all_level_count;
+    dst.accepted_all_level_count += src.accepted_all_level_count;
+    dst.candidate_ncc_min_sum += src.candidate_ncc_min_sum;
+    dst.candidate_ncc_macro_sum += src.candidate_ncc_macro_sum;
+    dst.accepted_ncc_min_sum += src.accepted_ncc_min_sum;
+    dst.accepted_ncc_macro_sum += src.accepted_ncc_macro_sum;
+    dst.accepted_rms_macro_sum += src.accepted_rms_macro_sum;
+    for (int level = 0; level < static_cast<int>(src.levels.size()); ++level)
     {
-      dst.candidate_ncc_hist[i] += src.candidate_ncc_hist[i];
-      dst.accepted_ncc_hist[i] += src.accepted_ncc_hist[i];
+      dst.levels[level].candidate_ncc_count += src.levels[level].candidate_ncc_count;
+      dst.levels[level].accepted_ncc_count += src.levels[level].accepted_ncc_count;
+      dst.levels[level].accepted_sse_samples += src.levels[level].accepted_sse_samples;
+      dst.levels[level].candidate_ncc_sum += src.levels[level].candidate_ncc_sum;
+      dst.levels[level].accepted_ncc_sum += src.levels[level].accepted_ncc_sum;
+      dst.levels[level].accepted_sse += src.levels[level].accepted_sse;
+      for (int i = 0; i < kUsageNccBinCount; ++i)
+      {
+        dst.levels[level].candidate_ncc_hist[i] += src.levels[level].candidate_ncc_hist[i];
+        dst.levels[level].accepted_ncc_hist[i] += src.levels[level].accepted_ncc_hist[i];
+      }
     }
-  };
-
-  auto mergePoseCell = [](PoseInfoStatsCell &dst, const PoseInfoStatsCell &src) {
-    dst.patches += src.patches;
-    dst.residuals += src.residuals;
-    dst.trace += src.trace;
-    for (int i = 0; i < kUsagePoseDim * kUsagePoseDim; ++i) dst.h_pose[i] += src.h_pose[i];
   };
 
   auto formatDouble = [](double value, int precision = 3) {
@@ -3548,222 +3707,33 @@ void VIOManager::printUsageStatsTable(int frame_id)
     return stream.str();
   };
 
-  auto formatSci = [](double value, int precision = 3) {
-    std::ostringstream stream;
-    stream << std::scientific << std::setprecision(precision) << value;
-    return stream.str();
-  };
-
   auto formatPercent = [&](long long count, long long total) {
     return total > 0 ? formatDouble(100.0 * static_cast<double>(count) / static_cast<double>(total), 2) : std::string("-");
   };
 
+  auto printLine = [&](const std::string &line) {
+    printf("%s%s%s\n", color, line.c_str(), reset);
+  };
+
   auto printDivider = [&]() {
-    printf("%s+------------------------------------------------------------------------------------------------------------------------------------------+%s\n", color, reset);
+    printLine(std::string(180, '-'));
   };
 
-  auto nccBinName = [](int idx) {
-    static const char *names[kUsageNccBinCount] = {"<0.0", "0.0-0.1", "0.1-0.2", "0.2-0.3", "0.3-0.4", "0.4-0.5",
-                                                   "0.5-0.6", "0.6-0.7", "0.7-0.8", "0.8-0.9", "0.9-1.0"};
-    return names[std::max(0, std::min(kUsageNccBinCount - 1, idx))];
-  };
-
-  auto firstNccBinAtThreshold = [](double threshold) {
-    if (threshold <= 0.0) return 1;
-    if (threshold >= 1.0) return kUsageNccBinCount - 1;
-    return std::max(1, std::min(kUsageNccBinCount - 1,
-                                1 + static_cast<int>(std::ceil(threshold * 10.0 - 1.0e-9))));
-  };
-
-  auto nccCountAtThreshold = [&](const UsageStatsCell &cell, bool accepted, double threshold) {
-    const auto &hist = accepted ? cell.accepted_ncc_hist : cell.candidate_ncc_hist;
-    long long count = 0;
-    for (int i = firstNccBinAtThreshold(threshold); i < kUsageNccBinCount; ++i) count += hist[i];
-    return count;
-  };
-
-  auto nccSampleCount = [](const UsageStatsCell &cell, bool accepted) {
-    return accepted ? cell.ncc_count : cell.candidate_ncc_count;
-  };
-
-  auto nccSampleSum = [](const UsageStatsCell &cell, bool accepted) {
-    return accepted ? cell.ncc_sum : cell.candidate_ncc_sum;
-  };
-
-  auto printNccSummaryRow = [&](const std::string &name, const UsageStatsCell &cell, bool accepted) {
-    const long long samples = nccSampleCount(cell, accepted);
-    const std::string mean_text = samples > 0 ? formatDouble(nccSampleSum(cell, accepted) / samples, 3) : "-";
-    const long long ge01 = nccCountAtThreshold(cell, accepted, 0.1);
-    const long long ge03 = nccCountAtThreshold(cell, accepted, 0.3);
-    const long long ge05 = nccCountAtThreshold(cell, accepted, 0.5);
-    const long long ge07 = nccCountAtThreshold(cell, accepted, 0.7);
-    const long long ge08 = nccCountAtThreshold(cell, accepted, 0.8);
-    const long long ge09 = nccCountAtThreshold(cell, accepted, 0.9);
-    printf("%s| %-14s | %9lld | %8s | %8lld %7s | %8lld %7s | %8lld %7s | %8lld %7s | %8lld %7s | %8lld %7s |%s\n",
-           color, name.c_str(), samples, mean_text.c_str(), ge01, formatPercent(ge01, samples).c_str(),
-           ge03, formatPercent(ge03, samples).c_str(), ge05, formatPercent(ge05, samples).c_str(),
-           ge07, formatPercent(ge07, samples).c_str(), ge08, formatPercent(ge08, samples).c_str(),
-           ge09, formatPercent(ge09, samples).c_str(), reset);
-  };
-
-  auto printNccSummary = [&](const char *section_title, const UsageStatsCell &total,
-                             const UsageStatsCell &same_camera, const UsageStatsCell &cross_camera,
-                             bool accepted) {
-    printDivider();
-    printf("%s| %-136s |%s\n", color, section_title, reset);
-    printDivider();
-    printf("%s| %-14s | %9s | %8s | %16s | %16s | %16s | %16s | %16s | %16s |%s\n",
-           color, "Group", "Samples", "Mean", ">=0.1", ">=0.3", ">=0.5", ">=0.7", ">=0.8", ">=0.9", reset);
-    printDivider();
-    printNccSummaryRow("all", total, accepted);
-    printNccSummaryRow("same_cam", same_camera, accepted);
-    printNccSummaryRow("cross_cam", cross_camera, accepted);
-  };
-
-  auto printNccDistribution = [&](const char *section_title, const UsageStatsCell &total,
-                                  const UsageStatsCell &same_camera, const UsageStatsCell &cross_camera,
-                                  bool accepted) {
-    const auto &total_hist = accepted ? total.accepted_ncc_hist : total.candidate_ncc_hist;
-    const auto &same_hist = accepted ? same_camera.accepted_ncc_hist : same_camera.candidate_ncc_hist;
-    const auto &cross_hist = accepted ? cross_camera.accepted_ncc_hist : cross_camera.candidate_ncc_hist;
-    const long long total_count = nccSampleCount(total, accepted);
-    const long long same_count = nccSampleCount(same_camera, accepted);
-    const long long cross_count = nccSampleCount(cross_camera, accepted);
-    printDivider();
-    printf("%s| %-136s |%s\n", color, section_title, reset);
-    printDivider();
-    printf("%s| %-12s | %12s | %8s | %12s | %8s | %12s | %8s |%s\n",
-           color, "NCC bin", "all_count", "all %", "same_count", "same %", "cross_count", "cross %", reset);
-    printDivider();
-    for (int i = 0; i < kUsageNccBinCount; ++i)
-    {
-      printf("%s| %-12s | %12lld | %8s | %12lld | %8s | %12lld | %8s |%s\n",
-             color, nccBinName(i), total_hist[i], formatPercent(total_hist[i], total_count).c_str(),
-             same_hist[i], formatPercent(same_hist[i], same_count).c_str(),
-             cross_hist[i], formatPercent(cross_hist[i], cross_count).c_str(), reset);
-    }
-  };
-
-  struct PoseMetrics
-  {
-    bool valid = false;
-    double trace = 0.0;
-    double trace_per_patch = 0.0;
-    double trace_per_residual = 0.0;
-    double logdet = 0.0;
-    double min_eig = 0.0;
-    double max_eig = 0.0;
-    double condition = 0.0;
-  };
-
-  auto computePoseMetrics = [&](const PoseInfoStatsCell &cell) {
-    PoseMetrics metrics;
-    if (cell.residuals <= 0) return metrics;
-    Eigen::Matrix<double, kUsagePoseDim, kUsagePoseDim> H;
-    for (int r = 0; r < kUsagePoseDim; ++r)
-      for (int c = 0; c < kUsagePoseDim; ++c)
-        H(r, c) = cell.h_pose[r * kUsagePoseDim + c];
-    H = 0.5 * (H + H.transpose());
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, kUsagePoseDim, kUsagePoseDim>> solver(H);
-    if (solver.info() != Eigen::Success) return metrics;
-    const auto eig = solver.eigenvalues();
-    metrics.valid = true;
-    metrics.trace = std::max(0.0, cell.trace);
-    metrics.trace_per_patch = cell.patches > 0 ? metrics.trace / static_cast<double>(cell.patches) : 0.0;
-    metrics.trace_per_residual = metrics.trace / static_cast<double>(cell.residuals);
-    metrics.min_eig = std::max(0.0, eig[0]);
-    metrics.max_eig = std::max(0.0, eig[kUsagePoseDim - 1]);
-    const double lambda = std::max(1.0e-12, metrics.trace * 1.0e-12 / static_cast<double>(kUsagePoseDim));
-    metrics.logdet = 0.0;
-    for (int i = 0; i < kUsagePoseDim; ++i) metrics.logdet += std::log(std::max(0.0, eig[i]) + lambda);
-    metrics.condition = metrics.max_eig / std::max(metrics.min_eig, lambda);
-    return metrics;
-  };
-
-  auto printPoseRow = [&](const std::string &name, const PoseInfoStatsCell &cell) {
-    const PoseMetrics metrics = computePoseMetrics(cell);
-    if (!metrics.valid)
-    {
-      printf("%s| %-28s | %9lld | %9lld | %12s | %12s | %12s | %10s | %12s | %12s |%s\n",
-             color, name.c_str(), cell.patches, cell.residuals, "-", "-", "-", "-", "-", "-", reset);
-      return;
-    }
-    printf("%s| %-28s | %9lld | %9lld | %12s | %12s | %12s | %10s | %12s | %12s |%s\n",
-           color, name.c_str(), cell.patches, cell.residuals, formatSci(metrics.trace).c_str(),
-           formatSci(metrics.trace_per_patch).c_str(), formatSci(metrics.trace_per_residual).c_str(),
-           formatDouble(metrics.logdet, 2).c_str(), formatSci(metrics.min_eig).c_str(),
-           formatSci(metrics.condition).c_str(), reset);
-  };
-
-  auto printPoseSection = [&](const char *section_title, const std::vector<PoseInfoStatsCell> &pose_camera_pairs,
-                              const std::array<PoseInfoStatsCell, 16> &pose_region_pairs,
-                              const std::array<PoseInfoStatsCell, 32> &pose_cross_region_pairs) {
-    PoseInfoStatsCell pose_total;
-    PoseInfoStatsCell pose_same;
-    PoseInfoStatsCell pose_cross;
-    const int camera_count = numCameras();
-    for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
-    {
-      for (int cur_cam = 0; cur_cam < camera_count; ++cur_cam)
-      {
-        const size_t idx = static_cast<size_t>(ref_cam * camera_count + cur_cam);
-        if (idx >= pose_camera_pairs.size()) continue;
-        const PoseInfoStatsCell &cell = pose_camera_pairs[idx];
-        mergePoseCell(pose_total, cell);
-        if (ref_cam == cur_cam)
-          mergePoseCell(pose_same, cell);
-        else
-          mergePoseCell(pose_cross, cell);
-      }
-    }
-
-    printDivider();
-    printf("%s| %-136s |%s\n", color, section_title, reset);
-    printDivider();
-    printf("%s| %-28s | %9s | %9s | %12s | %12s | %12s | %10s | %12s | %12s |%s\n",
-           color, "Category", "Patches", "Residuals", "Trace", "Tr/Patch", "Tr/Resid", "LogDet", "MinEig", "Cond", reset);
-    printDivider();
-    printPoseRow("all", pose_total);
-    printPoseRow("same_cam", pose_same);
-    printPoseRow("cross_cam", pose_cross);
-
-    static const char *region_names[] = {"center", "mid", "edge", "outer"};
-    for (int ref_region = 0; ref_region < 4; ++ref_region)
-    {
-      for (int cur_region = 0; cur_region < 4; ++cur_region)
-      {
-        const PoseInfoStatsCell &cell = pose_region_pairs[ref_region * 4 + cur_region];
-        if (cell.residuals == 0) continue;
-        printPoseRow(std::string(region_names[ref_region]) + "->" + region_names[cur_region], cell);
-      }
-    }
-    for (int cross = 0; cross < 2; ++cross)
-    {
-      for (int ref_region = 0; ref_region < 4; ++ref_region)
-      {
-        for (int cur_region = 0; cur_region < 4; ++cur_region)
-        {
-          const PoseInfoStatsCell &cell = pose_cross_region_pairs[cross * 16 + ref_region * 4 + cur_region];
-          if (cell.residuals == 0) continue;
-          printPoseRow(std::string(cross ? "cross " : "same ") + region_names[ref_region] + "->" + region_names[cur_region], cell);
-        }
-      }
-    }
+  auto meanText = [&](double sum, long long count, int precision) {
+    return count > 0 ? formatDouble(sum / static_cast<double>(count), precision) : std::string("-");
   };
 
   auto printStatsSet = [&](const char *title, const char *frame_label, long long frame_count,
                            const std::vector<UsageStatsCell> &camera_pairs,
-                           const std::array<UsageStatsCell, 16> &region_pairs,
-                           const std::array<UsageStatsCell, 32> &cross_region_pairs,
-                           const std::array<UsageStatsCell, 5> &view_angle_bins,
-                           const std::array<UsageStatsCell, 5> &footprint_bins,
-                           const std::array<UsageStatsCell, 4> &anisotropy_bins,
-                           const std::vector<PoseInfoStatsCell> &pose_camera_pairs,
-                           const std::array<PoseInfoStatsCell, 16> &pose_region_pairs,
-                           const std::array<PoseInfoStatsCell, 32> &pose_cross_region_pairs) {
+                           const PoseInfoStatsCell &pose_all,
+                           const PoseInfoStatsCell &pose_same,
+                           const PoseInfoStatsCell &pose_cross) {
     UsageStatsCell total;
     UsageStatsCell same_camera;
     UsageStatsCell cross_camera;
+    total.ensureLevels(std::max(1, patch_pyrimid_level));
+    same_camera.ensureLevels(std::max(1, patch_pyrimid_level));
+    cross_camera.ensureLevels(std::max(1, patch_pyrimid_level));
     const int camera_count = numCameras();
     for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
     {
@@ -3780,45 +3750,106 @@ void VIOManager::printUsageStatsTable(int frame_id)
       }
     }
 
-    const long long total_residuals = std::max(1LL, total.residuals);
-    const double samples_per_patch = static_cast<double>(std::max(1, patch_size_total));
-
-    auto printSection = [&](const char *section_title) {
+    auto printTextureSection = [&](const char *section_title) {
       printDivider();
-      printf("%s| %-136s |%s\n", color, section_title, reset);
+      printLine(section_title);
       printDivider();
-      printf("%s| %-32s | %9s | %9s | %7s | %7s | %8s | %8s |%s\n",
-             color, "Category", "Candidate", "Accepted", "Acc %", "Use %", "RMS", "NCC", reset);
+      std::ostringstream header;
+      header << std::left << std::setw(24) << "Category"
+             << std::right << std::setw(10) << "Cand"
+             << std::setw(10) << "Accept"
+             << std::setw(9) << "Acc%"
+             << std::setw(10) << "EKFPat"
+             << std::setw(10) << "EKFRes"
+             << std::setw(11) << "EKFRes/F"
+             << std::setw(10) << "AllLvl%"
+             << std::setw(10) << "NCCmin"
+             << std::setw(10) << "NCCmac"
+             << std::setw(10) << "RMSmac";
+      for (int level = 0; level < std::max(1, patch_pyrimid_level); ++level)
+      {
+        header << std::setw(10) << ("NCC_L" + std::to_string(level))
+               << std::setw(10) << ("RMS_L" + std::to_string(level));
+      }
+      printLine(header.str());
       printDivider();
     };
 
     auto printRow = [&](const std::string &name, const UsageStatsCell &cell) {
-      const double accept_ratio = cell.candidates > 0 ? 100.0 * static_cast<double>(cell.accepted) / cell.candidates : 0.0;
-      const double use_ratio = 100.0 * static_cast<double>(cell.residuals) / total_residuals;
-      const double rms = cell.accepted > 0 ? std::sqrt(std::max(0.0, cell.sse) / (cell.accepted * samples_per_patch)) : 0.0;
-      const std::string rms_text = cell.accepted > 0 ? formatDouble(rms, 2) : "-";
-      const std::string ncc_text = cell.ncc_count > 0 ? formatDouble(cell.ncc_sum / cell.ncc_count, 3) : "-";
-      printf("%s| %-32s | %9lld | %9lld | %7.2f | %7.2f | %8s | %8s |%s\n",
-             color, name.c_str(), cell.candidates, cell.accepted, accept_ratio, use_ratio,
-             rms_text.c_str(), ncc_text.c_str(), reset);
+      std::ostringstream row;
+      row << std::left << std::setw(24) << name
+          << std::right << std::setw(10) << cell.candidates
+          << std::setw(10) << cell.accepted
+          << std::setw(9) << (cell.candidates > 0 ? formatDouble(100.0 * cell.accepted / cell.candidates, 2) : "-")
+          << std::setw(10) << cell.ekf_patches
+          << std::setw(10) << cell.ekf_residuals
+          << std::setw(11) << (frame_count > 0 ? formatDouble(static_cast<double>(cell.ekf_residuals) / frame_count, 1) : "-")
+          << std::setw(10) << formatPercent(cell.accepted_all_level_count, cell.accepted)
+          << std::setw(10) << meanText(cell.accepted_ncc_min_sum, cell.accepted_all_level_count, 3)
+          << std::setw(10) << meanText(cell.accepted_ncc_macro_sum, cell.accepted_all_level_count, 3)
+          << std::setw(10) << meanText(cell.accepted_rms_macro_sum, cell.accepted_all_level_count, 2);
+      for (int level = 0; level < std::max(1, patch_pyrimid_level); ++level)
+      {
+        if (level < static_cast<int>(cell.levels.size()))
+        {
+          const UsageLevelStats &level_stats = cell.levels[level];
+          const std::string ncc_text = meanText(level_stats.accepted_ncc_sum, level_stats.accepted_ncc_count, 3);
+          const std::string rms_text = level_stats.accepted_sse_samples > 0
+              ? formatDouble(std::sqrt(std::max(0.0, level_stats.accepted_sse) /
+                                       static_cast<double>(level_stats.accepted_sse_samples)), 2)
+              : std::string("-");
+          row << std::setw(10) << ncc_text << std::setw(10) << rms_text;
+        }
+        else
+        {
+          row << std::setw(10) << "-" << std::setw(10) << "-";
+        }
+      }
+      printLine(row.str());
+    };
+
+    auto printPoseSection = [&](const char *section_title) {
+      printDivider();
+      printLine(section_title);
+      printDivider();
+      printLine("Category                   Frames    Active   EKFPat   EKFRes  EKFRes/F    IG/frame   IG/active  WorstGain");
+      printDivider();
+      auto printPoseRow = [&](const std::string &name, const PoseInfoStatsCell &cell) {
+        std::ostringstream row;
+        row << std::left << std::setw(24) << name
+            << std::right << std::setw(8) << cell.frames
+            << std::setw(10) << cell.active_frames
+            << std::setw(9) << cell.patches
+            << std::setw(9) << cell.residuals
+            << std::setw(10) << (frame_count > 0 ? formatDouble(static_cast<double>(cell.residuals) / frame_count, 1) : "-")
+            << std::setw(12) << (frame_count > 0 ? formatDouble(cell.information_gain_sum / frame_count, 5) : "-")
+            << std::setw(12) << (cell.active_frames > 0 ? formatDouble(cell.information_gain_sum / cell.active_frames, 5) : "-")
+            << std::setw(11) << (cell.active_frames > 0 ? formatDouble(cell.worst_direction_gain_sum / cell.active_frames, 4) : "-");
+        printLine(row.str());
+      };
+      printPoseRow("all", pose_all);
+      printPoseRow("same_cam_shapley", pose_same);
+      printPoseRow("cross_cam_shapley", pose_cross);
     };
 
     printDivider();
-    printf("%s| %-136s |%s\n", color, title, reset);
-    printf("%s| frame=%-8d %-13s=%-8lld total_candidates=%-8lld total_accepted=%-8lld residuals=%-8lld |%s\n",
-           color, frame_id, frame_label, frame_count, total.candidates, total.accepted, total.residuals, reset);
+    printLine(title);
+    std::ostringstream summary;
+    summary << "frame=" << frame_id << " " << frame_label << "=" << frame_count
+            << " total_candidates=" << total.candidates
+            << " total_accepted=" << total.accepted
+            << " theoretical_residuals=" << total.theoretical_residuals
+            << " actual_ekf_residuals=" << total.ekf_residuals
+            << " pyramid_levels=" << std::max(1, patch_pyrimid_level);
+    printLine(summary.str());
 
-    printSection("SAME_CROSS_USAGE");
+    printTextureSection("TEXTURE_CONSISTENCY_BY_GROUP");
     printRow("same_cam", same_camera);
     printRow("cross_cam", cross_camera);
 
-    printNccSummary("NCC_CANDIDATE_SUMMARY_BEFORE_THRESHOLD", total, same_camera, cross_camera, false);
-    printNccDistribution("NCC_CANDIDATE_DISTRIBUTION_BEFORE_THRESHOLD", total, same_camera, cross_camera, false);
-    printNccSummary("NCC_ACCEPTED_SUMMARY", total, same_camera, cross_camera, true);
-    printNccDistribution("NCC_ACCEPTED_DISTRIBUTION", total, same_camera, cross_camera, true);
-    printPoseSection("POSE_INFORMATION_FROM_FIRST_LINEARIZATION", pose_camera_pairs, pose_region_pairs, pose_cross_region_pairs);
+    printPoseSection("POSE_INFORMATION_GAIN_ACTUAL_EKF");
 
-    printSection("CAMERA_PAIR_USAGE");
+    printTextureSection("TEXTURE_CONSISTENCY_BY_CAMERA_PAIR");
     for (int ref_cam = 0; ref_cam < camera_count; ++ref_cam)
     {
       for (int cur_cam = 0; cur_cam < camera_count; ++cur_cam)
@@ -3830,55 +3861,13 @@ void VIOManager::printUsageStatsTable(int frame_id)
         printRow("cam" + std::to_string(ref_cam) + "->cam" + std::to_string(cur_cam), cell);
       }
     }
-
-    static const char *region_names[] = {"center", "mid", "edge", "outer"};
-    printSection("REGION_PAIR_USAGE");
-    for (int ref_region = 0; ref_region < 4; ++ref_region)
-    {
-      for (int cur_region = 0; cur_region < 4; ++cur_region)
-      {
-        const UsageStatsCell &cell = region_pairs[ref_region * 4 + cur_region];
-        if (cell.candidates == 0 && cell.accepted == 0) continue;
-        printRow(std::string(region_names[ref_region]) + "->" + region_names[cur_region], cell);
-      }
-    }
-
-    printSection("CROSS_CAMERA_REGION_USAGE");
-    for (int cross = 0; cross < 2; ++cross)
-    {
-      for (int ref_region = 0; ref_region < 4; ++ref_region)
-      {
-        for (int cur_region = 0; cur_region < 4; ++cur_region)
-        {
-          const UsageStatsCell &cell = cross_region_pairs[cross * 16 + ref_region * 4 + cur_region];
-          if (cell.candidates == 0 && cell.accepted == 0) continue;
-          printRow(std::string(cross ? "cross " : "same ") + region_names[ref_region] + "->" + region_names[cur_region], cell);
-        }
-      }
-    }
-
-    static const char *angle_names[] = {"0-5deg", "5-15deg", "15-30deg", "30-60deg", ">60deg"};
-    printSection("VIEW_ANGLE_DELTA_USAGE");
-    for (int i = 0; i < 5; ++i) printRow(angle_names[i], view_angle_bins[i]);
-
-    static const char *footprint_names[] = {"invalid", "1-2x", "2-4x", "4-8x", ">8x"};
-    printSection("FOOTPRINT_USAGE");
-    for (int i = 0; i < 5; ++i) printRow(footprint_names[i], footprint_bins[i]);
-
-    static const char *anisotropy_names[] = {"1-1.5x", "1.5-2x", "2-4x", ">4x"};
-    printSection("ANISOTROPY_USAGE");
-    for (int i = 0; i < 4; ++i) printRow(anisotropy_names[i], anisotropy_bins[i]);
     printDivider();
   };
 
   printStatsSet("VIO Usage Stats (Window)", "window_frames", usage_stats_frames_, usage_camera_pairs_,
-                usage_region_pairs_, usage_cross_region_pairs_, usage_view_angle_bins_,
-                usage_footprint_bins_, usage_anisotropy_bins_, usage_pose_camera_pairs_,
-                usage_pose_region_pairs_, usage_pose_cross_region_pairs_);
+                usage_pose_all_, usage_pose_same_, usage_pose_cross_);
   printStatsSet("VIO Usage Stats (Run Total)", "total_frames", usage_stats_total_frames_, usage_total_camera_pairs_,
-                usage_total_region_pairs_, usage_total_cross_region_pairs_, usage_total_view_angle_bins_,
-                usage_total_footprint_bins_, usage_total_anisotropy_bins_, usage_total_pose_camera_pairs_,
-                usage_total_pose_region_pairs_, usage_total_pose_cross_region_pairs_);
+                usage_total_pose_all_, usage_total_pose_same_, usage_total_pose_cross_);
 }
 void VIOManager::maybePrintUsageStatsTable(int frame_id)
 {
@@ -4080,6 +4069,9 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     VirtualTrackPatch track;
     vector<float> warped_reference;
     vector<float> current_core;
+    std::vector<double> level_sse;
+    std::vector<double> level_ncc;
+    std::vector<uint8_t> level_valid;
     float error = 0.0f;
     double inverse_reference_exposure = 0.0;
     double ncc = std::numeric_limits<double>::quiet_NaN();
@@ -4416,7 +4408,10 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     }
 
     const double current_core_start = omp_get_wtime();
-    vector<float> current_core(patch_size_total);
+    vector<float> current_core_all(warp_len, 0.0f);
+    result.level_sse.assign(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
+    result.level_ncc.assign(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
+    result.level_valid.assign(std::max(1, patch_pyrimid_level), 0);
     const V3D point_vcur = result.track.T_vcur_w_seed * pt->pos_;
     if (point_vcur[2] <= virtual_min_z)
     {
@@ -4424,10 +4419,24 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       result.rejection = VIRTUAL_REJECT_CURRENT_Z;
       continue;
     }
-    const bool current_core_ok = virtual_sparse_patch_en
-        ? sampleSparseVirtualCorePatch(ctx, img, result.track.R_ccur_from_vcur_seed,
-                                       virtualProject(point_vcur), 1, current_core.data())
-        : sampleVirtualCorePatch(result.track.cur_support, virtualProject(point_vcur), 1, current_core.data());
+    const V2D virtual_center = virtualProject(point_vcur);
+    bool current_core_ok = true;
+    for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+    {
+      const int scale = 1 << pyramid_level;
+      const bool level_ok = virtual_sparse_patch_en
+          ? sampleSparseVirtualCorePatch(ctx, img, result.track.R_ccur_from_vcur_seed,
+                                         virtual_center, scale,
+                                         current_core_all.data() + patch_size_total * pyramid_level)
+          : sampleVirtualCorePatch(result.track.cur_support, virtual_center, scale,
+                                   current_core_all.data() + patch_size_total * pyramid_level);
+      result.level_valid[pyramid_level] = level_ok ? 1 : 0;
+      if (!level_ok)
+      {
+        current_core_ok = false;
+        break;
+      }
+    }
     if (!current_core_ok)
     {
       result.current_core_time = omp_get_wtime() - current_core_start;
@@ -4435,15 +4444,28 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       continue;
     }
 
-    for (int k = 0; k < patch_size_total; ++k)
+    for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
     {
-      const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[k] -
-                              state->inv_expo_time[ctx.camera_id] * current_core[k];
-      result.error += residual * residual;
+      double level_error = 0.0;
+      const int offset = patch_size_total * pyramid_level;
+      for (int k = 0; k < patch_size_total; ++k)
+      {
+        const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[offset + k] -
+                                state->inv_expo_time[ctx.camera_id] * current_core_all[offset + k];
+        level_error += residual * residual;
+      }
+      result.level_sse[pyramid_level] = level_error;
+      if (pyramid_level == 0) result.error = static_cast<float>(level_error);
     }
     if (ncc_en || usage_stats_en)
     {
-      result.ncc = calculateNCC(result.warped_reference.data(), current_core.data(), patch_size_total);
+      for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+      {
+        const int offset = patch_size_total * pyramid_level;
+        result.level_ncc[pyramid_level] =
+            calculateNCC(result.warped_reference.data() + offset, current_core_all.data() + offset, patch_size_total);
+      }
+      result.ncc = result.level_ncc.empty() ? std::numeric_limits<double>::quiet_NaN() : result.level_ncc[0];
       if (ncc_en && result.ncc < ncc_thre)
       {
         result.current_core_time = omp_get_wtime() - current_core_start;
@@ -4459,7 +4481,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     }
     result.current_core_time = omp_get_wtime() - current_core_start;
 
-    if (runtime_support_dump_en) result.current_core = std::move(current_core);
+    if (runtime_support_dump_en)
+      result.current_core.assign(current_core_all.begin(), current_core_all.begin() + patch_size_total);
     result.inverse_reference_exposure = ref_ftr->inv_expo_time_;
     result.track.valid = true;
     result.valid = true;
@@ -4489,7 +4512,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       const Matrix2d usage_affine = result.search_level >= 0 ? result.track.A_cur_ref : Matrix2d::Zero();
       recordUsageObservation(ctx, *candidate.reference, *candidate.point, candidate.current_raw_center_px, usage_affine, false);
       recordUsageCandidateNcc(ctx, *candidate.reference, *candidate.point, candidate.current_raw_center_px,
-                              usage_affine, result.ncc);
+                              usage_affine, result.level_ncc, result.level_valid);
     }
     build_virtual_support_time_ += result.build_time;
     virtual_affine_time_ += result.affine_time;
@@ -4556,7 +4579,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     {
       const VirtualCandidate &candidate = candidates[candidate_index];
       recordUsageObservation(ctx, *candidate.reference, *candidate.point, candidate.current_raw_center_px,
-                             result.track.A_cur_ref, true, result.error, result.ncc);
+                             result.track.A_cur_ref, true, result.level_sse, result.level_ncc, result.level_valid);
     }
     const VirtualCandidate &accepted_candidate = candidates[candidate_index];
     if (runtime_support_dump_en && accepted_candidate.point != nullptr)
@@ -5128,20 +5151,45 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       }
       if (!warp_ok) break;
 
-      getImagePatch(ctx, img, pc, patch_buffer.data(), 0);
+      std::vector<float> current_patch_all(warp_len, 0.0f);
+      std::vector<double> usage_sse_levels(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
+      std::vector<double> usage_ncc_levels(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
+      std::vector<uint8_t> usage_level_valid(std::max(1, patch_pyrimid_level), 0);
+      for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+      {
+        getImagePatch(ctx, img, pc, current_patch_all.data(), pyramid_level);
+        usage_level_valid[pyramid_level] = 1;
+      }
+      std::copy(current_patch_all.begin(), current_patch_all.begin() + patch_size_total, patch_buffer.begin());
 
       float error = 0.0;
-      for (int ind = 0; ind < patch_size_total; ind++)
+      for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
       {
-        error += (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time[ctx.camera_id] * patch_buffer[ind]) *
-                 (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time[ctx.camera_id] * patch_buffer[ind]);
+        double level_error = 0.0;
+        const int offset = patch_size_total * pyramid_level;
+        for (int ind = 0; ind < patch_size_total; ind++)
+        {
+          level_error += (ref_ftr->inv_expo_time_ * patch_wrap[offset + ind] -
+                          state->inv_expo_time[ctx.camera_id] * current_patch_all[offset + ind]) *
+                         (ref_ftr->inv_expo_time_ * patch_wrap[offset + ind] -
+                          state->inv_expo_time[ctx.camera_id] * current_patch_all[offset + ind]);
+        }
+        usage_sse_levels[pyramid_level] = level_error;
+        if (pyramid_level == 0) error = static_cast<float>(level_error);
       }
 
       double usage_ncc = std::numeric_limits<double>::quiet_NaN();
       if (ncc_en || usage_stats_en)
       {
-        usage_ncc = calculateNCC(patch_wrap.data(), patch_buffer.data(), patch_size_total);
-        if (usage_stats_en) recordUsageCandidateNcc(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero, usage_ncc);
+        for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+        {
+          const int offset = patch_size_total * pyramid_level;
+          usage_ncc_levels[pyramid_level] =
+              calculateNCC(patch_wrap.data() + offset, current_patch_all.data() + offset, patch_size_total);
+        }
+        usage_ncc = usage_ncc_levels.empty() ? std::numeric_limits<double>::quiet_NaN() : usage_ncc_levels[0];
+        if (usage_stats_en) recordUsageCandidateNcc(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero,
+                                                    usage_ncc_levels, usage_level_valid);
         if (ncc_en && usage_ncc < ncc_thre)
         {
           // grid_num[i] = TYPE_UNKNOWN;
@@ -5175,7 +5223,8 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
                                            error, usage_ncc);
         }
       }
-      if (usage_stats_en) recordUsageObservation(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero, true, error, usage_ncc);
+      if (usage_stats_en) recordUsageObservation(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero, true,
+                                                 usage_sse_levels, usage_ncc_levels, usage_level_valid);
       ctx.visual_submap->voxel_points.push_back(pt);
       ctx.visual_submap->reference_features.push_back(ref_ftr);
       ctx.visual_submap->propa_errors.push_back(error);
@@ -5304,6 +5353,17 @@ void VIOManager::computeJacobianAndUpdateEKF()
       total_observations >= online_extrinsic_min_tracks;
   const bool allow_extrinsic_rotation = online_extrinsic_active && online_extrinsic_rot_en;
   const bool allow_extrinsic_translation = online_extrinsic_active && online_extrinsic_trans_en;
+  const Eigen::MatrixXd usage_prior_cov = state->cov;
+  const int usage_state_dim = state->stateDim();
+  Eigen::MatrixXd usage_h_all = Eigen::MatrixXd::Zero(usage_state_dim, usage_state_dim);
+  Eigen::MatrixXd usage_h_same = Eigen::MatrixXd::Zero(usage_state_dim, usage_state_dim);
+  Eigen::MatrixXd usage_h_cross = Eigen::MatrixXd::Zero(usage_state_dim, usage_state_dim);
+  long long usage_patches_all = 0;
+  long long usage_patches_same = 0;
+  long long usage_patches_cross = 0;
+  long long usage_residuals_all = 0;
+  long long usage_residuals_same = 0;
+  long long usage_residuals_cross = 0;
 
   for (int level = patch_pyrimid_level - 1; level >= 0; --level)
   {
@@ -5382,17 +5442,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           Feature *usage_reference = point_index < static_cast<int>(ctx.visual_submap->reference_features.size())
                                          ? ctx.visual_submap->reference_features[point_index]
                                          : nullptr;
-          bool pose_patch_counted = false;
-          auto maybeRecordPoseInfo = [&](const V2D &usage_cur_px,
-                                         const Eigen::Matrix<double, 1, 3> &JdR_pose,
-                                         const Eigen::Matrix<double, 1, 3> &Jdt_pose) {
-            if (!usage_stats_en || iteration != 0 || usage_reference == nullptr) return;
-            Eigen::Matrix<double, kUsagePoseDim, 1> j_pose;
-            j_pose.segment<3>(0) = JdR_pose.transpose();
-            j_pose.segment<3>(3) = Jdt_pose.transpose();
-            recordUsagePoseInfo(ctx, *usage_reference, usage_cur_px, j_pose, !pose_patch_counted);
-            pose_patch_counted = true;
-          };
+          V2D usage_current_px_for_stats = usage_reference != nullptr ? usage_reference->px_ : V2D::Zero();
           if (virtual_fisheye_patch_en)
           {
             if (point_index >= static_cast<int>(ctx.visual_submap->virtual_track_patches.size())) continue;
@@ -5409,6 +5459,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
             const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
             V2D usage_cur_px = V2D::Zero();
             if (point_c.array().isFinite().all()) usage_cur_px = ctx.cam->world2cam(point_c);
+            usage_current_px_for_stats = usage_cur_px;
             if (virtual_s2_optimize_en)
             {
               if (!point_c.array().isFinite().all()) continue;
@@ -5435,7 +5486,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
                 jacobian.segment<3>(0) = JdR.transpose();
                 jacobian.segment<3>(3) = Jdt.transpose();
-                maybeRecordPoseInfo(usage_cur_px, JdR, Jdt);
                 if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
                 if (estimate_extrinsic)
                 {
@@ -5498,7 +5548,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
                 jacobian.segment<3>(0) = JdR.transpose();
                 jacobian.segment<3>(3) = Jdt.transpose();
-                maybeRecordPoseInfo(usage_cur_px, JdR, Jdt);
                 if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
                 if (estimate_extrinsic)
                 {
@@ -5525,6 +5574,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
             }
             const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
             const V2D pixel = ctx.cam->world2cam(point_c);
+            usage_current_px_for_stats = pixel;
             const int required_border = (patch_size_half + 1) * scale + 1;
             if (!pixel.array().isFinite().all() || !ctx.cam->isInFrame(pixel.cast<int>(), required_border)) continue;
             MD(2, 3) Jdpi;
@@ -5581,7 +5631,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
                 jacobian.segment<3>(0) = JdR.transpose();
                 jacobian.segment<3>(3) = Jdt.transpose();
-                maybeRecordPoseInfo(pixel, JdR, Jdt);
                 if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
                 if (estimate_extrinsic)
                 {
@@ -5655,6 +5704,28 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                  nis / static_cast<double>(local_dof) <= visual_ref_nis_max_per_dof);
           if (contributes_to_ekf && nis_pass)
           {
+            if (usage_stats_en && iteration == 0 && usage_reference != nullptr && local_dof > 0)
+            {
+              const bool cross_camera = usage_reference->camera_id_ != ctx.camera_id;
+              const int level_patch_count = local_dof > 0 ? 1 : 0;
+              recordUsageEkfContribution(ctx, *usage_reference, usage_current_px_for_stats,
+                                         level_patch_count, local_dof);
+              usage_h_all.noalias() += local_hessian;
+              usage_patches_all += level_patch_count;
+              usage_residuals_all += local_dof;
+              if (cross_camera)
+              {
+                usage_h_cross.noalias() += local_hessian;
+                usage_patches_cross += level_patch_count;
+                usage_residuals_cross += local_dof;
+              }
+              else
+              {
+                usage_h_same.noalias() += local_hessian;
+                usage_patches_same += level_patch_count;
+                usage_residuals_same += local_dof;
+              }
+            }
             hessian.noalias() += local_hessian;
             gradient.noalias() += local_gradient;
             measurement_count += local_dof;
@@ -5689,6 +5760,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
       if (solution.segment<3>(0).norm() * 57.3 < 0.001 && solution.segment<3>(3).norm() * 100.0 < 0.001) break;
     }
   }
+  recordUsagePoseFrameInfo(usage_prior_cov, usage_h_all, usage_h_same, usage_h_cross,
+                           usage_patches_all, usage_residuals_all,
+                           usage_patches_same, usage_residuals_same,
+                           usage_patches_cross, usage_residuals_cross);
   state->cov -= G * state->cov;
   if (online_extrinsic_active && frame_count % 20 == 0)
   {

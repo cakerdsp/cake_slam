@@ -476,47 +476,88 @@ public:
   static constexpr int kUsageNccBinCount = 11;
   static constexpr int kUsagePoseDim = 6;
 
-  struct UsageStatsCell
+  struct UsageLevelStats
   {
-    long long candidates = 0;
-    long long accepted = 0;
-    long long residuals = 0;
     long long candidate_ncc_count = 0;
-    long long ncc_count = 0;
-    double sse = 0.0;
+    long long accepted_ncc_count = 0;
+    long long accepted_sse_samples = 0;
     double candidate_ncc_sum = 0.0;
-    double ncc_sum = 0.0;
+    double accepted_ncc_sum = 0.0;
+    double accepted_sse = 0.0;
     std::array<long long, kUsageNccBinCount> candidate_ncc_hist = {};
     std::array<long long, kUsageNccBinCount> accepted_ncc_hist = {};
 
     void reset()
     {
-      candidates = 0;
-      accepted = 0;
-      residuals = 0;
       candidate_ncc_count = 0;
-      ncc_count = 0;
-      sse = 0.0;
+      accepted_ncc_count = 0;
+      accepted_sse_samples = 0;
       candidate_ncc_sum = 0.0;
-      ncc_sum = 0.0;
+      accepted_ncc_sum = 0.0;
+      accepted_sse = 0.0;
       candidate_ncc_hist.fill(0);
       accepted_ncc_hist.fill(0);
     }
   };
 
-  struct PoseInfoStatsCell
+  struct UsageStatsCell
   {
-    long long patches = 0;
-    long long residuals = 0;
-    double trace = 0.0;
-    std::array<double, kUsagePoseDim * kUsagePoseDim> h_pose = {};
+    long long candidates = 0;
+    long long accepted = 0;
+    long long theoretical_residuals = 0;
+    long long ekf_patches = 0;
+    long long ekf_residuals = 0;
+    long long candidate_all_level_count = 0;
+    long long accepted_all_level_count = 0;
+    double candidate_ncc_min_sum = 0.0;
+    double candidate_ncc_macro_sum = 0.0;
+    double accepted_ncc_min_sum = 0.0;
+    double accepted_ncc_macro_sum = 0.0;
+    double accepted_rms_macro_sum = 0.0;
+    std::vector<UsageLevelStats> levels;
+
+    void ensureLevels(int level_count)
+    {
+      if (level_count < 0) level_count = 0;
+      if (static_cast<int>(levels.size()) == level_count) return;
+      levels.assign(level_count, UsageLevelStats());
+    }
 
     void reset()
     {
+      candidates = 0;
+      accepted = 0;
+      theoretical_residuals = 0;
+      ekf_patches = 0;
+      ekf_residuals = 0;
+      candidate_all_level_count = 0;
+      accepted_all_level_count = 0;
+      candidate_ncc_min_sum = 0.0;
+      candidate_ncc_macro_sum = 0.0;
+      accepted_ncc_min_sum = 0.0;
+      accepted_ncc_macro_sum = 0.0;
+      accepted_rms_macro_sum = 0.0;
+      for (UsageLevelStats &level : levels) level.reset();
+    }
+  };
+
+  struct PoseInfoStatsCell
+  {
+    long long frames = 0;
+    long long active_frames = 0;
+    long long patches = 0;
+    long long residuals = 0;
+    double information_gain_sum = 0.0;
+    double worst_direction_gain_sum = 0.0;
+
+    void reset()
+    {
+      frames = 0;
+      active_frames = 0;
       patches = 0;
       residuals = 0;
-      trace = 0.0;
-      h_pose.fill(0.0);
+      information_gain_sum = 0.0;
+      worst_direction_gain_sum = 0.0;
     }
   };
 
@@ -534,6 +575,12 @@ public:
   std::array<UsageStatsCell, 5> usage_total_footprint_bins_;
   std::array<UsageStatsCell, 4> usage_anisotropy_bins_;
   std::array<UsageStatsCell, 4> usage_total_anisotropy_bins_;
+  PoseInfoStatsCell usage_pose_all_;
+  PoseInfoStatsCell usage_pose_same_;
+  PoseInfoStatsCell usage_pose_cross_;
+  PoseInfoStatsCell usage_total_pose_all_;
+  PoseInfoStatsCell usage_total_pose_same_;
+  PoseInfoStatsCell usage_total_pose_cross_;
   std::vector<PoseInfoStatsCell> usage_pose_camera_pairs_;
   std::vector<PoseInfoStatsCell> usage_total_pose_camera_pairs_;
   std::array<PoseInfoStatsCell, 16> usage_pose_region_pairs_;
@@ -831,11 +878,20 @@ public:
   void resetUsageStatsTotals();
   void recordUsageObservation(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
                               const V2D &cur_px, const Matrix2d &A_cur_ref, bool accepted,
-                              double sse = 0.0, double ncc = std::numeric_limits<double>::quiet_NaN());
+                              const std::vector<double> &sse_levels = std::vector<double>(),
+                              const std::vector<double> &ncc_levels = std::vector<double>(),
+                              const std::vector<uint8_t> &level_valid = std::vector<uint8_t>());
   void recordUsageCandidateNcc(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
-                               const V2D &cur_px, const Matrix2d &A_cur_ref, double ncc);
-  void recordUsagePoseInfo(const PerCameraData &ctx, const Feature &ref_ftr, const V2D &cur_px,
-                           const Eigen::Matrix<double, kUsagePoseDim, 1> &j_pose, bool count_patch);
+                               const V2D &cur_px, const Matrix2d &A_cur_ref,
+                               const std::vector<double> &ncc_levels,
+                               const std::vector<uint8_t> &level_valid);
+  void recordUsageEkfContribution(const PerCameraData &ctx, const Feature &ref_ftr, const V2D &cur_px,
+                                  int level_patches, int residuals);
+  void recordUsagePoseFrameInfo(const Eigen::MatrixXd &prior_cov, const Eigen::MatrixXd &h_all,
+                                const Eigen::MatrixXd &h_same, const Eigen::MatrixXd &h_cross,
+                                long long patches_all, long long residuals_all,
+                                long long patches_same, long long residuals_same,
+                                long long patches_cross, long long residuals_cross);
   void printUsageStatsTable(int frame_id);
   void maybePrintUsageStatsTable(int frame_id);
   double calculateNCC(float *ref_patch, float *cur_patch, int patch_size);

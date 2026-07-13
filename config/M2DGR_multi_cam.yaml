@@ -152,10 +152,10 @@
       virtual_sparse_patch_en: false
       # Build new VisualPoint references from the current frame's post-EKF pose.
       # This timing switch is independent of visual map management.
-      visual_ref_post_ekf_build_en: false
+      visual_ref_post_ekf_build_en: true
       # Advanced visual reference/landmark management. Submodules are effective
       # only when this master switch is enabled.
-      visual_map_manage_en: false
+      visual_map_manage_en: true
       visual_map_manage_log_en: true
       visual_map_manage_shadow_en: false
       visual_ref_current_select_en: true
