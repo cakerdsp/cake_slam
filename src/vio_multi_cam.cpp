@@ -508,7 +508,8 @@ void VIOManager::syncCameraExtrinsicsFromState(const StatesGroup &state_value)
   for (PerCameraData &ctx : cameras_)
   {
     if (ctx.camera_id < 0 || ctx.camera_id >= state_value.num_cameras) continue;
-    const double rot_delta = Log(ctx.Rcl.transpose() * state_value.Rcl[ctx.camera_id]).norm();
+    const M3D dR_cl = ctx.Rcl.transpose() * state_value.Rcl[ctx.camera_id];
+    const double rot_delta = Log(dR_cl).norm();
     const double trans_delta = (ctx.Pcl - state_value.Pcl[ctx.camera_id]).norm();
     if (rot_delta > 1.0e-12 || trans_delta > 1.0e-12) changed = true;
     ctx.Rcl = state_value.Rcl[ctx.camera_id];
