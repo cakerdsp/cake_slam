@@ -4735,6 +4735,143 @@ void VIOManager::maybePrintUsageStatsTable(int frame_id)
   printUsageStatsTable(frame_id);
   resetUsageStatsWindow();
 }
+
+void VIOManager::printOnlineCalibrationStatsTable(int frame_id) const
+{
+  if (state == nullptr || (!online_extrinsic_en && !online_time_offset_en)) return;
+  const int state_dim = state->stateDim();
+  const bool cov_valid = state->cov.rows() == state_dim && state->cov.cols() == state_dim;
+  const auto safeSigma = [](double var) {
+    return std::sqrt(std::max(0.0, var));
+  };
+
+  printf("\033[1;35m+--------------------------------------------------------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;35m|                                      VIO Online Calibration Stats                                             |\033[0m\n");
+  printf("\033[1;35m+--------------------------------------------------------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;35m| frame=%d visual_updates=%lld obs=%d | ext try/accept=%lld/%lld | td try/accept=%lld/%lld |\033[0m\n",
+         frame_id, online_calib_visual_update_count_, online_calib_last_total_observations_,
+         online_extrinsic_attempt_count_, online_extrinsic_accept_count_,
+         online_time_offset_attempt_count_, online_time_offset_accept_count_);
+  printf("\033[1;35m| last max update: dR=%.6f deg | dP=%.6f cm | dtd=%.6f ms |\033[0m\n",
+         online_calib_last_max_rot_update_deg_,
+         online_calib_last_max_trans_update_cm_,
+         online_calib_last_max_time_update_ms_);
+
+  if (online_extrinsic_en)
+  {
+    printf("\033[1;35m+--------------------------------------------------------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;35m| Extrinsic per camera: cam en actR actT accepts dR_prior_deg(x y z) dP_prior_cm(x y z) sigma(rot_deg trans_cm) |\033[0m\n");
+    printf("\033[1;35m+--------------------------------------------------------------------------------------------------------------+\033[0m\n");
+    const int camera_count = std::min(numCameras(), state->num_cameras);
+    for (int camera_id = 0; camera_id < camera_count; ++camera_id)
+    {
+      const bool enabled = isOnlineExtrinsicEnabledForCamera(camera_id);
+      const int active_rot = camera_id < static_cast<int>(online_calib_last_active_extrinsic_rot_.size())
+                                 ? online_calib_last_active_extrinsic_rot_[camera_id]
+                                 : 0;
+      const int active_trans = camera_id < static_cast<int>(online_calib_last_active_extrinsic_trans_.size())
+                                   ? online_calib_last_active_extrinsic_trans_[camera_id]
+                                   : 0;
+      const long long accepts = camera_id < static_cast<int>(online_extrinsic_camera_accept_count_.size())
+                                    ? online_extrinsic_camera_accept_count_[camera_id]
+                                    : 0;
+      V3D dR_prior_deg = V3D::Zero();
+      V3D dP_prior_cm = V3D::Zero();
+      if (camera_id < static_cast<int>(state->Rcl.size()) &&
+          camera_id < static_cast<int>(state->Rcl_prior.size()))
+      {
+        const M3D dR_cl = state->Rcl_prior[camera_id].transpose() * state->Rcl[camera_id];
+        dR_prior_deg = Log(dR_cl) * kRadiansToDegrees;
+      }
+      if (camera_id < static_cast<int>(state->Pcl.size()) &&
+          camera_id < static_cast<int>(state->Pcl_prior.size()))
+        dP_prior_cm = (state->Pcl[camera_id] - state->Pcl_prior[camera_id]) * 100.0;
+
+      double rot_sigma_deg = 0.0;
+      double trans_sigma_cm = 0.0;
+      if (cov_valid)
+      {
+        const int ridx = state->extrinsicRotIndex(camera_id);
+        const int tidx = state->extrinsicTransIndex(camera_id);
+        if (ridx + 2 < state->cov.rows())
+        {
+          const double rot_var =
+              (state->cov(ridx, ridx) + state->cov(ridx + 1, ridx + 1) + state->cov(ridx + 2, ridx + 2)) / 3.0;
+          rot_sigma_deg = safeSigma(rot_var) * kRadiansToDegrees;
+        }
+        if (tidx + 2 < state->cov.rows())
+        {
+          const double trans_var =
+              (state->cov(tidx, tidx) + state->cov(tidx + 1, tidx + 1) + state->cov(tidx + 2, tidx + 2)) / 3.0;
+          trans_sigma_cm = safeSigma(trans_var) * 100.0;
+        }
+      }
+
+      printf("\033[1;35m| cam=%d en=%d act=%d/%d accepts=%lld dR=(%.6f %.6f %.6f) dP=(%.6f %.6f %.6f) sig=(%.6f %.6f) |\033[0m\n",
+             camera_id, enabled ? 1 : 0, active_rot, active_trans, accepts,
+             dR_prior_deg[0], dR_prior_deg[1], dR_prior_deg[2],
+             dP_prior_cm[0], dP_prior_cm[1], dP_prior_cm[2],
+             rot_sigma_deg, trans_sigma_cm);
+      if (camera_id < static_cast<int>(state->Rcl.size()) &&
+          camera_id < static_cast<int>(state->Pcl.size()))
+      {
+        const M3D &Rcl = state->Rcl[camera_id];
+        const V3D &Pcl = state->Pcl[camera_id];
+        printf("\033[1;35m|   Rcl=[%.6f %.6f %.6f; %.6f %.6f %.6f; %.6f %.6f %.6f] Pcl=[%.6f %.6f %.6f] last=(%.6fdeg %.6fcm) |\033[0m\n",
+               Rcl(0, 0), Rcl(0, 1), Rcl(0, 2),
+               Rcl(1, 0), Rcl(1, 1), Rcl(1, 2),
+               Rcl(2, 0), Rcl(2, 1), Rcl(2, 2),
+               Pcl[0], Pcl[1], Pcl[2],
+               camera_id < static_cast<int>(online_calib_last_extrinsic_rot_update_deg_.size())
+                   ? online_calib_last_extrinsic_rot_update_deg_[camera_id]
+                   : 0.0,
+               camera_id < static_cast<int>(online_calib_last_extrinsic_trans_update_cm_.size())
+                   ? online_calib_last_extrinsic_trans_update_cm_[camera_id]
+                   : 0.0);
+      }
+    }
+  }
+
+  if (online_time_offset_en)
+  {
+    printf("\033[1;35m+--------------------------------------------------------------------------------------------------------------+\033[0m\n");
+    printf("\033[1;35m| Time offset per group: group en active accepts tracks avg_px_vel td_ms delta_prior_ms last_update_ms sigma_ms   |\033[0m\n");
+    printf("\033[1;35m+--------------------------------------------------------------------------------------------------------------+\033[0m\n");
+    for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+    {
+      const bool enabled = isOnlineTimeOffsetEnabledForGroup(group_id);
+      const int active = group_id < static_cast<int>(online_calib_last_active_time_groups_.size())
+                             ? online_calib_last_active_time_groups_[group_id]
+                             : 0;
+      const long long accepts = group_id < static_cast<int>(online_time_offset_group_accept_count_.size())
+                                    ? online_time_offset_group_accept_count_[group_id]
+                                    : 0;
+      const int tracks = group_id < static_cast<int>(online_calib_last_time_tracks_.size())
+                             ? online_calib_last_time_tracks_[group_id]
+                             : 0;
+      const double avg_pixel_velocity = group_id < static_cast<int>(online_calib_last_time_avg_pixel_velocity_.size())
+                                            ? online_calib_last_time_avg_pixel_velocity_[group_id]
+                                            : 0.0;
+      const double last_update_ms = group_id < static_cast<int>(online_calib_last_time_update_ms_.size())
+                                        ? online_calib_last_time_update_ms_[group_id]
+                                        : 0.0;
+      const double td_ms = group_id < state->time_offset.size() ? state->time_offset[group_id] * 1.0e3 : 0.0;
+      const double prior_ms =
+          group_id < state->time_offset_prior.size() ? state->time_offset_prior[group_id] * 1.0e3 : 0.0;
+      double sigma_ms = 0.0;
+      if (cov_valid)
+      {
+        const int idx = state->timeOffsetIndex(group_id);
+        if (idx < state->cov.rows()) sigma_ms = safeSigma(state->cov(idx, idx)) * 1.0e3;
+      }
+      printf("\033[1;35m| group=%d en=%d active=%d accepts=%lld tracks=%d avg_px_vel=%.6f td=%.6f delta=%.6f last=%.6f sigma=%.6f |\033[0m\n",
+             group_id, enabled ? 1 : 0, active, accepts, tracks, avg_pixel_velocity,
+             td_ms, td_ms - prior_ms, last_update_ms, sigma_ms);
+    }
+  }
+  printf("\033[1;35m+--------------------------------------------------------------------------------------------------------------+\033[0m\n");
+}
+
 void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
                                                     const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
@@ -6455,6 +6592,32 @@ void VIOManager::computeJacobianAndUpdateEKF()
   int total_observations = 0;
   for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
   if (total_observations == 0) return;
+  ++online_calib_visual_update_count_;
+  online_calib_last_total_observations_ = total_observations;
+  const int calib_camera_count = std::max(0, state->num_cameras);
+  const int calib_group_count = std::max(0, state->num_time_offset_groups);
+  if (static_cast<int>(online_extrinsic_camera_accept_count_.size()) != calib_camera_count)
+    online_extrinsic_camera_accept_count_.assign(calib_camera_count, 0);
+  if (static_cast<int>(online_time_offset_group_accept_count_.size()) != calib_group_count)
+    online_time_offset_group_accept_count_.assign(calib_group_count, 0);
+  std::vector<int> last_time_tracks(calib_group_count, 0);
+  std::vector<double> last_time_avg_pixel_velocity(calib_group_count, 0.0);
+  std::vector<double> last_time_update_ms(calib_group_count, 0.0);
+  std::vector<double> last_extrinsic_rot_update_deg(calib_camera_count, 0.0);
+  std::vector<double> last_extrinsic_trans_update_cm(calib_camera_count, 0.0);
+  std::vector<int> rollback_last_time_tracks = last_time_tracks;
+  std::vector<double> rollback_last_time_avg_pixel_velocity = last_time_avg_pixel_velocity;
+  std::vector<double> rollback_last_time_update_ms = last_time_update_ms;
+  std::vector<double> rollback_last_extrinsic_rot_update_deg = last_extrinsic_rot_update_deg;
+  std::vector<double> rollback_last_extrinsic_trans_update_cm = last_extrinsic_trans_update_cm;
+  double last_max_rot_update_deg = 0.0;
+  double last_max_trans_update_cm = 0.0;
+  double last_max_time_update_ms = 0.0;
+  double rollback_last_max_rot_update_deg = last_max_rot_update_deg;
+  double rollback_last_max_trans_update_cm = last_max_trans_update_cm;
+  double rollback_last_max_time_update_ms = last_max_time_update_ms;
+  bool attempted_extrinsic_this_frame = false;
+  bool attempted_time_this_frame = false;
   if (cross_camera_current_residual_en) buildCurrentCrossCameraPairs();
   G = Eigen::MatrixXd::Zero(state->stateDim(), state->stateDim());
   const bool online_extrinsic_active = online_extrinsic_en &&
@@ -6576,10 +6739,18 @@ void VIOManager::computeJacobianAndUpdateEKF()
         {
           const double avg_pixel_velocity =
               group_tracks[group_id] > 0 ? group_pixel_velocity[group_id] / group_tracks[group_id] : 0.0;
+          if (group_id < static_cast<int>(last_time_tracks.size()))
+          {
+            last_time_tracks[group_id] = group_tracks[group_id];
+            last_time_avg_pixel_velocity[group_id] = avg_pixel_velocity;
+          }
           if (isOnlineTimeOffsetEnabledForGroup(group_id) &&
               group_tracks[group_id] >= online_time_offset_min_tracks &&
               avg_pixel_velocity >= online_time_offset_min_pixel_velocity)
+          {
             active_time_groups[group_id] = 1;
+            attempted_time_this_frame = true;
+          }
         }
       }
       std::vector<uint8_t> active_extrinsic_rot(state->num_cameras, 0);
@@ -6591,6 +6762,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                    cameras_[camera_id].total_points >= online_extrinsic_min_tracks;
         if (camera_active && allow_extrinsic_rotation) active_extrinsic_rot[camera_id] = 1;
         if (camera_active && allow_extrinsic_translation) active_extrinsic_trans[camera_id] = 1;
+        if (active_extrinsic_rot[camera_id] != 0 || active_extrinsic_trans[camera_id] != 0)
+          attempted_extrinsic_this_frame = true;
       }
 
       for (PerCameraData &ctx : cameras_)
@@ -7197,6 +7370,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
         final_active_extrinsic_rot = rollback_active_extrinsic_rot;
         final_active_extrinsic_trans = rollback_active_extrinsic_trans;
         final_active_time_groups = rollback_active_time_groups;
+        last_time_tracks = rollback_last_time_tracks;
+        last_time_avg_pixel_velocity = rollback_last_time_avg_pixel_velocity;
+        last_time_update_ms = rollback_last_time_update_ms;
+        last_extrinsic_rot_update_deg = rollback_last_extrinsic_rot_update_deg;
+        last_extrinsic_trans_update_cm = rollback_last_extrinsic_trans_update_cm;
+        last_max_rot_update_deg = rollback_last_max_rot_update_deg;
+        last_max_trans_update_cm = rollback_last_max_trans_update_cm;
+        last_max_time_update_ms = rollback_last_max_time_update_ms;
         usage_final_h_base = rollback_usage_final_h_base;
         usage_final_h_same = rollback_usage_final_h_same;
         usage_final_h_cross = rollback_usage_final_h_cross;
@@ -7251,6 +7432,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
       rollback_active_extrinsic_rot = final_active_extrinsic_rot;
       rollback_active_extrinsic_trans = final_active_extrinsic_trans;
       rollback_active_time_groups = final_active_time_groups;
+      rollback_last_time_tracks = last_time_tracks;
+      rollback_last_time_avg_pixel_velocity = last_time_avg_pixel_velocity;
+      rollback_last_time_update_ms = last_time_update_ms;
+      rollback_last_extrinsic_rot_update_deg = last_extrinsic_rot_update_deg;
+      rollback_last_extrinsic_trans_update_cm = last_extrinsic_trans_update_cm;
+      rollback_last_max_rot_update_deg = last_max_rot_update_deg;
+      rollback_last_max_trans_update_cm = last_max_trans_update_cm;
+      rollback_last_max_time_update_ms = last_max_time_update_ms;
       deactivateInactiveCalibrationBlocks(solve_hessian, solve_gradient,
                                           active_extrinsic_rot,
                                           active_extrinsic_trans,
@@ -7303,6 +7492,40 @@ void VIOManager::computeJacobianAndUpdateEKF()
         final_active_extrinsic_rot = active_extrinsic_rot;
         final_active_extrinsic_trans = active_extrinsic_trans;
         final_active_time_groups = active_time_groups;
+        for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+        {
+          if (camera_id < static_cast<int>(active_extrinsic_rot.size()) &&
+              active_extrinsic_rot[camera_id] != 0)
+          {
+            const double rot_update_deg =
+                solution.segment<3>(state->extrinsicRotIndex(camera_id)).norm() * kRadiansToDegrees;
+            if (camera_id < static_cast<int>(last_extrinsic_rot_update_deg.size()))
+              last_extrinsic_rot_update_deg[camera_id] =
+                  std::max(last_extrinsic_rot_update_deg[camera_id], rot_update_deg);
+            last_max_rot_update_deg = std::max(last_max_rot_update_deg, rot_update_deg);
+          }
+          if (camera_id < static_cast<int>(active_extrinsic_trans.size()) &&
+              active_extrinsic_trans[camera_id] != 0)
+          {
+            const double trans_update_cm =
+                solution.segment<3>(state->extrinsicTransIndex(camera_id)).norm() * 100.0;
+            if (camera_id < static_cast<int>(last_extrinsic_trans_update_cm.size()))
+              last_extrinsic_trans_update_cm[camera_id] =
+                  std::max(last_extrinsic_trans_update_cm[camera_id], trans_update_cm);
+            last_max_trans_update_cm = std::max(last_max_trans_update_cm, trans_update_cm);
+          }
+        }
+        for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+        {
+          if (group_id < static_cast<int>(active_time_groups.size()) &&
+              active_time_groups[group_id] != 0)
+          {
+            const double time_update_ms = std::fabs(solution[state->timeOffsetIndex(group_id)]) * 1.0e3;
+            if (group_id < static_cast<int>(last_time_update_ms.size()))
+              last_time_update_ms[group_id] = std::max(last_time_update_ms[group_id], time_update_ms);
+            last_max_time_update_ms = std::max(last_max_time_update_ms, time_update_ms);
+          }
+        }
       }
       *state += solution;
       syncCameraExtrinsicsFromState(*state);
@@ -7346,30 +7569,52 @@ void VIOManager::computeJacobianAndUpdateEKF()
                            usage_final_patches_same, usage_final_residuals_same,
                            usage_final_patches_cross, usage_final_residuals_cross,
                            usage_final_patches_current_cross, usage_final_residuals_current_cross);
-  if (online_extrinsic_active && frame_count % 20 == 0)
+  online_calib_last_active_extrinsic_rot_ = final_active_extrinsic_rot;
+  online_calib_last_active_extrinsic_trans_ = final_active_extrinsic_trans;
+  online_calib_last_active_time_groups_ = final_active_time_groups;
+  online_calib_last_time_tracks_ = last_time_tracks;
+  online_calib_last_time_avg_pixel_velocity_ = last_time_avg_pixel_velocity;
+  online_calib_last_time_update_ms_ = last_time_update_ms;
+  online_calib_last_extrinsic_rot_update_deg_ = last_extrinsic_rot_update_deg;
+  online_calib_last_extrinsic_trans_update_cm_ = last_extrinsic_trans_update_cm;
+  online_calib_last_max_rot_update_deg_ = last_max_rot_update_deg;
+  online_calib_last_max_trans_update_cm_ = last_max_trans_update_cm;
+  online_calib_last_max_time_update_ms_ = last_max_time_update_ms;
+
+  constexpr double kAcceptedUpdateEps = 1.0e-12;
+  bool accepted_extrinsic_this_frame = false;
+  for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
   {
-    for (const PerCameraData &ctx : cameras_)
+    const double rot_update = camera_id < static_cast<int>(last_extrinsic_rot_update_deg.size())
+                                  ? last_extrinsic_rot_update_deg[camera_id]
+                                  : 0.0;
+    const double trans_update = camera_id < static_cast<int>(last_extrinsic_trans_update_cm.size())
+                                    ? last_extrinsic_trans_update_cm[camera_id]
+                                    : 0.0;
+    if (rot_update > kAcceptedUpdateEps || trans_update > kAcceptedUpdateEps)
     {
-      if (!isOnlineExtrinsicEnabledForCamera(ctx.camera_id)) continue;
-      const M3D dR_cl = state->Rcl_prior[ctx.camera_id].transpose() * state->Rcl[ctx.camera_id];
-      const V3D dR_deg = Log(dR_cl) * kRadiansToDegrees;
-      const V3D dP = state->Pcl[ctx.camera_id] - state->Pcl_prior[ctx.camera_id];
-      printf("[ VIO Extrinsic ] frame=%d camera_id=%d dR_deg=(%.6f, %.6f, %.6f) dP_m=(%.6f, %.6f, %.6f) Pcl=(%.6f, %.6f, %.6f)\n",
-             frame_count, ctx.camera_id, dR_deg[0], dR_deg[1], dR_deg[2], dP[0], dP[1], dP[2],
-             state->Pcl[ctx.camera_id][0], state->Pcl[ctx.camera_id][1], state->Pcl[ctx.camera_id][2]);
+      accepted_extrinsic_this_frame = true;
+      if (camera_id < static_cast<int>(online_extrinsic_camera_accept_count_.size()))
+        ++online_extrinsic_camera_accept_count_[camera_id];
     }
   }
-  if (online_time_offset_en && frame_count % 20 == 0)
+  bool accepted_time_this_frame = false;
+  for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
   {
-    for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+    const double time_update = group_id < static_cast<int>(last_time_update_ms.size())
+                                   ? last_time_update_ms[group_id]
+                                   : 0.0;
+    if (time_update > kAcceptedUpdateEps)
     {
-      if (!isOnlineTimeOffsetEnabledForGroup(group_id)) continue;
-      const double prior = group_id < state->time_offset_prior.size() ? state->time_offset_prior[group_id] : 0.0;
-      printf("[ VIO TimeOffset ] frame=%d group=%d td_ms=%.6f delta_from_prior_ms=%.6f\n",
-             frame_count, group_id, state->time_offset[group_id] * 1.0e3,
-             (state->time_offset[group_id] - prior) * 1.0e3);
+      accepted_time_this_frame = true;
+      if (group_id < static_cast<int>(online_time_offset_group_accept_count_.size()))
+        ++online_time_offset_group_accept_count_[group_id];
     }
   }
+  if (attempted_extrinsic_this_frame) ++online_extrinsic_attempt_count_;
+  if (accepted_extrinsic_this_frame) ++online_extrinsic_accept_count_;
+  if (attempted_time_this_frame) ++online_time_offset_attempt_count_;
+  if (accepted_time_this_frame) ++online_time_offset_accept_count_;
   for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
 }
 
@@ -10913,5 +11158,6 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", elapsed);
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  printOnlineCalibrationStatsTable(mf.frame_id);
   maybePrintUsageStatsTable(mf.frame_id);
 }

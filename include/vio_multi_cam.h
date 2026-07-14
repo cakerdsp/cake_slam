@@ -386,6 +386,25 @@ public:
   double online_time_offset_max_update_ms = 0.2;
   double online_time_offset_max_abs_ms = 50.0;
   int online_time_offset_min_update_interval = 5;
+  long long online_calib_visual_update_count_ = 0;
+  long long online_extrinsic_attempt_count_ = 0;
+  long long online_extrinsic_accept_count_ = 0;
+  long long online_time_offset_attempt_count_ = 0;
+  long long online_time_offset_accept_count_ = 0;
+  std::vector<long long> online_extrinsic_camera_accept_count_;
+  std::vector<long long> online_time_offset_group_accept_count_;
+  std::vector<uint8_t> online_calib_last_active_extrinsic_rot_;
+  std::vector<uint8_t> online_calib_last_active_extrinsic_trans_;
+  std::vector<uint8_t> online_calib_last_active_time_groups_;
+  std::vector<int> online_calib_last_time_tracks_;
+  std::vector<double> online_calib_last_time_avg_pixel_velocity_;
+  std::vector<double> online_calib_last_time_update_ms_;
+  std::vector<double> online_calib_last_extrinsic_rot_update_deg_;
+  std::vector<double> online_calib_last_extrinsic_trans_update_cm_;
+  double online_calib_last_max_rot_update_deg_ = 0.0;
+  double online_calib_last_max_trans_update_cm_ = 0.0;
+  double online_calib_last_max_time_update_ms_ = 0.0;
+  int online_calib_last_total_observations_ = 0;
 
   int grid_n_width, grid_n_height;
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
@@ -1015,6 +1034,7 @@ public:
                                      int pyramid_level = -1, int residuals = 0);
   void printUsageStatsTable(int frame_id);
   void maybePrintUsageStatsTable(int frame_id);
+  void printOnlineCalibrationStatsTable(int frame_id) const;
   double calculateNCC(float *ref_patch, float *cur_patch, int patch_size);
   int getBestSearchLevel(const Matrix2d &A_cur_ref, const int max_level);
   V3F getInterpolatedPixel(const cv::Mat &img, V2D pc) const;
