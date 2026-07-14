@@ -41,6 +41,8 @@ struct CameraInputConfig
   std::vector<double> Rcl;
   std::vector<double> Pcl;
   bool online_extrinsic_en = true;
+  int time_offset_group = 0;
+  bool online_time_offset_en = true;
   std::string camera_model_type = "Pinhole";
   double k1 = 0.0;
   double k2 = 0.0;
@@ -58,6 +60,11 @@ struct PendingImageGroup
   std::vector<cv::Mat> images;
   std::vector<uint8_t> arrived;
   std::vector<uint64_t> image_stamp_ns;
+  std::vector<double> raw_timestamps;
+  std::vector<double> corrected_timestamps;
+  std::vector<double> capture_timestamps;
+  std::vector<double> td_used;
+  std::vector<int> time_offset_group;
 
   bool isComplete() const
   {
@@ -223,6 +230,17 @@ public:
   double online_extrinsic_prior_trans_std_m = 0.02;
   double online_extrinsic_max_rot_update_deg = 0.02;
   double online_extrinsic_max_trans_update_m = 0.0001;
+  bool online_time_offset_en = false;
+  int num_time_offset_groups = 1;
+  std::vector<int64_t> online_time_offset_group_mask;
+  int online_time_offset_start_frame = 100;
+  int online_time_offset_min_tracks = 30;
+  double online_time_offset_min_pixel_velocity = 15.0;
+  double online_time_offset_prior_std_ms = 5.0;
+  double online_time_offset_process_noise_ms_sqrt_s = 0.0;
+  double online_time_offset_max_update_ms = 0.2;
+  double online_time_offset_max_abs_ms = 50.0;
+  int online_time_offset_min_update_interval = 5;
   double virtual_focal_length = 300.0;
   int virtual_patch_margin = 4;
   int virtual_max_search_level = 1;
@@ -264,6 +282,7 @@ public:
   double plot_time;
   int frame_cnt;
   double img_time_offset = 0.0;
+  std::vector<double> img_time_offset_groups;
   deque<PointCloudXYZI::Ptr> lid_raw_data_buffer;
   deque<double> lid_header_time_buffer;
   deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;

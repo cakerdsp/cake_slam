@@ -31,14 +31,23 @@ public:
   static int frame_counter_; //!< Counts the number of created frames. Used to set the unique id.
   int id_;                   //!< Unique id of the frame.
   int camera_id_;            //!< Physical camera that produced this frame.
-  double timestamp_;         //!< Shared multi-camera frame timestamp.
+  double timestamp_;         //!< Current capture timestamp used by this camera frame.
+  double raw_timestamp_;     //!< Original sensor header timestamp before online camera time offset.
+  double corrected_timestamp_; //!< raw_timestamp_ + time-offset used to enqueue this frame.
+  double capture_timestamp_; //!< raw_timestamp_ + current nominal time offset + exposure offset.
+  double td_used_;           //!< Time offset used when the frame entered the synchronized queue.
+  double exposure_time_offset_;
+  double time_offset_delta_; //!< Current nominal td minus td_used_.
+  int time_offset_group_;
   vk::AbstractCamera *cam_;  //!< Camera model.
   SE3<double> T_f_w_;                //!< Transform (f)rame from (w)orld.
   SE3<double> T_f_w_prior_;          //!< Transform (f)rame from (w)orld provided by the IMU prior.
   cv::Mat img_;              //!< Image of the frame.
   Features fts_;             //!< List of features in the image.
 
-  Frame(vk::AbstractCamera *cam, const cv::Mat &img, int frame_id = -1, int camera_id = 0, double timestamp = 0.0);
+  Frame(vk::AbstractCamera *cam, const cv::Mat &img, int frame_id = -1, int camera_id = 0,
+        double timestamp = 0.0, double raw_timestamp = 0.0, double corrected_timestamp = 0.0,
+        double td_used = 0.0, double exposure_time_offset = 0.0, int time_offset_group = 0);
   ~Frame();
 
   /// Initialize new frame and create image pyramid.

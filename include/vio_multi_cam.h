@@ -212,10 +212,19 @@ struct PendingNewPointObservation
   cv::Point virtual_source_origin;
   SE3<double> T_f_w;
   SE3<double> T_v_w;
+  M3D Rwi_ref = M3D::Identity();
+  V3D Pwi_ref = V3D::Zero();
   M3D R_v_from_c = M3D::Identity();
   M3D R_c_from_v = M3D::Identity();
   bool virtual_patch_valid = false;
   int level = 0;
+  double raw_timestamp = 0.0;
+  double corrected_timestamp = 0.0;
+  double capture_timestamp = 0.0;
+  double td_used = 0.0;
+  double exposure_time_offset = 0.0;
+  int time_offset_group = 0;
+  uint64_t extrinsic_version = 0;
   double inv_expo_time = 1.0;
   float texture_score = 0.0f;
   int64_t surface_voxel_x = 0;
@@ -269,9 +278,18 @@ struct PerCameraData
   M3D Rcl = M3D::Identity();
   M3D Rci = M3D::Identity();
   M3D Rcw = M3D::Identity();
+  M3D Rwi = M3D::Identity();
   V3D Pcl = V3D::Zero();
   V3D Pci = V3D::Zero();
   V3D Pcw = V3D::Zero();
+  V3D Pwi = V3D::Zero();
+  V3D Vwi = V3D::Zero();
+  V3D gyro_i = V3D::Zero();
+  V3D dpc_dtd = V3D::Zero();
+  M3D dpc_dvel = M3D::Zero();
+  double frame_time = 0.0;
+  double frame_time_offset_delta = 0.0;
+  int time_offset_group = 0;
   M3D Jdphi_dR = M3D::Identity();
   M3D Jdp_dR = M3D::Zero();
   M3D Jdp_dt = M3D::Identity();
@@ -358,6 +376,16 @@ public:
   double online_extrinsic_prior_trans_std_m = 0.02;
   double online_extrinsic_max_rot_update_deg = 0.02;
   double online_extrinsic_max_trans_update_m = 0.0001;
+  bool online_time_offset_en = false;
+  std::vector<int> camera_time_offset_groups;
+  std::vector<int64_t> online_time_offset_group_mask;
+  int online_time_offset_start_frame = 100;
+  int online_time_offset_min_tracks = 30;
+  double online_time_offset_min_pixel_velocity = 15.0;
+  double online_time_offset_prior_std_ms = 5.0;
+  double online_time_offset_max_update_ms = 0.2;
+  double online_time_offset_max_abs_ms = 50.0;
+  int online_time_offset_min_update_interval = 5;
 
   int grid_n_width, grid_n_height;
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
@@ -425,6 +453,8 @@ public:
   std::vector<V2F> core_patch_offsets_;
   uint64_t next_visual_point_id_ = 1;
   uint64_t next_visual_ref_id_ = 1;
+  uint64_t extrinsic_version_ = 1;
+  V3D current_unbiased_gyr_ = V3D::Zero();
   std::vector<VisualPoint *> retired_visual_points_;
   std::vector<std::pair<VisualPoint *, Feature *>> retired_visual_refs_;
   std::set<uint64_t> shadow_retired_point_suggestions_;
@@ -752,6 +782,8 @@ public:
   void setCameraModelJacobianParameters(int camera_id, const std::string &model_type,
                                         double k1, double k2, double k3, double k4,
                                         double xi, double p1, double p2);
+  void setCameraTimeOffsetGroups(const std::vector<int> &groups);
+  void setCurrentUnbiasedGyr(const V3D &gyr);
   int numCameras() const { return static_cast<int>(cameras_.size()); }
   void processMultiCameraFrame(const MeasureGroup &meas, vector<pointWithVar> &pg,
                                const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
@@ -774,8 +806,24 @@ public:
   void syncCameraExtrinsicsFromState(const StatesGroup &state_value);
   void updateCameraExtrinsicDerived(PerCameraData &ctx);
   bool isOnlineExtrinsicEnabledForCamera(int camera_id) const;
+  bool isOnlineTimeOffsetEnabledForGroup(int group_id) const;
   void applyOnlineExtrinsicPriors(Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient, bool allow_rotation, bool allow_translation) const;
-  void limitOnlineExtrinsicUpdate(Eigen::VectorXd &solution, bool allow_rotation, bool allow_translation) const;
+  void applyOnlineTimeOffsetPriors(Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient,
+                                   const std::vector<uint8_t> &active_groups) const;
+  bool calibrationUpdateWithinTrustRegion(const Eigen::VectorXd &solution,
+                                          bool allow_rotation, bool allow_translation,
+                                          const std::vector<uint8_t> &active_time_groups) const;
+  void deactivateCalibrationBlocks(Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient,
+                                   bool deactivate_extrinsic,
+                                   const std::vector<uint8_t> &deactivate_time_groups) const;
+  void deactivateInactiveCalibrationBlocks(Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient,
+                                           const std::vector<uint8_t> &active_extrinsic_rot,
+                                           const std::vector<uint8_t> &active_extrinsic_trans,
+                                           const std::vector<uint8_t> &active_time_groups) const;
+  void restoreInactiveCalibrationCovariance(const Eigen::MatrixXd &prior_cov,
+                                            const std::vector<uint8_t> &active_extrinsic_rot,
+                                            const std::vector<uint8_t> &active_extrinsic_trans,
+                                            const std::vector<uint8_t> &active_time_groups) const;
   void initializeVIO();
   void getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D pc, float *patch_tmp, int level);
   void computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J);
@@ -910,6 +958,8 @@ public:
                                     const V2D &current_px, const Matrix2d &current_affine) const;
   void initializeManagedReference(Feature &feature, VisualPoint &point, const PerCameraData &ctx,
                                   bool initial_point_reference);
+  bool refreshReferenceCalibration(Feature &feature);
+  void fillPendingObservationTiming(PendingNewPointObservation &pending, const PerCameraData &ctx) const;
   bool associateVisualPointSurface(const V3D &point_w,
                                    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
                                    int64_t &voxel_x, int64_t &voxel_y, int64_t &voxel_z,

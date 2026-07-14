@@ -27,6 +27,8 @@
               1.0,  0.0,  0.0]
         Pcl: [0.16123, -0.16711, -0.24221]
         online_extrinsic_en: true
+        time_offset_group: 0
+        online_time_offset_en: true
 
       # camera0:
       #   img_topic: "/camera/color/image_raw/compressed"
@@ -59,6 +61,8 @@
               0.0, 1.0,  0.0]
         Pcl: [-0.00109, -0.16718, -0.16004]
         online_extrinsic_en: true
+        time_offset_group: 1
+        online_time_offset_en: true
 
       # camera3: fourth / mid-right 8827
       camera2:
@@ -71,6 +75,8 @@
                0.0, -1.0,  0.0]
         Pcl: [0.00021, -0.16674, -0.16013]
         online_extrinsic_en: true
+        time_offset_group: 2
+        online_time_offset_en: true
 
       # camera4: fifth / back-left 6450
       camera4:
@@ -83,6 +89,8 @@
               -1.0, 0.0,  0.0]
         Pcl: [-0.16031, -0.16715, -0.24175]
         online_extrinsic_en: true
+        time_offset_group: 4
+        online_time_offset_en: true
 
       # camera5: sixth / back-right 6548
       camera5:
@@ -95,6 +103,8 @@
               -1.0, 0.0,  0.0]
         Pcl: [0.16037, -0.16689, -0.24313]
         online_extrinsic_en: true
+        time_offset_group: 5
+        online_time_offset_en: true
 
       # camera6: sky-pointing head 3199. Verify this official provisional extrinsic before use.
       camera6:
@@ -107,6 +117,8 @@
                0.0,  0.0, -1.0]
         Pcl: [0.00127, 0.07410, 0.65608]
         online_extrinsic_en: true
+        time_offset_group: 6
+        online_time_offset_en: true
 
     extrin_calib:
       extrinsic_T: [0.27255, -0.00053, 0.17954]
@@ -117,6 +129,10 @@
     time_offset:
       imu_time_offset: 0.0
       img_time_offset: 0.0
+      # Optional per-time-offset-group initial values in seconds.
+      # Empty/missing means every group uses img_time_offset.
+      # Example for three independent groups: [0.0, 0.0, 0.0]
+      # img_time_offset_groups: []
       exposure_time_init: 0.0
 
     preprocess:
@@ -222,6 +238,19 @@
       online_extrinsic_prior_trans_std_m: 0.02
       online_extrinsic_max_rot_update_deg: 0.02
       online_extrinsic_max_trans_update_m: 0.0001
+      online_time_offset_en: false
+      # Cameras with the same time_offset_group share one td state. By default
+      # each camera has its own group; set equal group ids for hardware-triggered cameras.
+      # Optional override: provide one entry per time-offset group.
+      # online_time_offset_group_mask: []
+      online_time_offset_start_frame: 100
+      online_time_offset_min_tracks: 30
+      online_time_offset_min_pixel_velocity: 15.0
+      online_time_offset_prior_std_ms: 5.0
+      online_time_offset_process_noise_ms_sqrt_s: 0.0
+      online_time_offset_max_update_ms: 0.2
+      online_time_offset_max_abs_ms: 50.0
+      online_time_offset_min_update_interval: 5
       inv_expo_time_init: 1.0
       inv_expo_cov: 0.1
       opticalflow:

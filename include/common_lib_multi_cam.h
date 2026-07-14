@@ -66,9 +66,15 @@ enum EKF_STATE
 struct MultiCameraFrame
 {
   uint64_t stamp_ns = 0;
-  double timestamp = 0.0;
+  double timestamp = 0.0;  //!< Anchor capture time used by LIO/VIO synchronization.
   int frame_id = -1;
   std::vector<cv::Mat> images;
+  std::vector<uint64_t> image_stamp_ns;
+  std::vector<double> raw_timestamps;
+  std::vector<double> corrected_timestamps;
+  std::vector<double> capture_timestamps;
+  std::vector<double> td_used;
+  std::vector<int> time_offset_group;
 };
 
 struct MeasureGroup
@@ -139,7 +145,6 @@ typedef struct pointWithVar
   };
 } pointWithVar;
 
-
 struct StatesGroup
 {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -152,7 +157,7 @@ struct StatesGroup
     this->bias_g = V3D::Zero();
     this->bias_a = V3D::Zero();
     this->gravity = V3D::Zero();
-    configureCameras(camera_count, 1.0);
+    configureCameras(camera_count, 1.0, 1, 0.0);
   };
 
   StatesGroup(const StatesGroup &b)
@@ -164,7 +169,10 @@ struct StatesGroup
     this->bias_a = b.bias_a;
     this->gravity = b.gravity;
     this->num_cameras = b.num_cameras;
+    this->num_time_offset_groups = b.num_time_offset_groups;
     this->inv_expo_time = b.inv_expo_time;
+    this->time_offset = b.time_offset;
+    this->time_offset_prior = b.time_offset_prior;
     this->Rcl = b.Rcl;
     this->Pcl = b.Pcl;
     this->Rcl_prior = b.Rcl_prior;
@@ -181,7 +189,10 @@ struct StatesGroup
     this->bias_a = b.bias_a;
     this->gravity = b.gravity;
     this->num_cameras = b.num_cameras;
+    this->num_time_offset_groups = b.num_time_offset_groups;
     this->inv_expo_time = b.inv_expo_time;
+    this->time_offset = b.time_offset;
+    this->time_offset_prior = b.time_offset_prior;
     this->Rcl = b.Rcl;
     this->Pcl = b.Pcl;
     this->Rcl_prior = b.Rcl_prior;
@@ -190,28 +201,37 @@ struct StatesGroup
     return *this;
   };
 
-  int stateDim() const { return BASE_STATE_DIM + num_cameras + 6 * num_cameras; }
+  int stateDim() const { return BASE_STATE_DIM + num_cameras + num_time_offset_groups + 6 * num_cameras; }
   int exposureIndex(int camera_id) const { return 6 + camera_id; }
-  int velocityIndex() const { return 6 + num_cameras; }
-  int gyroBiasIndex() const { return 9 + num_cameras; }
-  int accelBiasIndex() const { return 12 + num_cameras; }
-  int gravityIndex() const { return 15 + num_cameras; }
-  int extrinsicBaseIndex() const { return BASE_STATE_DIM + num_cameras; }
+  int timeOffsetBaseIndex() const { return 6 + num_cameras; }
+  int timeOffsetIndex(int group_id) const { return timeOffsetBaseIndex() + group_id; }
+  int velocityIndex() const { return 6 + num_cameras + num_time_offset_groups; }
+  int gyroBiasIndex() const { return 9 + num_cameras + num_time_offset_groups; }
+  int accelBiasIndex() const { return 12 + num_cameras + num_time_offset_groups; }
+  int gravityIndex() const { return 15 + num_cameras + num_time_offset_groups; }
+  int extrinsicBaseIndex() const { return BASE_STATE_DIM + num_cameras + num_time_offset_groups; }
   int extrinsicIndex(int camera_id) const { return extrinsicBaseIndex() + 6 * camera_id; }
   int extrinsicRotIndex(int camera_id) const { return extrinsicIndex(camera_id); }
   int extrinsicTransIndex(int camera_id) const { return extrinsicIndex(camera_id) + 3; }
 
-  void configureCameras(int camera_count, double inv_expo_init = 1.0)
+  void configureCameras(int camera_count, double inv_expo_init = 1.0,
+                        int time_offset_group_count = 1, double time_offset_init = 0.0)
   {
     if (camera_count < 1) throw std::invalid_argument("StatesGroup requires at least one camera");
+    if (time_offset_group_count < 1) throw std::invalid_argument("StatesGroup requires at least one time-offset group");
     num_cameras = camera_count;
+    num_time_offset_groups = time_offset_group_count;
     inv_expo_time = Eigen::VectorXd::Constant(num_cameras, inv_expo_init);
+    time_offset = Eigen::VectorXd::Constant(num_time_offset_groups, time_offset_init);
+    time_offset_prior = time_offset;
     Rcl.assign(num_cameras, M3D::Identity());
     Pcl.assign(num_cameras, V3D::Zero());
     Rcl_prior = Rcl;
     Pcl_prior = Pcl;
     cov = Eigen::MatrixXd::Identity(stateDim(), stateDim()) * INIT_COV;
     cov.block(6, 6, num_cameras, num_cameras) = Eigen::MatrixXd::Identity(num_cameras, num_cameras) * 0.00001;
+    cov.block(timeOffsetBaseIndex(), timeOffsetBaseIndex(), num_time_offset_groups, num_time_offset_groups) =
+        Eigen::MatrixXd::Identity(num_time_offset_groups, num_time_offset_groups) * 1.0e-6;
     cov.block(gyroBiasIndex(), gyroBiasIndex(), 9, 9) = Eigen::MatrixXd::Identity(9, 9) * 0.00001;
     for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
     {
@@ -234,6 +254,21 @@ struct StatesGroup
     }
   }
 
+  void setTimeOffset(int group_id, double td)
+  {
+    if (group_id < 0 || group_id >= num_time_offset_groups) throw std::out_of_range("invalid time-offset group index");
+    time_offset[group_id] = td;
+    time_offset_prior[group_id] = td;
+  }
+
+  void setTimeOffsetCovariance(int group_id, double var)
+  {
+    if (group_id < 0 || group_id >= num_time_offset_groups) throw std::out_of_range("invalid time-offset covariance index");
+    if (cov.rows() != stateDim() || cov.cols() != stateDim())
+      cov = Eigen::MatrixXd::Identity(stateDim(), stateDim()) * INIT_COV;
+    cov(timeOffsetIndex(group_id), timeOffsetIndex(group_id)) = var;
+  }
+
   void setCameraExtrinsicCovariance(int camera_id, double rot_var, double trans_var)
   {
     if (camera_id < 0 || camera_id >= num_cameras) throw std::out_of_range("invalid camera extrinsic covariance index");
@@ -253,18 +288,15 @@ struct StatesGroup
   StatesGroup operator+(const Eigen::VectorXd &state_add) const
   {
     validateIncrement(state_add);
-    StatesGroup a(num_cameras);
+    StatesGroup a(*this);
     a.rot_end = this->rot_end * Exp(state_add(0, 0), state_add(1, 0), state_add(2, 0));
     a.pos_end = this->pos_end + state_add.block<3, 1>(3, 0);
     a.inv_expo_time = this->inv_expo_time + state_add.segment(6, num_cameras);
+    a.time_offset = this->time_offset + state_add.segment(timeOffsetBaseIndex(), num_time_offset_groups);
     a.vel_end = this->vel_end + state_add.segment<3>(velocityIndex());
     a.bias_g = this->bias_g + state_add.segment<3>(gyroBiasIndex());
     a.bias_a = this->bias_a + state_add.segment<3>(accelBiasIndex());
     a.gravity = this->gravity + state_add.segment<3>(gravityIndex());
-    a.Rcl = this->Rcl;
-    a.Pcl = this->Pcl;
-    a.Rcl_prior = this->Rcl_prior;
-    a.Pcl_prior = this->Pcl_prior;
     for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
     {
       const int ridx = extrinsicRotIndex(camera_id);
@@ -273,7 +305,6 @@ struct StatesGroup
       a.Pcl[camera_id] = this->Pcl[camera_id] + state_add.segment<3>(tidx);
     }
 
-    a.cov = this->cov;
     return a;
   };
 
@@ -283,6 +314,7 @@ struct StatesGroup
     this->rot_end = this->rot_end * Exp(state_add(0, 0), state_add(1, 0), state_add(2, 0));
     this->pos_end += state_add.block<3, 1>(3, 0);
     this->inv_expo_time += state_add.segment(6, num_cameras);
+    this->time_offset += state_add.segment(timeOffsetBaseIndex(), num_time_offset_groups);
     this->vel_end += state_add.segment<3>(velocityIndex());
     this->bias_g += state_add.segment<3>(gyroBiasIndex());
     this->bias_a += state_add.segment<3>(accelBiasIndex());
@@ -300,11 +332,14 @@ struct StatesGroup
   Eigen::VectorXd operator-(const StatesGroup &b) const
   {
     if (num_cameras != b.num_cameras) throw std::invalid_argument("StatesGroup camera counts do not match");
+    if (num_time_offset_groups != b.num_time_offset_groups)
+      throw std::invalid_argument("StatesGroup time-offset group counts do not match");
     Eigen::VectorXd a(stateDim());
     M3D rotd(b.rot_end.transpose() * this->rot_end);
     a.block<3, 1>(0, 0) = Log(rotd);
     a.block<3, 1>(3, 0) = this->pos_end - b.pos_end;
     a.segment(6, num_cameras) = this->inv_expo_time - b.inv_expo_time;
+    a.segment(timeOffsetBaseIndex(), num_time_offset_groups) = this->time_offset - b.time_offset;
     a.segment<3>(velocityIndex()) = this->vel_end - b.vel_end;
     a.segment<3>(gyroBiasIndex()) = this->bias_g - b.bias_g;
     a.segment<3>(accelBiasIndex()) = this->bias_a - b.bias_a;
@@ -331,7 +366,10 @@ struct StatesGroup
   V3D pos_end;                              // the estimated position at the end lidar point (world frame)
   V3D vel_end;                              // the estimated velocity at the end lidar point (world frame)
   int num_cameras = 1;
+  int num_time_offset_groups = 1;
   Eigen::VectorXd inv_expo_time;             // Per-camera estimated inverse exposure time.
+  Eigen::VectorXd time_offset;               // Per-group camera time offset w.r.t. LiDAR/IMU clock.
+  Eigen::VectorXd time_offset_prior;         // Initial/manual prior for each time-offset group.
   std::vector<M3D> Rcl;                      // Per-camera camera<-lidar rotation.
   std::vector<V3D> Pcl;                      // Per-camera camera<-lidar translation.
   std::vector<M3D> Rcl_prior;                // Initial/prior camera<-lidar rotation.

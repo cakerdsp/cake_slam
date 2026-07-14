@@ -18,10 +18,19 @@ src/frame.cpp is intentionally unchanged.
 
 int Frame::frame_counter_ = 0;
 
-Frame::Frame(vk::AbstractCamera *cam, const cv::Mat &img, int frame_id, int camera_id, double timestamp)
+Frame::Frame(vk::AbstractCamera *cam, const cv::Mat &img, int frame_id, int camera_id, double timestamp,
+             double raw_timestamp, double corrected_timestamp, double td_used,
+             double exposure_time_offset, int time_offset_group)
     : id_(frame_id >= 0 ? frame_id : frame_counter_++),
       camera_id_(camera_id),
       timestamp_(timestamp),
+      raw_timestamp_((raw_timestamp == 0.0 && timestamp != 0.0) ? timestamp : raw_timestamp),
+      corrected_timestamp_((corrected_timestamp == 0.0 && timestamp != 0.0) ? timestamp : corrected_timestamp),
+      capture_timestamp_(timestamp),
+      td_used_(td_used),
+      exposure_time_offset_(exposure_time_offset),
+      time_offset_delta_(0.0),
+      time_offset_group_(time_offset_group),
       cam_(cam)
 {
   initFrame(img);

@@ -24,9 +24,11 @@ ImuProcess::ImuProcess() : Eye3d(M3D::Identity()),
   cov_bias_gyr = V3D(0.1, 0.1, 0.1);
   cov_bias_acc = V3D(0.1, 0.1, 0.1);
   cov_inv_expo = 0.2;
+  cov_time_offset = 0.0;
   mean_acc = V3D(0, 0, -1.0);
   mean_gyr = V3D(0, 0, 0);
   angvel_last = Zero3d;
+  unbiased_gyr = Zero3d;
   acc_s_last = Zero3d;
   Lid_offset_to_IMU = Zero3d;
   Lid_rot_to_IMU = Eye3d;
@@ -45,6 +47,7 @@ void ImuProcess::Reset()
   imu_need_init = true;
   init_iter_num = 1;
   IMUpose.clear();
+  unbiased_gyr = Zero3d;
   last_imu.reset(new sensor_msgs::msg::Imu());
   cur_pcl_un_.reset(new PointCloudXYZI());
 }
@@ -99,6 +102,8 @@ void ImuProcess::set_acc_cov_scale(const V3D &scaler) { cov_acc = scaler; }
 void ImuProcess::set_gyr_bias_cov(const V3D &b_g) { cov_bias_gyr = b_g; }
 
 void ImuProcess::set_inv_expo_cov(const double &inv_expo) { cov_inv_expo = inv_expo; }
+
+void ImuProcess::set_time_offset_cov(const double &time_offset_cov) { cov_time_offset = time_offset_cov; }
 
 void ImuProcess::set_acc_bias_cov(const V3D &b_a) { cov_bias_acc = b_a; }
 
@@ -199,6 +204,10 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
 
   cov_w.block<3, 3>(state_inout.gyroBiasIndex(), state_inout.gyroBiasIndex()).diagonal() = cov_gyr * dt * dt;
   cov_w.block<3, 3>(state_inout.velocityIndex(), state_inout.velocityIndex()).diagonal() = cov_acc * dt * dt;
+  if (cov_time_offset > 0.0 && state_inout.num_time_offset_groups > 0)
+    cov_w.block(state_inout.timeOffsetBaseIndex(), state_inout.timeOffsetBaseIndex(),
+                state_inout.num_time_offset_groups, state_inout.num_time_offset_groups)
+        .diagonal().setConstant(cov_time_offset * dt);
   // cov_w.block<3, 3>(6, 6) =
   //     R_imu * cov_acc.asDiagonal() * R_imu.transpose() * dt * dt;
   // cov_w.block<3, 3>(9, 9).diagonal() =
@@ -400,6 +409,10 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
       // F_x(6,6) = 0.25 * 2 * CV_PI * 0.5 * cos(2 * CV_PI * 0.5 * imu_time) * (-tau*tau); F_x(18,18) = 0.00001;
       if (exposure_estimate_en)
         cov_w.block(6, 6, state_inout.num_cameras, state_inout.num_cameras).diagonal().setConstant(cov_inv_expo * dt * dt);
+      if (cov_time_offset > 0.0 && state_inout.num_time_offset_groups > 0)
+        cov_w.block(state_inout.timeOffsetBaseIndex(), state_inout.timeOffsetBaseIndex(),
+                    state_inout.num_time_offset_groups, state_inout.num_time_offset_groups)
+            .diagonal().setConstant(cov_time_offset * dt);
       cov_w.block<3, 3>(0, 0).diagonal() = cov_gyr * dt * dt;
       cov_w.block<3, 3>(state_inout.velocityIndex(), state_inout.velocityIndex()) =
           R_imu * cov_acc.asDiagonal() * R_imu.transpose() * dt * dt;
@@ -438,7 +451,7 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
       IMUpose.push_back(set_pose6d(offs_t, acc_imu, angvel_avr, vel_imu, pos_imu, R_imu));
     }
 
-    // unbiased_gyr = V3D(IMUpose.back().gyr[0], IMUpose.back().gyr[1], IMUpose.back().gyr[2]);
+    unbiased_gyr = angvel_last;
     // cout<<"prop end - start: "<<prop_end_time - prop_beg_time<<" dt_all: "<<dt_all<<endl;
     lidar_meas.last_lio_update_time = prop_end_time;
     // dt = prop_end_time - imu_end_time;

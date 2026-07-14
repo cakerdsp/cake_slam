@@ -42,6 +42,7 @@ public:
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
   void set_inv_expo_cov(const double &inv_expo);
+  void set_time_offset_cov(const double &time_offset_cov);
   void set_imu_init_frame_num(const int &num);
   void disable_imu();
   void disable_gravity_est();
@@ -59,6 +60,7 @@ public:
   V3D cov_bias_gyr;
   V3D cov_bias_acc;
   double cov_inv_expo;
+  double cov_time_offset;
   double first_lidar_time;
   bool imu_time_init = false;
   bool imu_need_init = true;

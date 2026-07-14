@@ -39,6 +39,7 @@ constexpr int kRefPatchDumpWarpDisplaySize = 128;
 constexpr double kS2Eps = 1.0e-12;
 constexpr double kInterpPi = 3.14159265358979323846;
 constexpr int kRuntimeRawSupportDumpSize = 45;
+constexpr int kLegacyFixedStateDim = 19;
 
 std::string normalizeVirtualInterpMode(std::string mode)
 {
@@ -464,6 +465,24 @@ void VIOManager::setCameraModelJacobianParameters(int camera_id, const std::stri
   ctx.p1 = p1;
   ctx.p2 = p2;
 }
+
+void VIOManager::setCameraTimeOffsetGroups(const std::vector<int> &groups)
+{
+  if (static_cast<int>(groups.size()) != numCameras())
+    throw std::invalid_argument("camera time-offset group count must match camera count");
+  camera_time_offset_groups = groups;
+  for (PerCameraData &ctx : cameras_)
+  {
+    if (ctx.camera_id >= 0 && ctx.camera_id < static_cast<int>(groups.size()))
+      ctx.time_offset_group = groups[ctx.camera_id];
+  }
+}
+
+void VIOManager::setCurrentUnbiasedGyr(const V3D &gyr)
+{
+  current_unbiased_gyr_ = gyr;
+}
+
 void VIOManager::setImuToLidarExtrinsic(const V3D &transl, const M3D &rot)
 {
   Pli = -rot.transpose() * transl;
@@ -485,12 +504,25 @@ void VIOManager::syncCameraExtrinsicsFromState(const StatesGroup &state_value)
 {
   if (state_value.num_cameras != numCameras())
     throw std::runtime_error("state/camera count mismatch while syncing camera extrinsics");
+  bool changed = false;
   for (PerCameraData &ctx : cameras_)
   {
     if (ctx.camera_id < 0 || ctx.camera_id >= state_value.num_cameras) continue;
+    const double rot_delta = Log(ctx.Rcl.transpose() * state_value.Rcl[ctx.camera_id]).norm();
+    const double trans_delta = (ctx.Pcl - state_value.Pcl[ctx.camera_id]).norm();
+    if (rot_delta > 1.0e-12 || trans_delta > 1.0e-12) changed = true;
     ctx.Rcl = state_value.Rcl[ctx.camera_id];
     ctx.Pcl = state_value.Pcl[ctx.camera_id];
     updateCameraExtrinsicDerived(ctx);
+  }
+  if (changed)
+  {
+    ++extrinsic_version_;
+    for (PerCameraData &ctx : cameras_)
+    {
+      for (auto &entry : ctx.warp_map) delete entry.second;
+      ctx.warp_map.clear();
+    }
   }
 }
 
@@ -500,6 +532,16 @@ bool VIOManager::isOnlineExtrinsicEnabledForCamera(int camera_id) const
   if (online_extrinsic_camera_mask.empty()) return true;
   if (camera_id >= static_cast<int>(online_extrinsic_camera_mask.size())) return false;
   return online_extrinsic_camera_mask[camera_id] != 0;
+}
+
+bool VIOManager::isOnlineTimeOffsetEnabledForGroup(int group_id) const
+{
+  if (!online_time_offset_en || state == nullptr || group_id < 0 ||
+      group_id >= state->num_time_offset_groups)
+    return false;
+  if (online_time_offset_group_mask.empty()) return true;
+  if (group_id >= static_cast<int>(online_time_offset_group_mask.size())) return false;
+  return online_time_offset_group_mask[group_id] != 0;
 }
 
 void VIOManager::applyOnlineExtrinsicPriors(Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient,
@@ -516,6 +558,9 @@ void VIOManager::applyOnlineExtrinsicPriors(Eigen::MatrixXd &hessian, Eigen::Vec
   for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
   {
     if (!isOnlineExtrinsicEnabledForCamera(camera_id)) continue;
+    if (camera_id >= static_cast<int>(cameras_.size()) ||
+        cameras_[camera_id].total_points < online_extrinsic_min_tracks)
+      continue;
     if (allow_rotation)
     {
       const int ridx = state->extrinsicRotIndex(camera_id);
@@ -534,41 +579,180 @@ void VIOManager::applyOnlineExtrinsicPriors(Eigen::MatrixXd &hessian, Eigen::Vec
   }
 }
 
-void VIOManager::limitOnlineExtrinsicUpdate(Eigen::VectorXd &solution, bool allow_rotation, bool allow_translation) const
+void VIOManager::applyOnlineTimeOffsetPriors(Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient,
+                                             const std::vector<uint8_t> &active_groups) const
 {
-  if (state == nullptr) return;
+  if (state == nullptr || !online_time_offset_en) return;
+  const double std_s = online_time_offset_prior_std_ms * 1.0e-3;
+  if (!std::isfinite(std_s) || std_s <= 0.0) return;
+  const double info = img_point_cov / (std_s * std_s);
+  for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+  {
+    if (group_id >= static_cast<int>(active_groups.size()) || active_groups[group_id] == 0) continue;
+    const int idx = state->timeOffsetIndex(group_id);
+    const double prior = group_id < state->time_offset_prior.size() ? state->time_offset_prior[group_id] : 0.0;
+    hessian(idx, idx) += info;
+    gradient[idx] += info * (state->time_offset[group_id] - prior);
+  }
+}
+
+bool VIOManager::calibrationUpdateWithinTrustRegion(
+    const Eigen::VectorXd &solution, bool allow_rotation, bool allow_translation,
+    const std::vector<uint8_t> &active_time_groups) const
+{
+  if (state == nullptr) return true;
   constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
   const double max_rot = std::max(0.0, online_extrinsic_max_rot_update_deg) * kDegToRad;
   const double max_trans = std::max(0.0, online_extrinsic_max_trans_update_m);
-
   for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
   {
-    const int ridx = state->extrinsicRotIndex(camera_id);
-    const int tidx = state->extrinsicTransIndex(camera_id);
-    const bool camera_enabled = isOnlineExtrinsicEnabledForCamera(camera_id);
+    if (!isOnlineExtrinsicEnabledForCamera(camera_id)) continue;
+    if (allow_rotation && max_rot > 0.0 &&
+        solution.segment<3>(state->extrinsicRotIndex(camera_id)).norm() > max_rot)
+      return false;
+    if (allow_translation && max_trans > 0.0 &&
+        solution.segment<3>(state->extrinsicTransIndex(camera_id)).norm() > max_trans)
+      return false;
+  }
+  const double max_time_update = std::max(0.0, online_time_offset_max_update_ms) * 1.0e-3;
+  const double max_abs_time = std::max(0.0, online_time_offset_max_abs_ms) * 1.0e-3;
+  for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+  {
+    if (group_id >= static_cast<int>(active_time_groups.size()) || active_time_groups[group_id] == 0) continue;
+    const int idx = state->timeOffsetIndex(group_id);
+    if (max_time_update > 0.0 && std::fabs(solution[idx]) > max_time_update) return false;
+    const double prior = group_id < state->time_offset_prior.size() ? state->time_offset_prior[group_id] : 0.0;
+    if (max_abs_time > 0.0 &&
+        std::fabs(state->time_offset[group_id] + solution[idx] - prior) > max_abs_time)
+      return false;
+  }
+  return true;
+}
 
-    if (!camera_enabled || !allow_rotation || max_rot == 0.0)
+void VIOManager::deactivateCalibrationBlocks(Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient,
+                                             bool deactivate_extrinsic,
+                                             const std::vector<uint8_t> &deactivate_time_groups) const
+{
+  if (state == nullptr) return;
+  auto zeroIndex = [&](int index) {
+    hessian.row(index).setZero();
+    hessian.col(index).setZero();
+    gradient[index] = 0.0;
+  };
+  if (deactivate_extrinsic)
+  {
+    for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
     {
-      solution.segment<3>(ridx).setZero();
-    }
-    else
-    {
-      V3D delta = solution.segment<3>(ridx);
-      const double norm = delta.norm();
-      if (norm > max_rot) solution.segment<3>(ridx) = delta * (max_rot / norm);
-    }
-
-    if (!camera_enabled || !allow_translation || max_trans == 0.0)
-    {
-      solution.segment<3>(tidx).setZero();
-    }
-    else
-    {
-      V3D delta = solution.segment<3>(tidx);
-      const double norm = delta.norm();
-      if (norm > max_trans) solution.segment<3>(tidx) = delta * (max_trans / norm);
+      for (int k = 0; k < 6; ++k) zeroIndex(state->extrinsicIndex(camera_id) + k);
     }
   }
+  for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+  {
+    if (group_id < static_cast<int>(deactivate_time_groups.size()) && deactivate_time_groups[group_id])
+      zeroIndex(state->timeOffsetIndex(group_id));
+  }
+}
+
+void VIOManager::deactivateInactiveCalibrationBlocks(
+    Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient,
+    const std::vector<uint8_t> &active_extrinsic_rot,
+    const std::vector<uint8_t> &active_extrinsic_trans,
+    const std::vector<uint8_t> &active_time_groups) const
+{
+  if (state == nullptr) return;
+  auto zeroIndex = [&](int index) {
+    hessian.row(index).setZero();
+    hessian.col(index).setZero();
+    gradient[index] = 0.0;
+  };
+  for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+  {
+    const bool rot_active = camera_id < static_cast<int>(active_extrinsic_rot.size()) &&
+                            active_extrinsic_rot[camera_id] != 0;
+    const bool trans_active = camera_id < static_cast<int>(active_extrinsic_trans.size()) &&
+                              active_extrinsic_trans[camera_id] != 0;
+    if (!rot_active)
+    {
+      const int ridx = state->extrinsicRotIndex(camera_id);
+      for (int k = 0; k < 3; ++k) zeroIndex(ridx + k);
+    }
+    if (!trans_active)
+    {
+      const int tidx = state->extrinsicTransIndex(camera_id);
+      for (int k = 0; k < 3; ++k) zeroIndex(tidx + k);
+    }
+  }
+  for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+  {
+    const bool active = group_id < static_cast<int>(active_time_groups.size()) &&
+                        active_time_groups[group_id] != 0;
+    if (!active) zeroIndex(state->timeOffsetIndex(group_id));
+  }
+}
+
+void VIOManager::restoreInactiveCalibrationCovariance(
+    const Eigen::MatrixXd &prior_cov,
+    const std::vector<uint8_t> &active_extrinsic_rot,
+    const std::vector<uint8_t> &active_extrinsic_trans,
+    const std::vector<uint8_t> &active_time_groups) const
+{
+  if (state == nullptr || prior_cov.rows() != state->cov.rows() || prior_cov.cols() != state->cov.cols()) return;
+  auto restoreIndex = [&](int index) {
+    state->cov.row(index) = prior_cov.row(index);
+    state->cov.col(index) = prior_cov.col(index);
+  };
+  for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+  {
+    const bool rot_active = camera_id < static_cast<int>(active_extrinsic_rot.size()) &&
+                            active_extrinsic_rot[camera_id] != 0;
+    const bool trans_active = camera_id < static_cast<int>(active_extrinsic_trans.size()) &&
+                              active_extrinsic_trans[camera_id] != 0;
+    if (!rot_active)
+    {
+      const int ridx = state->extrinsicRotIndex(camera_id);
+      for (int k = 0; k < 3; ++k) restoreIndex(ridx + k);
+    }
+    if (!trans_active)
+    {
+      const int tidx = state->extrinsicTransIndex(camera_id);
+      for (int k = 0; k < 3; ++k) restoreIndex(tidx + k);
+    }
+  }
+  for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+  {
+    const bool active = group_id < static_cast<int>(active_time_groups.size()) &&
+                        active_time_groups[group_id] != 0;
+    if (!active) restoreIndex(state->timeOffsetIndex(group_id));
+  }
+}
+
+bool VIOManager::refreshReferenceCalibration(Feature &feature)
+{
+  if (feature.camera_id_ < 0 || feature.camera_id_ >= numCameras()) return false;
+  if (feature.extrinsic_version_ == extrinsic_version_) return true;
+  PerCameraData &ctx = cameras_[feature.camera_id_];
+  const M3D Rcw = ctx.Rci * feature.Rwi_ref_.transpose();
+  const V3D Pcw = -ctx.Rci * feature.Rwi_ref_.transpose() * feature.Pwi_ref_ + ctx.Pci;
+  feature.T_f_w_ = SE3<double>(Eigen::Quaterniond(Rcw).normalized().toRotationMatrix(), Pcw);
+  if (feature.virtual_patch_valid_)
+    feature.T_v_w_ = composeVirtualPose(feature.R_v_from_c_, feature.T_f_w_);
+  feature.extrinsic_version_ = extrinsic_version_;
+  return true;
+}
+
+void VIOManager::fillPendingObservationTiming(PendingNewPointObservation &pending,
+                                              const PerCameraData &ctx) const
+{
+  if (ctx.new_frame == nullptr) return;
+  pending.raw_timestamp = ctx.new_frame->raw_timestamp_;
+  pending.corrected_timestamp = ctx.new_frame->corrected_timestamp_;
+  pending.capture_timestamp = ctx.new_frame->capture_timestamp_;
+  pending.td_used = ctx.new_frame->td_used_;
+  pending.exposure_time_offset = ctx.new_frame->exposure_time_offset_;
+  pending.time_offset_group = ctx.new_frame->time_offset_group_;
+  pending.Rwi_ref = ctx.Rwi;
+  pending.Pwi_ref = ctx.Pwi;
+  pending.extrinsic_version = extrinsic_version_;
 }
 
 void VIOManager::initializeVIO()
@@ -839,7 +1023,12 @@ void VIOManager::initializeVIO()
       fout_camera.close();
     }
   }
-  const int state_dim = state != nullptr ? state->stateDim() : BASE_STATE_DIM + numCameras() + 6 * numCameras();
+  const int fallback_time_groups = camera_time_offset_groups.empty()
+                                     ? 1
+                                     : (*std::max_element(camera_time_offset_groups.begin(),
+                                                          camera_time_offset_groups.end()) + 1);
+  const int state_dim = state != nullptr ? state->stateDim()
+                                         : BASE_STATE_DIM + numCameras() + fallback_time_groups + 6 * numCameras();
   G = Eigen::MatrixXd::Zero(state_dim, state_dim);
   H_T_H = Eigen::MatrixXd::Zero(state_dim, state_dim);
 }
@@ -4985,6 +5174,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     VirtualCandidateResult &result = results[candidate_index];
     VisualPoint *pt = candidate.point;
     Feature *ref_ftr = candidate.reference;
+    if (ref_ftr == nullptr || !refreshReferenceCalibration(*ref_ftr))
+    {
+      result.rejection = VIRTUAL_REJECT_REFERENCE_SUPPORT;
+      continue;
+    }
 
     if (!buildVirtualFrameRotation(ctx, candidate.point_c_seed, candidate.current_raw_center_px,
                                    result.track.R_vcur_from_ccur_seed, result.track.R_ccur_from_vcur_seed))
@@ -5756,6 +5950,11 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
           ++debug_ref_invalid;
           break;
         }
+        if (!refreshReferenceCalibration(*ref_ftr))
+        {
+          ++debug_ref_invalid;
+          break;
+        }
       const PerCameraData &ref_ctx = cameras_[ref_ftr->camera_id_];
       if (ref_ftr->camera_id_ != ctx.camera_id) ++debug_cross_refs;
 
@@ -6084,8 +6283,6 @@ void VIOManager::buildCurrentCrossCameraPairs()
   }
 
   const int metric_levels = usage_stats_en ? std::max(1, patch_pyrimid_level) : 1;
-  const M3D Rwi = state->rot_end;
-  const V3D Pwi = state->pos_end;
   for (auto &entry : observations_by_point)
   {
     VisualPoint *point = entry.first;
@@ -6118,10 +6315,8 @@ void VIOManager::buildCurrentCrossCameraPairs()
         pair.ncc_levels.assign(metric_levels, std::numeric_limits<double>::quiet_NaN());
         pair.level_valid.assign(metric_levels, 0);
 
-        source.Rcw = source.Rci * Rwi.transpose();
-        source.Pcw = -source.Rci * Rwi.transpose() * Pwi + source.Pci;
-        target.Rcw = target.Rci * Rwi.transpose();
-        target.Pcw = -target.Rci * Rwi.transpose() * Pwi + target.Pci;
+        updateFrameState(source, *state);
+        updateFrameState(target, *state);
         const SE3<double> T_source_w(source.Rcw, source.Pcw);
         const SE3<double> T_target_w(target.Rcw, target.Pcw);
         const V3D source_view = T_source_w.inverse().translation() - point->pos_;
@@ -6266,6 +6461,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
       total_observations >= online_extrinsic_min_tracks;
   const bool allow_extrinsic_rotation = online_extrinsic_active && online_extrinsic_rot_en;
   const bool allow_extrinsic_translation = online_extrinsic_active && online_extrinsic_trans_en;
+  const Eigen::MatrixXd cov_before_visual_update = state->cov;
+  std::vector<uint8_t> final_active_extrinsic_rot(state->num_cameras, 0);
+  std::vector<uint8_t> final_active_extrinsic_trans(state->num_cameras, 0);
+  std::vector<uint8_t> final_active_time_groups(state->num_time_offset_groups, 0);
+  Eigen::MatrixXd rollback_G = G;
+  std::vector<uint8_t> rollback_active_extrinsic_rot = final_active_extrinsic_rot;
+  std::vector<uint8_t> rollback_active_extrinsic_trans = final_active_extrinsic_trans;
+  std::vector<uint8_t> rollback_active_time_groups = final_active_time_groups;
   const Eigen::MatrixXd usage_prior_cov = usage_stats_en ? state->cov : Eigen::MatrixXd();
   const int usage_state_dim = state->stateDim();
   // These snapshots are overwritten only when G is updated, so they always correspond to the exact
@@ -6290,6 +6493,18 @@ void VIOManager::computeJacobianAndUpdateEKF()
   long long usage_final_residuals_same = 0;
   long long usage_final_residuals_cross = 0;
   long long usage_final_residuals_current_cross = 0;
+  Eigen::MatrixXd rollback_usage_final_h_base = usage_final_h_base;
+  Eigen::MatrixXd rollback_usage_final_h_same = usage_final_h_same;
+  Eigen::MatrixXd rollback_usage_final_h_cross = usage_final_h_cross;
+  Eigen::MatrixXd rollback_usage_final_h_current_cross = usage_final_h_current_cross;
+  long long rollback_usage_final_patches_all = usage_final_patches_all;
+  long long rollback_usage_final_patches_same = usage_final_patches_same;
+  long long rollback_usage_final_patches_cross = usage_final_patches_cross;
+  long long rollback_usage_final_patches_current_cross = usage_final_patches_current_cross;
+  long long rollback_usage_final_residuals_all = usage_final_residuals_all;
+  long long rollback_usage_final_residuals_same = usage_final_residuals_same;
+  long long rollback_usage_final_residuals_cross = usage_final_residuals_cross;
+  long long rollback_usage_final_residuals_current_cross = usage_final_residuals_current_cross;
 
   for (int level = patch_pyrimid_level - 1; level >= 0; --level)
   {
@@ -6324,24 +6539,79 @@ void VIOManager::computeJacobianAndUpdateEKF()
       long long usage_iter_residuals_current_cross = 0;
       double error = 0.0;
       int measurement_count = 0;
+      for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
+      std::vector<uint8_t> active_time_groups(state->num_time_offset_groups, 0);
+      if (online_time_offset_en && frame_count >= online_time_offset_start_frame &&
+          (online_time_offset_min_update_interval <= 0 ||
+           frame_count % std::max(1, online_time_offset_min_update_interval) == 0))
+      {
+        std::vector<int> group_tracks(state->num_time_offset_groups, 0);
+        std::vector<double> group_pixel_velocity(state->num_time_offset_groups, 0.0);
+        for (PerCameraData &ctx : cameras_)
+        {
+          if (ctx.total_points <= 0 || ctx.visual_submap == nullptr || ctx.new_frame == nullptr) continue;
+          const int group_id = ctx.time_offset_group;
+          if (!isOnlineTimeOffsetEnabledForGroup(group_id)) continue;
+          const int count = std::min<int>(ctx.total_points, ctx.visual_submap->voxel_points.size());
+          for (int i = 0; i < count; ++i)
+          {
+            VisualPoint *point = ctx.visual_submap->voxel_points[i];
+            if (point == nullptr) continue;
+            const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
+            if (!point_c.array().isFinite().all()) continue;
+            MD(2, 3) Jdpi;
+            computeProjectionJacobian(ctx, point_c, Jdpi);
+            const V3D point_i = ctx.Rwi.transpose() * (point->pos_ - ctx.Pwi);
+            M3D point_i_hat;
+            point_i_hat << SKEW_SYM_MATRX(point_i);
+            const V3D dpc_dtd = ctx.Rci * (point_i_hat * ctx.gyro_i - ctx.Rwi.transpose() * ctx.Vwi);
+            const double pixel_speed = (Jdpi * dpc_dtd).norm();
+            if (!std::isfinite(pixel_speed)) continue;
+            ++group_tracks[group_id];
+            group_pixel_velocity[group_id] += pixel_speed;
+          }
+        }
+        for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+        {
+          const double avg_pixel_velocity =
+              group_tracks[group_id] > 0 ? group_pixel_velocity[group_id] / group_tracks[group_id] : 0.0;
+          if (isOnlineTimeOffsetEnabledForGroup(group_id) &&
+              group_tracks[group_id] >= online_time_offset_min_tracks &&
+              avg_pixel_velocity >= online_time_offset_min_pixel_velocity)
+            active_time_groups[group_id] = 1;
+        }
+      }
+      std::vector<uint8_t> active_extrinsic_rot(state->num_cameras, 0);
+      std::vector<uint8_t> active_extrinsic_trans(state->num_cameras, 0);
+      for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+      {
+        const bool camera_active = camera_id < static_cast<int>(cameras_.size()) &&
+                                   isOnlineExtrinsicEnabledForCamera(camera_id) &&
+                                   cameras_[camera_id].total_points >= online_extrinsic_min_tracks;
+        if (camera_active && allow_extrinsic_rotation) active_extrinsic_rot[camera_id] = 1;
+        if (camera_active && allow_extrinsic_translation) active_extrinsic_trans[camera_id] = 1;
+      }
 
       for (PerCameraData &ctx : cameras_)
       {
         if (ctx.total_points == 0 || ctx.visual_submap == nullptr || ctx.new_frame == nullptr) continue;
         const cv::Mat &img = ctx.new_frame->img_;
-        const M3D Rwi = state->rot_end;
-        const V3D Pwi = state->pos_end;
-        const bool estimate_extrinsic = isOnlineExtrinsicEnabledForCamera(ctx.camera_id) &&
-                                        (allow_extrinsic_rotation || allow_extrinsic_translation);
-        ctx.Rcw = ctx.Rci * Rwi.transpose();
-        ctx.Pcw = -ctx.Rci * Rwi.transpose() * Pwi + ctx.Pci;
-        ctx.Jdp_dt = ctx.Rci * Rwi.transpose();
+        const M3D Rwi = ctx.Rwi;
+        const V3D Pwi = ctx.Pwi;
+        const bool estimate_extrinsic =
+            ctx.camera_id >= 0 && ctx.camera_id < state->num_cameras &&
+            (active_extrinsic_rot[ctx.camera_id] != 0 || active_extrinsic_trans[ctx.camera_id] != 0);
         const double current_exposure = state->inv_expo_time[ctx.camera_id];
 
         for (int point_index = 0; point_index < ctx.total_points; ++point_index)
         {
           VisualPoint *point = ctx.visual_submap->voxel_points[point_index];
           if (point == nullptr) continue;
+          const V3D point_i_for_time = Rwi.transpose() * (point->pos_ - Pwi);
+          M3D point_i_for_time_hat;
+          point_i_for_time_hat << SKEW_SYM_MATRX(point_i_for_time);
+          const V3D dpc_dtd =
+              ctx.Rci * (point_i_for_time_hat * ctx.gyro_i - Rwi.transpose() * ctx.Vwi);
           const int search_level = ctx.visual_submap->search_levels[point_index];
           const int pyramid_level = level + search_level;
           const int scale = 1 << pyramid_level;
@@ -6395,6 +6665,16 @@ void VIOManager::computeJacobianAndUpdateEKF()
               }
             }
             patch_error += residual * residual;
+          };
+          auto addMotionTimeJacobian = [&](Eigen::VectorXd &jacobian, const MD(1, 3) &J_photo_center) {
+            jacobian.segment<3>(state->velocityIndex()) = (J_photo_center * ctx.dpc_dvel).transpose();
+            const int group_id = ctx.time_offset_group;
+            if (group_id >= 0 && group_id < state->num_time_offset_groups &&
+                group_id < static_cast<int>(active_time_groups.size()) &&
+                active_time_groups[group_id] != 0)
+            {
+              jacobian[state->timeOffsetIndex(group_id)] = (J_photo_center * dpc_dtd)(0, 0);
+            }
           };
           Feature *usage_reference = point_index < static_cast<int>(ctx.visual_submap->reference_features.size())
                                          ? ctx.visual_submap->reference_features[point_index]
@@ -6461,13 +6741,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
                 jacobian.segment<3>(0) = JdR.transpose();
                 jacobian.segment<3>(3) = Jdt.transpose();
+                addMotionTimeJacobian(jacobian, J_photo_center);
                 if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
                 if (estimate_extrinsic)
                 {
-                  if (allow_extrinsic_rotation)
+                  if (active_extrinsic_rot[ctx.camera_id] != 0)
                     jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) =
                         (J_photo_center * Jpc_dRcl).transpose();
-                  if (allow_extrinsic_translation)
+                  if (active_extrinsic_trans[ctx.camera_id] != 0)
                     jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = J_photo_center.transpose();
                 }
                 accumulateObservation(jacobian, residual);
@@ -6523,13 +6804,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
                 jacobian.segment<3>(0) = JdR.transpose();
                 jacobian.segment<3>(3) = Jdt.transpose();
+                addMotionTimeJacobian(jacobian, Jimg_Jpi_R);
                 if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
                 if (estimate_extrinsic)
                 {
-                  if (allow_extrinsic_rotation)
+                  if (active_extrinsic_rot[ctx.camera_id] != 0)
                     jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) =
                         (Jimg_Jpi_R * Jpc_dRcl).transpose();
-                  if (allow_extrinsic_translation)
+                  if (active_extrinsic_trans[ctx.camera_id] != 0)
                     jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = Jimg_Jpi_R.transpose();
                 }
                 accumulateObservation(jacobian, residual);
@@ -6597,8 +6879,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   Jimg << grad_u, grad_v;
                   Jimg *= current_exposure * inv_scale;
                 }
-                const MD(1, 3) Jdphi = Jimg * Jdpi * point_hat;
-                const MD(1, 3) Jdp = -Jimg * Jdpi;
+                const MD(1, 3) Jimg_Jpi = Jimg * Jdpi;
+                const MD(1, 3) Jdphi = Jimg_Jpi * point_hat;
+                const MD(1, 3) Jdp = -Jimg_Jpi;
                 const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
                 const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
                 const double residual = current_exposure * current_value -
@@ -6606,14 +6889,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
                 jacobian.segment<3>(0) = JdR.transpose();
                 jacobian.segment<3>(3) = Jdt.transpose();
+                addMotionTimeJacobian(jacobian, Jimg_Jpi);
                 if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
                 if (estimate_extrinsic)
                 {
-                  const MD(1, 3) Jimg_Jpi = Jimg * Jdpi;
-                  if (allow_extrinsic_rotation)
+                  if (active_extrinsic_rot[ctx.camera_id] != 0)
                     jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) =
                         (Jimg_Jpi * Jpc_dRcl).transpose();
-                  if (allow_extrinsic_translation)
+                  if (active_extrinsic_trans[ctx.camera_id] != 0)
                     jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = Jimg_Jpi.transpose();
                 }
                 accumulateObservation(jacobian, residual);
@@ -6751,15 +7034,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
         const double sqrt_weight = std::sqrt(std::max(0.0, pair.hessian_weight));
         const Matrix2d A_source_target = pair.A_target_source.inverse();
         const V3D point_w = pair.point->pos_;
-        const M3D Rwi = state->rot_end;
-        const V3D Pwi = state->pos_end;
-        auto updateCameraPose = [&](PerCameraData &ctx) {
-          ctx.Rcw = ctx.Rci * Rwi.transpose();
-          ctx.Pcw = -ctx.Rci * Rwi.transpose() * Pwi + ctx.Pci;
-          ctx.Jdp_dt = ctx.Rci * Rwi.transpose();
-        };
-        updateCameraPose(source);
-        updateCameraPose(target);
+        updateFrameState(source, *state);
+        updateFrameState(target, *state);
         const VirtualTrackPatch *source_track = nullptr;
         const VirtualTrackPatch *target_track = nullptr;
         if (virtual_fisheye_patch_en)
@@ -6777,12 +7053,13 @@ void VIOManager::computeJacobianAndUpdateEKF()
           const double exposure = state->inv_expo_time[ctx.camera_id];
           const V3D point_c = ctx.Rcw * point_w + ctx.Pcw;
           if (!point_c.array().isFinite().all()) return false;
-          const bool estimate_extrinsic = isOnlineExtrinsicEnabledForCamera(ctx.camera_id) &&
-                                          (allow_extrinsic_rotation || allow_extrinsic_translation);
+          const bool estimate_extrinsic =
+              ctx.camera_id >= 0 && ctx.camera_id < state->num_cameras &&
+              (active_extrinsic_rot[ctx.camera_id] != 0 || active_extrinsic_trans[ctx.camera_id] != 0);
           M3D Jpc_dRcl = M3D::Zero();
           if (estimate_extrinsic)
           {
-            const V3D point_i = Rwi.transpose() * (point_w - Pwi);
+            const V3D point_i = ctx.Rwi.transpose() * (point_w - ctx.Pwi);
             const V3D point_l = Rli * point_i + Pli;
             M3D point_l_hat;
             point_l_hat << SKEW_SYM_MATRX(point_l);
@@ -6839,12 +7116,25 @@ void VIOManager::computeJacobianAndUpdateEKF()
           const MD(1, 3) Jdp = -J_photo_center;
           jacobian.segment<3>(0) = (Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR).transpose();
           jacobian.segment<3>(3) = (Jdp * ctx.Jdp_dt).transpose();
+          jacobian.segment<3>(state->velocityIndex()) = (J_photo_center * ctx.dpc_dvel).transpose();
+          const int group_id = ctx.time_offset_group;
+          if (group_id >= 0 && group_id < state->num_time_offset_groups &&
+              group_id < static_cast<int>(active_time_groups.size()) &&
+              active_time_groups[group_id] != 0)
+          {
+            const V3D point_i_time = ctx.Rwi.transpose() * (point_w - ctx.Pwi);
+            M3D point_i_time_hat;
+            point_i_time_hat << SKEW_SYM_MATRX(point_i_time);
+            const V3D dpc_dtd =
+                ctx.Rci * (point_i_time_hat * ctx.gyro_i - ctx.Rwi.transpose() * ctx.Vwi);
+            jacobian[state->timeOffsetIndex(group_id)] = (J_photo_center * dpc_dtd)(0, 0);
+          }
           if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = value;
           if (estimate_extrinsic)
           {
-            if (allow_extrinsic_rotation)
+            if (active_extrinsic_rot[ctx.camera_id] != 0)
               jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) = (J_photo_center * Jpc_dRcl).transpose();
-            if (allow_extrinsic_translation)
+            if (active_extrinsic_trans[ctx.camera_id] != 0)
               jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = J_photo_center.transpose();
           }
           return jacobian.array().isFinite().all() && std::isfinite(value);
@@ -6894,12 +7184,30 @@ void VIOManager::computeJacobianAndUpdateEKF()
 
       if (online_extrinsic_active && online_extrinsic_prior_factor_en)
         applyOnlineExtrinsicPriors(hessian, gradient, allow_extrinsic_rotation, allow_extrinsic_translation);
+      if (online_time_offset_en)
+        applyOnlineTimeOffsetPriors(hessian, gradient, active_time_groups);
       compute_jacobian_time += omp_get_wtime() - linearize_start;
       if (measurement_count == 0) break;
       error /= measurement_count;
       if (error > last_error)
       {
         *state = old_state;
+        G = rollback_G;
+        final_active_extrinsic_rot = rollback_active_extrinsic_rot;
+        final_active_extrinsic_trans = rollback_active_extrinsic_trans;
+        final_active_time_groups = rollback_active_time_groups;
+        usage_final_h_base = rollback_usage_final_h_base;
+        usage_final_h_same = rollback_usage_final_h_same;
+        usage_final_h_cross = rollback_usage_final_h_cross;
+        usage_final_h_current_cross = rollback_usage_final_h_current_cross;
+        usage_final_patches_all = rollback_usage_final_patches_all;
+        usage_final_patches_same = rollback_usage_final_patches_same;
+        usage_final_patches_cross = rollback_usage_final_patches_cross;
+        usage_final_patches_current_cross = rollback_usage_final_patches_current_cross;
+        usage_final_residuals_all = rollback_usage_final_residuals_all;
+        usage_final_residuals_same = rollback_usage_final_residuals_same;
+        usage_final_residuals_cross = rollback_usage_final_residuals_cross;
+        usage_final_residuals_current_cross = rollback_usage_final_residuals_current_cross;
         syncCameraExtrinsicsFromState(*state);
         break;
       }
@@ -6907,6 +7215,18 @@ void VIOManager::computeJacobianAndUpdateEKF()
       old_state = *state;
       last_error = error;
       const double update_start = omp_get_wtime();
+      rollback_usage_final_h_base = usage_final_h_base;
+      rollback_usage_final_h_same = usage_final_h_same;
+      rollback_usage_final_h_cross = usage_final_h_cross;
+      rollback_usage_final_h_current_cross = usage_final_h_current_cross;
+      rollback_usage_final_patches_all = usage_final_patches_all;
+      rollback_usage_final_patches_same = usage_final_patches_same;
+      rollback_usage_final_patches_cross = usage_final_patches_cross;
+      rollback_usage_final_patches_current_cross = usage_final_patches_current_cross;
+      rollback_usage_final_residuals_all = usage_final_residuals_all;
+      rollback_usage_final_residuals_same = usage_final_residuals_same;
+      rollback_usage_final_residuals_cross = usage_final_residuals_cross;
+      rollback_usage_final_residuals_current_cross = usage_final_residuals_current_cross;
       if (usage_stats_en)
       {
         usage_final_h_base = hessian - usage_iter_h_all;
@@ -6923,18 +7243,102 @@ void VIOManager::computeJacobianAndUpdateEKF()
         usage_final_residuals_cross = usage_iter_residuals_cross;
         usage_final_residuals_current_cross = usage_iter_residuals_current_cross;
       }
-      const Eigen::MatrixXd K1 = (hessian + (state->cov / img_point_cov).inverse()).inverse();
       const Eigen::VectorXd prior_delta = *state_propagat - *state;
-      G = K1 * hessian;
-      Eigen::VectorXd solution = -K1 * gradient + prior_delta - G * prior_delta;
-      limitOnlineExtrinsicUpdate(solution, allow_extrinsic_rotation, allow_extrinsic_translation);
+      Eigen::MatrixXd solve_hessian = hessian;
+      Eigen::VectorXd solve_gradient = gradient;
+      rollback_G = G;
+      rollback_active_extrinsic_rot = final_active_extrinsic_rot;
+      rollback_active_extrinsic_trans = final_active_extrinsic_trans;
+      rollback_active_time_groups = final_active_time_groups;
+      deactivateInactiveCalibrationBlocks(solve_hessian, solve_gradient,
+                                          active_extrinsic_rot,
+                                          active_extrinsic_trans,
+                                          active_time_groups);
+      Eigen::MatrixXd K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
+      G = K1 * solve_hessian;
+      Eigen::VectorXd solution = -K1 * solve_gradient + prior_delta - G * prior_delta;
+      auto zeroInactiveCalibrationInSolution = [&](Eigen::VectorXd &delta) {
+        for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+        {
+          if (camera_id >= static_cast<int>(active_extrinsic_rot.size()) ||
+              active_extrinsic_rot[camera_id] == 0)
+            delta.segment<3>(state->extrinsicRotIndex(camera_id)).setZero();
+          if (camera_id >= static_cast<int>(active_extrinsic_trans.size()) ||
+              active_extrinsic_trans[camera_id] == 0)
+            delta.segment<3>(state->extrinsicTransIndex(camera_id)).setZero();
+        }
+        for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+        {
+          if (group_id >= static_cast<int>(active_time_groups.size()) || active_time_groups[group_id] == 0)
+            delta[state->timeOffsetIndex(group_id)] = 0.0;
+        }
+      };
+      zeroInactiveCalibrationInSolution(solution);
+      if (!calibrationUpdateWithinTrustRegion(solution, allow_extrinsic_rotation,
+                                              allow_extrinsic_translation, active_time_groups))
+      {
+        std::vector<uint8_t> deactivate_time_groups = active_time_groups;
+        deactivateCalibrationBlocks(solve_hessian, solve_gradient, true, deactivate_time_groups);
+        K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
+        G = K1 * solve_hessian;
+        solution = -K1 * solve_gradient + prior_delta - G * prior_delta;
+        zeroInactiveCalibrationInSolution(solution);
+        for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+        {
+          solution.segment<3>(state->extrinsicRotIndex(camera_id)).setZero();
+          solution.segment<3>(state->extrinsicTransIndex(camera_id)).setZero();
+        }
+        for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+        {
+          if (group_id < static_cast<int>(active_time_groups.size()) && active_time_groups[group_id])
+            solution[state->timeOffsetIndex(group_id)] = 0.0;
+        }
+        std::fill(final_active_extrinsic_rot.begin(), final_active_extrinsic_rot.end(), 0);
+        std::fill(final_active_extrinsic_trans.begin(), final_active_extrinsic_trans.end(), 0);
+        std::fill(final_active_time_groups.begin(), final_active_time_groups.end(), 0);
+      }
+      else
+      {
+        final_active_extrinsic_rot = active_extrinsic_rot;
+        final_active_extrinsic_trans = active_extrinsic_trans;
+        final_active_time_groups = active_time_groups;
+      }
       *state += solution;
       syncCameraExtrinsicsFromState(*state);
       update_ekf_time += omp_get_wtime() - update_start;
-      if (solution.segment<3>(0).norm() * 57.3 < 0.001 && solution.segment<3>(3).norm() * 100.0 < 0.001) break;
+      double max_extrinsic_update = 0.0;
+      if (allow_extrinsic_rotation || allow_extrinsic_translation)
+      {
+        for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+        {
+          if (camera_id < static_cast<int>(active_extrinsic_rot.size()) &&
+              active_extrinsic_rot[camera_id] != 0)
+            max_extrinsic_update = std::max(max_extrinsic_update,
+                                            solution.segment<3>(state->extrinsicRotIndex(camera_id)).norm());
+          if (camera_id < static_cast<int>(active_extrinsic_trans.size()) &&
+              active_extrinsic_trans[camera_id] != 0)
+            max_extrinsic_update = std::max(max_extrinsic_update,
+                                            solution.segment<3>(state->extrinsicTransIndex(camera_id)).norm());
+        }
+      }
+      double max_time_update = 0.0;
+      for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+      {
+        if (group_id < static_cast<int>(active_time_groups.size()) && active_time_groups[group_id])
+          max_time_update = std::max(max_time_update, std::fabs(solution[state->timeOffsetIndex(group_id)]));
+      }
+      if (solution.segment<3>(0).norm() * 57.3 < 0.001 &&
+          solution.segment<3>(3).norm() * 100.0 < 0.001 &&
+          max_extrinsic_update < 1.0e-6 &&
+          max_time_update < 1.0e-6)
+        break;
     }
   }
   state->cov -= G * state->cov;
+  restoreInactiveCalibrationCovariance(cov_before_visual_update,
+                                       final_active_extrinsic_rot,
+                                       final_active_extrinsic_trans,
+                                       final_active_time_groups);
   recordUsagePoseFrameInfo(usage_prior_cov, state->cov, usage_final_h_base,
                            usage_final_h_same, usage_final_h_cross, usage_final_h_current_cross,
                            usage_final_patches_all, usage_final_residuals_all,
@@ -6952,6 +7356,17 @@ void VIOManager::computeJacobianAndUpdateEKF()
       printf("[ VIO Extrinsic ] frame=%d camera_id=%d dR_deg=(%.6f, %.6f, %.6f) dP_m=(%.6f, %.6f, %.6f) Pcl=(%.6f, %.6f, %.6f)\n",
              frame_count, ctx.camera_id, dR_deg[0], dR_deg[1], dR_deg[2], dP[0], dP[1], dP[2],
              state->Pcl[ctx.camera_id][0], state->Pcl[ctx.camera_id][1], state->Pcl[ctx.camera_id][2]);
+    }
+  }
+  if (online_time_offset_en && frame_count % 20 == 0)
+  {
+    for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+    {
+      if (!isOnlineTimeOffsetEnabledForGroup(group_id)) continue;
+      const double prior = group_id < state->time_offset_prior.size() ? state->time_offset_prior[group_id] : 0.0;
+      printf("[ VIO TimeOffset ] frame=%d group=%d td_ms=%.6f delta_from_prior_ms=%.6f\n",
+             frame_count, group_id, state->time_offset[group_id] * 1.0e3,
+             (state->time_offset[group_id] - prior) * 1.0e3);
     }
   }
   for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
@@ -6974,6 +7389,14 @@ void VIOManager::updateStateVirtualS2(cv::Mat img, int level)
       total_observations >= online_extrinsic_min_tracks;
   const bool allow_extrinsic_rotation = online_extrinsic_active && online_extrinsic_rot_en;
   const bool allow_extrinsic_translation = online_extrinsic_active && online_extrinsic_trans_en;
+  const Eigen::MatrixXd cov_before_visual_update = state->cov;
+  std::vector<uint8_t> final_active_extrinsic_rot(state->num_cameras, 0);
+  std::vector<uint8_t> final_active_extrinsic_trans(state->num_cameras, 0);
+  std::vector<uint8_t> final_active_time_groups(state->num_time_offset_groups, 0);
+  Eigen::MatrixXd rollback_G = G;
+  std::vector<uint8_t> rollback_active_extrinsic_rot = final_active_extrinsic_rot;
+  std::vector<uint8_t> rollback_active_extrinsic_trans = final_active_extrinsic_trans;
+  std::vector<uint8_t> rollback_active_time_groups = final_active_time_groups;
 
   for (int iteration = 0; iteration < max_iterations; ++iteration)
   {
@@ -6983,19 +7406,72 @@ void VIOManager::updateStateVirtualS2(cv::Mat img, int level)
     Eigen::VectorXd gradient = Eigen::VectorXd::Zero(state_dim);
     double error = 0.0;
     int measurement_count = 0;
+    for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
+    std::vector<uint8_t> active_time_groups(state->num_time_offset_groups, 0);
+    if (online_time_offset_en && frame_count >= online_time_offset_start_frame &&
+        (online_time_offset_min_update_interval <= 0 ||
+         frame_count % std::max(1, online_time_offset_min_update_interval) == 0))
+    {
+      std::vector<int> group_tracks(state->num_time_offset_groups, 0);
+      std::vector<double> group_pixel_velocity(state->num_time_offset_groups, 0.0);
+      for (PerCameraData &ctx : cameras_)
+      {
+        if (ctx.total_points <= 0 || ctx.visual_submap == nullptr) continue;
+        const int group_id = ctx.time_offset_group;
+        if (!isOnlineTimeOffsetEnabledForGroup(group_id)) continue;
+        const int count = std::min<int>(ctx.total_points, ctx.visual_submap->voxel_points.size());
+        for (int i = 0; i < count; ++i)
+        {
+          VisualPoint *point = ctx.visual_submap->voxel_points[i];
+          if (point == nullptr || i >= static_cast<int>(ctx.visual_submap->virtual_track_patches.size())) continue;
+          const VirtualTrackPatch &track = ctx.visual_submap->virtual_track_patches[i];
+          if (!track.valid) continue;
+          const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
+          const V3D point_v = track.R_vcur_from_ccur_seed * point_c;
+          if (!point_v.array().isFinite().all() || point_v.norm() <= kS2Eps) continue;
+          MD(2, 3) Jdpi;
+          computeVirtualProjectionJacobian(point_v, Jdpi);
+          const V3D point_i = ctx.Rwi.transpose() * (point->pos_ - ctx.Pwi);
+          M3D point_i_hat;
+          point_i_hat << SKEW_SYM_MATRX(point_i);
+          const V3D dpc_dtd = ctx.Rci * (point_i_hat * ctx.gyro_i - ctx.Rwi.transpose() * ctx.Vwi);
+          const double pixel_speed = (Jdpi * track.R_vcur_from_ccur_seed * dpc_dtd).norm();
+          if (!std::isfinite(pixel_speed)) continue;
+          ++group_tracks[group_id];
+          group_pixel_velocity[group_id] += pixel_speed;
+        }
+      }
+      for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+      {
+        const double avg_pixel_velocity =
+            group_tracks[group_id] > 0 ? group_pixel_velocity[group_id] / group_tracks[group_id] : 0.0;
+        if (isOnlineTimeOffsetEnabledForGroup(group_id) &&
+            group_tracks[group_id] >= online_time_offset_min_tracks &&
+            avg_pixel_velocity >= online_time_offset_min_pixel_velocity)
+          active_time_groups[group_id] = 1;
+      }
+    }
+    std::vector<uint8_t> active_extrinsic_rot(state->num_cameras, 0);
+    std::vector<uint8_t> active_extrinsic_trans(state->num_cameras, 0);
+    for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+    {
+      const bool camera_active = camera_id < static_cast<int>(cameras_.size()) &&
+                                 isOnlineExtrinsicEnabledForCamera(camera_id) &&
+                                 cameras_[camera_id].total_points >= online_extrinsic_min_tracks;
+      if (camera_active && allow_extrinsic_rotation) active_extrinsic_rot[camera_id] = 1;
+      if (camera_active && allow_extrinsic_translation) active_extrinsic_trans[camera_id] = 1;
+    }
 
     for (PerCameraData &ctx : cameras_)
     {
       if (ctx.total_points == 0 || ctx.visual_submap == nullptr) continue;
       const cv::Mat &raw_img = (ctx.new_frame != nullptr) ? ctx.new_frame->img_ : img;
       if (raw_img.empty()) continue;
-      const M3D Rwi = state->rot_end;
-      const V3D Pwi = state->pos_end;
-      const bool estimate_extrinsic = isOnlineExtrinsicEnabledForCamera(ctx.camera_id) &&
-                                      (allow_extrinsic_rotation || allow_extrinsic_translation);
-      ctx.Rcw = ctx.Rci * Rwi.transpose();
-      ctx.Pcw = -ctx.Rci * Rwi.transpose() * Pwi + ctx.Pci;
-      ctx.Jdp_dt = ctx.Rci * Rwi.transpose();
+      const M3D Rwi = ctx.Rwi;
+      const V3D Pwi = ctx.Pwi;
+      const bool estimate_extrinsic =
+          ctx.camera_id >= 0 && ctx.camera_id < state->num_cameras &&
+          (active_extrinsic_rot[ctx.camera_id] != 0 || active_extrinsic_trans[ctx.camera_id] != 0);
       const double current_exposure = state->inv_expo_time[ctx.camera_id];
 
       for (int point_index = 0; point_index < ctx.total_points; ++point_index)
@@ -7008,16 +7484,21 @@ void VIOManager::updateStateVirtualS2(cv::Mat img, int level)
         const std::vector<float> &reference_patch = ctx.visual_submap->warp_patch[point_index];
         const double reference_exposure = ctx.visual_submap->inv_expo_list[point_index];
         const VirtualTrackPatch &track = ctx.visual_submap->virtual_track_patches[point_index];
+        if (!track.valid) continue;
         const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
         if (!point_c.array().isFinite().all()) continue;
         const double point_c_norm = point_c.norm();
         if (!std::isfinite(point_c_norm) || point_c_norm <= kS2Eps) continue;
+        const V3D point_i_for_time = Rwi.transpose() * (point->pos_ - Pwi);
+        M3D point_i_for_time_hat;
+        point_i_for_time_hat << SKEW_SYM_MATRX(point_i_for_time);
+        const V3D dpc_dtd =
+            ctx.Rci * (point_i_for_time_hat * ctx.gyro_i - Rwi.transpose() * ctx.Vwi);
 
         M3D Jpc_dRcl = M3D::Zero();
         if (estimate_extrinsic)
         {
-          const V3D point_i = Rwi.transpose() * (point->pos_ - Pwi);
-          const V3D point_l = Rli * point_i + Pli;
+          const V3D point_l = Rli * point_i_for_time + Pli;
           M3D point_l_hat;
           point_l_hat << SKEW_SYM_MATRX(point_l);
           Jpc_dRcl = -ctx.Rcl * point_l_hat;
@@ -7045,13 +7526,19 @@ void VIOManager::updateStateVirtualS2(cv::Mat img, int level)
           Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
           jacobian.segment<3>(0) = JdR.transpose();
           jacobian.segment<3>(3) = Jdt.transpose();
+          jacobian.segment<3>(state->velocityIndex()) = (J_photo_center * ctx.dpc_dvel).transpose();
+          const int group_id = ctx.time_offset_group;
+          if (group_id >= 0 && group_id < state->num_time_offset_groups &&
+              group_id < static_cast<int>(active_time_groups.size()) &&
+              active_time_groups[group_id] != 0)
+            jacobian[state->timeOffsetIndex(group_id)] = (J_photo_center * dpc_dtd)(0, 0);
           if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
           if (estimate_extrinsic)
           {
-            if (allow_extrinsic_rotation)
+            if (active_extrinsic_rot[ctx.camera_id] != 0)
               jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) =
                   (J_photo_center * Jpc_dRcl).transpose();
-            if (allow_extrinsic_translation)
+            if (active_extrinsic_trans[ctx.camera_id] != 0)
               jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = J_photo_center.transpose();
           }
           hessian.noalias() += jacobian * jacobian.transpose();
@@ -7066,12 +7553,18 @@ void VIOManager::updateStateVirtualS2(cv::Mat img, int level)
 
     if (online_extrinsic_active && online_extrinsic_prior_factor_en)
       applyOnlineExtrinsicPriors(hessian, gradient, allow_extrinsic_rotation, allow_extrinsic_translation);
+    if (online_time_offset_en)
+      applyOnlineTimeOffsetPriors(hessian, gradient, active_time_groups);
     compute_jacobian_time += omp_get_wtime() - linearize_start;
     if (measurement_count == 0) return;
     error /= measurement_count;
     if (error > last_error)
     {
       *state = old_state;
+      G = rollback_G;
+      final_active_extrinsic_rot = rollback_active_extrinsic_rot;
+      final_active_extrinsic_trans = rollback_active_extrinsic_trans;
+      final_active_time_groups = rollback_active_time_groups;
       syncCameraExtrinsicsFromState(*state);
       break;
     }
@@ -7079,17 +7572,98 @@ void VIOManager::updateStateVirtualS2(cv::Mat img, int level)
     old_state = *state;
     last_error = error;
     const double update_start = omp_get_wtime();
-    const Eigen::MatrixXd K1 = (hessian + (state->cov / img_point_cov).inverse()).inverse();
     const Eigen::VectorXd prior_delta = *state_propagat - *state;
-    G = K1 * hessian;
-    Eigen::VectorXd solution = -K1 * gradient + prior_delta - G * prior_delta;
-    limitOnlineExtrinsicUpdate(solution, allow_extrinsic_rotation, allow_extrinsic_translation);
+    Eigen::MatrixXd solve_hessian = hessian;
+    Eigen::VectorXd solve_gradient = gradient;
+    rollback_G = G;
+    rollback_active_extrinsic_rot = final_active_extrinsic_rot;
+    rollback_active_extrinsic_trans = final_active_extrinsic_trans;
+    rollback_active_time_groups = final_active_time_groups;
+    deactivateInactiveCalibrationBlocks(solve_hessian, solve_gradient,
+                                        active_extrinsic_rot,
+                                        active_extrinsic_trans,
+                                        active_time_groups);
+    Eigen::MatrixXd K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
+    G = K1 * solve_hessian;
+    Eigen::VectorXd solution = -K1 * solve_gradient + prior_delta - G * prior_delta;
+    auto zeroInactiveCalibrationInSolution = [&](Eigen::VectorXd &delta) {
+      for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+      {
+        if (camera_id >= static_cast<int>(active_extrinsic_rot.size()) ||
+            active_extrinsic_rot[camera_id] == 0)
+          delta.segment<3>(state->extrinsicRotIndex(camera_id)).setZero();
+        if (camera_id >= static_cast<int>(active_extrinsic_trans.size()) ||
+            active_extrinsic_trans[camera_id] == 0)
+          delta.segment<3>(state->extrinsicTransIndex(camera_id)).setZero();
+      }
+      for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+      {
+        if (group_id >= static_cast<int>(active_time_groups.size()) || active_time_groups[group_id] == 0)
+          delta[state->timeOffsetIndex(group_id)] = 0.0;
+      }
+    };
+    zeroInactiveCalibrationInSolution(solution);
+    if (!calibrationUpdateWithinTrustRegion(solution, allow_extrinsic_rotation,
+                                            allow_extrinsic_translation, active_time_groups))
+    {
+      std::vector<uint8_t> deactivate_time_groups = active_time_groups;
+      deactivateCalibrationBlocks(solve_hessian, solve_gradient, true, deactivate_time_groups);
+      K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
+      G = K1 * solve_hessian;
+      solution = -K1 * solve_gradient + prior_delta - G * prior_delta;
+      zeroInactiveCalibrationInSolution(solution);
+      for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+      {
+        solution.segment<3>(state->extrinsicRotIndex(camera_id)).setZero();
+        solution.segment<3>(state->extrinsicTransIndex(camera_id)).setZero();
+      }
+      for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+      {
+        if (group_id < static_cast<int>(active_time_groups.size()) && active_time_groups[group_id])
+          solution[state->timeOffsetIndex(group_id)] = 0.0;
+      }
+      std::fill(final_active_extrinsic_rot.begin(), final_active_extrinsic_rot.end(), 0);
+      std::fill(final_active_extrinsic_trans.begin(), final_active_extrinsic_trans.end(), 0);
+      std::fill(final_active_time_groups.begin(), final_active_time_groups.end(), 0);
+    }
+    else
+    {
+      final_active_extrinsic_rot = active_extrinsic_rot;
+      final_active_extrinsic_trans = active_extrinsic_trans;
+      final_active_time_groups = active_time_groups;
+    }
     *state += solution;
     syncCameraExtrinsicsFromState(*state);
     update_ekf_time += omp_get_wtime() - update_start;
-    if (solution.segment<3>(0).norm() * 57.3 < 0.001 && solution.segment<3>(3).norm() * 100.0 < 0.001) break;
+    double max_extrinsic_update = 0.0;
+    for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+    {
+      if (camera_id < static_cast<int>(active_extrinsic_rot.size()) &&
+          active_extrinsic_rot[camera_id] != 0)
+        max_extrinsic_update = std::max(max_extrinsic_update,
+                                        solution.segment<3>(state->extrinsicRotIndex(camera_id)).norm());
+      if (camera_id < static_cast<int>(active_extrinsic_trans.size()) &&
+          active_extrinsic_trans[camera_id] != 0)
+        max_extrinsic_update = std::max(max_extrinsic_update,
+                                        solution.segment<3>(state->extrinsicTransIndex(camera_id)).norm());
+    }
+    double max_time_update = 0.0;
+    for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+    {
+      if (group_id < static_cast<int>(active_time_groups.size()) && active_time_groups[group_id])
+        max_time_update = std::max(max_time_update, std::fabs(solution[state->timeOffsetIndex(group_id)]));
+    }
+    if (solution.segment<3>(0).norm() * 57.3 < 0.001 &&
+        solution.segment<3>(3).norm() * 100.0 < 0.001 &&
+        max_extrinsic_update < 1.0e-6 &&
+        max_time_update < 1.0e-6)
+      break;
   }
   state->cov -= G * state->cov;
+  restoreInactiveCalibrationCovariance(cov_before_visual_update,
+                                       final_active_extrinsic_rot,
+                                       final_active_extrinsic_trans,
+                                       final_active_time_groups);
   for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
 }
 
@@ -7160,6 +7734,7 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
       pending.px = raw_px;
       pending.bearing = ctx.cam->cam2world(raw_px);
       pending.T_f_w = ctx.new_frame->T_f_w_;
+      fillPendingObservationTiming(pending, ctx);
       pending.inv_expo_time = state->inv_expo_time[ctx.camera_id];
       ctx.pending_new_points.push_back(std::move(pending));
       continue;
@@ -7191,6 +7766,7 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
     pending.img = virtual_support_img;
     pending.virtual_source_origin = virtual_source_origin;
     pending.T_f_w = ctx.new_frame->T_f_w_;
+    fillPendingObservationTiming(pending, ctx);
     pending.T_v_w = T_v_w;
     pending.R_v_from_c = R_v_from_c;
     pending.R_c_from_v = R_c_from_v;
@@ -7321,6 +7897,7 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
         pending.px = pc;
         pending.bearing = ctx.cam->cam2world(pc);
         pending.T_f_w = ctx.new_frame->T_f_w_;
+        fillPendingObservationTiming(pending, ctx);
         pending.inv_expo_time = state->inv_expo_time[ctx.camera_id];
         ctx.pending_new_points.push_back(std::move(pending));
         continue;
@@ -7338,6 +7915,7 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
       getImagePatch(ctx, img, pc, pending.patch.data(), 0);
       pending.img = img;
       pending.T_f_w = ctx.new_frame->T_f_w_;
+      fillPendingObservationTiming(pending, ctx);
       pending.inv_expo_time = state->inv_expo_time[ctx.camera_id];
       ctx.pending_new_points.push_back(std::move(pending));
     }
@@ -7896,6 +8474,7 @@ void VIOManager::materializePendingNewPointObservations(
     pending.img.release();
     pending.virtual_source_origin = cv::Point();
     pending.T_f_w = ctx.new_frame->T_f_w_;
+    fillPendingObservationTiming(pending, ctx);
     pending.inv_expo_time = state->inv_expo_time[ctx.camera_id];
     pending.virtual_patch_valid = false;
     pending.T_v_w = pending.T_f_w;
@@ -8121,7 +8700,10 @@ void VIOManager::commitPendingNewPoints(
       float *patch = new float[pending.patch.size()];
       std::copy(pending.patch.begin(), pending.patch.end(), patch);
       Feature *feature = new Feature(point, patch, pending.px, pending.bearing, pending.T_f_w, pending.level,
-                                     pending.camera_id, ctx.new_frame->timestamp_);
+                                     pending.camera_id, pending.capture_timestamp, pending.raw_timestamp,
+                                     pending.corrected_timestamp, pending.td_used,
+                                     pending.exposure_time_offset, pending.time_offset_group,
+                                     pending.Rwi_ref, pending.Pwi_ref, pending.extrinsic_version);
       if (pending.virtual_patch_valid && virtual_sparse_patch_en)
       {
         feature->virtual_source_roi_ = pending.img;
@@ -8191,6 +8773,7 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
     bool add_flag = last_feature == nullptr;
     if (last_feature != nullptr)
     {
+      refreshReferenceCalibration(*last_feature);
       const SE3<double> delta_pose = last_feature->T_f_w_ * pose_cur.inverse();
       const double delta_p = delta_pose.translation().norm();
       const double trace = delta_pose.rotationMatrix().trace();
@@ -8228,7 +8811,11 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
 
     const V3D bearing = ctx.cam->cam2world(raw_px);
     Feature *ftr_new = new Feature(pt, patch.release(), raw_px, bearing, ctx.new_frame->T_f_w_,
-                                   ctx.visual_submap->search_levels[i], ctx.camera_id, ctx.new_frame->timestamp_);
+                                   ctx.visual_submap->search_levels[i], ctx.camera_id,
+                                   ctx.new_frame->capture_timestamp_, ctx.new_frame->raw_timestamp_,
+                                   ctx.new_frame->corrected_timestamp_, ctx.new_frame->td_used_,
+                                   ctx.new_frame->exposure_time_offset_, ctx.new_frame->time_offset_group_,
+                                   ctx.Rwi, ctx.Pwi, extrinsic_version_);
     if (virtual_sparse_patch_en)
     {
       ftr_new->virtual_source_roi_ = virtual_support_img;
@@ -8291,6 +8878,7 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
     if (last_feature == nullptr) add_flag = true;
     else
     {
+      refreshReferenceCalibration(*last_feature);
       SE3 pose_ref = last_feature->T_f_w_;
       SE3 delta_pose = pose_ref * pose_cur.inverse();
       double delta_p = delta_pose.translation().norm();
@@ -8322,7 +8910,11 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
       ctx.update_flag[i] = 1;
       Vector3d f = ctx.cam->cam2world(pc);
       Feature *ftr_new = new Feature(pt, patch_temp, pc, f, ctx.new_frame->T_f_w_,
-                                     ctx.visual_submap->search_levels[i], ctx.camera_id, ctx.new_frame->timestamp_);
+                                     ctx.visual_submap->search_levels[i], ctx.camera_id,
+                                     ctx.new_frame->capture_timestamp_, ctx.new_frame->raw_timestamp_,
+                                     ctx.new_frame->corrected_timestamp_, ctx.new_frame->td_used_,
+                                     ctx.new_frame->exposure_time_offset_, ctx.new_frame->time_offset_group_,
+                                     ctx.Rwi, ctx.Pwi, extrinsic_version_);
       ftr_new->img_ = img;
       ftr_new->id_ = ctx.new_frame->id_;
       ftr_new->inv_expo_time_ = state->inv_expo_time[ctx.camera_id];
@@ -8356,6 +8948,7 @@ void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VO
       for (Feature *feature : pt->obs_)
       {
         if (feature == nullptr || feature->pending_delete_) continue;
+        refreshReferenceCalibration(*feature);
         if (feature->ref_id_ == 0)
         {
           feature->ref_id_ = next_visual_ref_id_++;
@@ -8410,6 +9003,7 @@ void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VO
               feature->surface_revision_ == plane->revision_ && feature->footprint_valid_)
             continue;
           if (feature->camera_id_ < 0 || feature->camera_id_ >= numCameras()) continue;
+          refreshReferenceCalibration(*feature);
           const PerCameraData &ref_ctx = cameras_[feature->camera_id_];
           feature->footprint_valid_ = computeManagedFootprint(
               ref_ctx, feature->T_f_w_, pt->pos_, normal, feature,
@@ -8484,6 +9078,7 @@ void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VO
     {
       Feature *ref_patch_temp = *it;
       if (ref_patch_temp == nullptr) continue;
+      refreshReferenceCalibration(*ref_patch_temp);
       if (!cross_camera_reference_en && ref_patch_temp->camera_id_ != ctx.camera_id) continue;
       float *patch_temp = ref_patch_temp->patch_;
       float NCC_up = 0.0;
@@ -8643,11 +9238,11 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
 
       for (int ind = 0; ind < patch_size_total; ind++)
       {
-        error_est += (ref_ftr->inv_expo_time_ * visual_submap->warp_patch[i][ind] - state->inv_expo_time * patch_buffer[ind]) *
-                     (ref_ftr->inv_expo_time_ * visual_submap->warp_patch[i][ind] - state->inv_expo_time * patch_buffer[ind]);
+        error_est += (ref_ftr->inv_expo_time_ * visual_submap->warp_patch[i][ind] - state->inv_expo_time[0] * patch_buffer[ind]) *
+                     (ref_ftr->inv_expo_time_ * visual_submap->warp_patch[i][ind] - state->inv_expo_time[0] * patch_buffer[ind]);
       }
       std::string ref_est = "ref_est " + std::to_string(1.0 / ref_ftr->inv_expo_time_);
-      std::string cur_est = "cur_est " + std::to_string(1.0 / state->inv_expo_time);
+      std::string cur_est = "cur_est " + std::to_string(1.0 / state->inv_expo_time[0]);
       std::string cur_propa = "cur_gt " + std::to_string(error_gt);
       std::string cur_optimize = "cur_est " + std::to_string(error_est);
 
@@ -8937,6 +9532,12 @@ void VIOManager::precomputeReferencePatches(int level)
 void VIOManager::updateStateInverseVirtual(cv::Mat img, int level)
 {
   (void)img;
+  if (state == nullptr || state_propagat == nullptr || state->stateDim() != kLegacyFixedStateDim)
+  {
+    printf("[ VIO Legacy ] updateStateInverseVirtual skipped: fixed legacy state dim=%d, current state dim=%d\n",
+           kLegacyFixedStateDim, state != nullptr ? state->stateDim() : -1);
+    return;
+  }
   if (total_points == 0) return;
   StatesGroup old_state = *state;
   const int H_DIM = total_points * patch_size_total;
@@ -9029,12 +9630,12 @@ void VIOManager::updateStateInverseVirtual(cv::Mat img, int level)
       H_T_H.setZero();
       G.setZero();
       H_T_H.block<6, 6>(0, 0) = H_sub_T * H_sub;
-      const MD(DIM_STATE, DIM_STATE) K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
+      const MD(kLegacyFixedStateDim, kLegacyFixedStateDim) K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
       const auto HTz = H_sub_T * z;
-      const MD(DIM_STATE, 1) vec = *state_propagat - *state;
-      G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
-      const MD(DIM_STATE, 1) solution =
-          -K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
+      const MD(kLegacyFixedStateDim, 1) vec = *state_propagat - *state;
+      G.block<kLegacyFixedStateDim, 6>(0, 0) = K_1.block<kLegacyFixedStateDim, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
+      const MD(kLegacyFixedStateDim, 1) solution =
+          -K_1.block<kLegacyFixedStateDim, 6>(0, 0) * HTz + vec - G.block<kLegacyFixedStateDim, 6>(0, 0) * vec.block<6, 1>(0, 0);
       *state += solution;
       if (solution.block<3, 1>(0, 0).norm() * 57.3f < 0.001f && solution.block<3, 1>(3, 0).norm() * 100.0f < 0.001f)
         EKF_end = true;
@@ -9054,6 +9655,12 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
   if (virtual_fisheye_patch_en)
   {
     updateStateInverseVirtual(img, level);
+    return;
+  }
+  if (state == nullptr || state_propagat == nullptr || state->stateDim() != kLegacyFixedStateDim)
+  {
+    printf("[ VIO Legacy ] updateStateInverse skipped: fixed legacy state dim=%d, current state dim=%d\n",
+           kLegacyFixedStateDim, state != nullptr ? state->stateDim() : -1);
     return;
   }
   if (total_points == 0) return;
@@ -9153,11 +9760,11 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       H_T_H.setZero();
       G.setZero();
       H_T_H.block<6, 6>(0, 0) = H_sub_T * H_sub;
-      MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
+      MD(kLegacyFixedStateDim, kLegacyFixedStateDim) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
       auto &&HTz = H_sub_T * z;
       auto vec = (*state_propagat) - (*state);
-      G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
-      auto solution = -K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
+      G.block<kLegacyFixedStateDim, 6>(0, 0) = K_1.block<kLegacyFixedStateDim, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
+      auto solution = -K_1.block<kLegacyFixedStateDim, 6>(0, 0) * HTz + vec - G.block<kLegacyFixedStateDim, 6>(0, 0) * vec.block<6, 1>(0, 0);
       (*state) += solution;
       auto &&rot_add = solution.block<3, 1>(0, 0);
       auto &&t_add = solution.block<3, 1>(3, 0);
@@ -9179,6 +9786,12 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
 void VIOManager::updateStateVirtual(cv::Mat img, int level)
 {
   (void)img;
+  if (state == nullptr || state_propagat == nullptr || state->stateDim() != kLegacyFixedStateDim)
+  {
+    printf("[ VIO Legacy ] updateStateVirtual skipped: fixed legacy state dim=%d, current state dim=%d\n",
+           kLegacyFixedStateDim, state != nullptr ? state->stateDim() : -1);
+    return;
+  }
   if (total_points == 0) return;
   StatesGroup old_state = *state;
   const int H_DIM = total_points * patch_size_total;
@@ -9250,7 +9863,7 @@ void VIOManager::updateStateVirtual(cv::Mat img, int level)
       {
         MD(1, 2) Jimg;
         Jimg << gradients[patch_index][0], gradients[patch_index][1];
-        Jimg *= state->inv_expo_time * inv_scale;
+        Jimg *= state->inv_expo_time[0] * inv_scale;
         const MD(1, 3) Jimg_Jpi_R = Jimg * Jdpi * track.R_vcur_from_ccur_seed;
         const MD(1, 3) Jdphi = Jimg_Jpi_R * point_c_hat;
         const MD(1, 3) Jdp = -Jimg_Jpi_R;
@@ -9258,7 +9871,7 @@ void VIOManager::updateStateVirtual(cv::Mat img, int level)
         const MD(1, 3) Jdt = Jdp * Jdp_dt;
         const double cur_value = current_values[patch_index];
         const double residual =
-            state->inv_expo_time * cur_value - inv_ref_expo * reference[patch_size_total * level + patch_index];
+            state->inv_expo_time[0] * cur_value - inv_ref_expo * reference[patch_size_total * level + patch_index];
         const int row = i * patch_size_total + patch_index;
         z(row) = residual;
         if (exposure_estimate_en) H_sub.block<1, 7>(row, 0) << JdR, Jdt, cur_value;
@@ -9282,12 +9895,12 @@ void VIOManager::updateStateVirtual(cv::Mat img, int level)
       H_T_H.setZero();
       G.setZero();
       H_T_H.block<7, 7>(0, 0) = H_sub_T * H_sub;
-      const MD(DIM_STATE, DIM_STATE) K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
+      const MD(kLegacyFixedStateDim, kLegacyFixedStateDim) K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
       const auto HTz = H_sub_T * z;
-      const MD(DIM_STATE, 1) vec = *state_propagat - *state;
-      G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
-      const MD(DIM_STATE, 1) solution =
-          -K_1.block<DIM_STATE, 7>(0, 0) * HTz + vec - G.block<DIM_STATE, 7>(0, 0) * vec.block<7, 1>(0, 0);
+      const MD(kLegacyFixedStateDim, 1) vec = *state_propagat - *state;
+      G.block<kLegacyFixedStateDim, 7>(0, 0) = K_1.block<kLegacyFixedStateDim, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
+      const MD(kLegacyFixedStateDim, 1) solution =
+          -K_1.block<kLegacyFixedStateDim, 7>(0, 0) * HTz + vec - G.block<kLegacyFixedStateDim, 7>(0, 0) * vec.block<7, 1>(0, 0);
       *state += solution;
       if (solution.block<3, 1>(0, 0).norm() * 57.3f < 0.001f && solution.block<3, 1>(3, 0).norm() * 100.0f < 0.001f)
         EKF_end = true;
@@ -9310,6 +9923,12 @@ void VIOManager::updateState(cv::Mat img, int level)
       updateStateVirtualS2(img, level);
     else
       updateStateVirtual(img, level);
+    return;
+  }
+  if (state == nullptr || state_propagat == nullptr || state->stateDim() != kLegacyFixedStateDim)
+  {
+    printf("[ VIO Legacy ] updateState skipped: fixed legacy state dim=%d, current state dim=%d\n",
+           kLegacyFixedStateDim, state != nullptr ? state->stateDim() : -1);
     return;
   }
   if (total_points == 0) return;
@@ -9383,7 +10002,7 @@ void VIOManager::updateState(cv::Mat img, int level)
 
       vector<float> P = visual_submap->warp_patch[i];
       double inv_ref_expo = visual_submap->inv_expo_list[i];
-      // ROS_ERROR("inv_ref_expo: %.3lf, state->inv_expo_time: %.3lf\n", inv_ref_expo, state->inv_expo_time);
+      // ROS_ERROR("inv_ref_expo: %.3lf, state->inv_expo_time: %.3lf\n", inv_ref_expo, state->inv_expo_time[0]);
 
       for (int x = 0; x < patch_size; x++)
       {
@@ -9402,7 +10021,7 @@ void VIOManager::updateState(cv::Mat img, int level)
                (w_ref_tl * img_ptr[-scale * width] + w_ref_tr * img_ptr[-scale * width + scale] + w_ref_bl * img_ptr[0] + w_ref_br * img_ptr[scale]));
 
           Jimg << du, dv;
-          Jimg = Jimg * state->inv_expo_time;
+          Jimg = Jimg * state->inv_expo_time[0];
           Jimg = Jimg * inv_scale;
           Jdphi = Jimg * Jdpi * p_hat;
           Jdp = -Jimg * Jdpi;
@@ -9411,7 +10030,7 @@ void VIOManager::updateState(cv::Mat img, int level)
 
           double cur_value =
               w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * width] + w_ref_br * img_ptr[scale * width + scale];
-          double res = state->inv_expo_time * cur_value - inv_ref_expo * P[patch_size_total * level + x * patch_size + y];
+          double res = state->inv_expo_time[0] * cur_value - inv_ref_expo * P[patch_size_total * level + x * patch_size + y];
 
           z(i * patch_size_total + x * patch_size + y) = res;
 
@@ -9451,13 +10070,13 @@ void VIOManager::updateState(cv::Mat img, int level)
       H_T_H.setZero();
       G.setZero();
       H_T_H.block<7, 7>(0, 0) = H_sub_T * H_sub;
-      MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
+      MD(kLegacyFixedStateDim, kLegacyFixedStateDim) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
       auto &&HTz = H_sub_T * z;
-      // K = K_1.block<DIM_STATE,6>(0,0) * H_sub_T;
+      // K = K_1.leftCols(6) * H_sub_T;
       auto vec = (*state_propagat) - (*state);
-      G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
-      MD(DIM_STATE, 1)
-      solution = -K_1.block<DIM_STATE, 7>(0, 0) * HTz + vec - G.block<DIM_STATE, 7>(0, 0) * vec.block<7, 1>(0, 0);
+      G.block<kLegacyFixedStateDim, 7>(0, 0) = K_1.block<kLegacyFixedStateDim, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
+      MD(kLegacyFixedStateDim, 1)
+      solution = -K_1.block<kLegacyFixedStateDim, 7>(0, 0) * HTz + vec - G.block<kLegacyFixedStateDim, 7>(0, 0) * vec.block<7, 1>(0, 0);
 
       (*state) += solution;
       auto &&rot_add = solution.block<3, 1>(0, 0);
@@ -9477,7 +10096,7 @@ void VIOManager::updateState(cv::Mat img, int level)
 
     if (iteration == max_iterations || EKF_end) break;
   }
-  // if (state->inv_expo_time < 0.0)  {ROS_ERROR("reset expo time!!!!!!!!!!\n"); state->inv_expo_time = 0.0;}
+  // if (state->inv_expo_time[0] < 0.0)  {ROS_ERROR("reset expo time!!!!!!!!!!\n"); state->inv_expo_time[0] = 0.0;}
 }
 
 #endif
@@ -9490,10 +10109,37 @@ void VIOManager::updateFrameState(PerCameraData &ctx, const StatesGroup &state_v
     ctx.Pcl = state_value.Pcl[ctx.camera_id];
     updateCameraExtrinsicDerived(ctx);
   }
-  M3D Rwi(state_value.rot_end);
-  V3D Pwi(state_value.pos_end);
+
+  double frame_time = ctx.new_frame != nullptr ? ctx.new_frame->capture_timestamp_ : 0.0;
+  double time_offset_delta = 0.0;
+  int group_id = ctx.time_offset_group;
+  if (ctx.new_frame != nullptr)
+  {
+    group_id = ctx.new_frame->time_offset_group_;
+    double td_state = ctx.new_frame->td_used_;
+    if (group_id >= 0 && group_id < state_value.num_time_offset_groups)
+      td_state = state_value.time_offset[group_id];
+    time_offset_delta = td_state - ctx.new_frame->td_used_;
+    if (!std::isfinite(time_offset_delta)) time_offset_delta = 0.0;
+    ctx.new_frame->time_offset_delta_ = time_offset_delta;
+  }
+
+  const V3D Vwi(state_value.vel_end);
+  V3D gyro_i(current_unbiased_gyr_);
+  if (!gyro_i.allFinite()) gyro_i.setZero();
+  M3D Rwi = state_value.rot_end * Exp(gyro_i, time_offset_delta);
+  V3D Pwi = state_value.pos_end + Vwi * time_offset_delta;
+  ctx.Rwi = Rwi;
+  ctx.Pwi = Pwi;
+  ctx.Vwi = Vwi;
+  ctx.gyro_i = gyro_i;
+  ctx.frame_time = frame_time;
+  ctx.time_offset_group = group_id;
+  ctx.frame_time_offset_delta = time_offset_delta;
   ctx.Rcw = ctx.Rci * Rwi.transpose();
   ctx.Pcw = -ctx.Rci * Rwi.transpose() * Pwi + ctx.Pci;
+  ctx.Jdp_dt = ctx.Rci * Rwi.transpose();
+  ctx.dpc_dvel = -ctx.Rci * Rwi.transpose() * time_offset_delta;
   if (ctx.new_frame != nullptr)
     ctx.new_frame->T_f_w_ = SE3(Eigen::Quaterniond(ctx.Rcw).normalized().toRotationMatrix(), ctx.Pcw);
 }
@@ -9871,9 +10517,7 @@ void VIOManager::processFrameOpticalFlow(cv::Mat &img, double img_time)
     cur_img = img.clone();
   }
 
-  ctx.new_frame.reset(new Frame(ctx.cam, cur_img));
-  ctx.new_frame->camera_id_ = 0;
-  ctx.new_frame->timestamp_ = img_time;
+  ctx.new_frame.reset(new Frame(ctx.cam, cur_img, -1, 0, img_time, img_time, img_time));
   updateFrameState(ctx, *state);
 
   const int prev = static_cast<int>(optical_flow_prev_pts.size());
@@ -10065,7 +10709,24 @@ void VIOManager::processMultiCameraFrameFake(const MeasureGroup &meas)
     ctx.img_cp = image.clone();
     if (image.channels() == 3) cv::cvtColor(image, image, CV_BGR2GRAY);
 
-    ctx.new_frame.reset(new Frame(ctx.cam, image, mf.frame_id, camera_id, mf.timestamp));
+    const double raw_timestamp = camera_id < static_cast<int>(mf.raw_timestamps.size())
+                                     ? mf.raw_timestamps[camera_id]
+                                     : mf.timestamp;
+    const double corrected_timestamp = camera_id < static_cast<int>(mf.corrected_timestamps.size())
+                                           ? mf.corrected_timestamps[camera_id]
+                                           : mf.timestamp;
+    const double capture_timestamp = camera_id < static_cast<int>(mf.capture_timestamps.size())
+                                         ? mf.capture_timestamps[camera_id]
+                                         : mf.timestamp;
+    const double td_used = camera_id < static_cast<int>(mf.td_used.size()) ? mf.td_used[camera_id] : 0.0;
+    const int time_group = camera_id < static_cast<int>(mf.time_offset_group.size())
+                               ? mf.time_offset_group[camera_id]
+                               : (camera_id < static_cast<int>(camera_time_offset_groups.size())
+                                      ? camera_time_offset_groups[camera_id]
+                                      : 0);
+    ctx.new_frame.reset(new Frame(ctx.cam, image, mf.frame_id, camera_id, capture_timestamp,
+                                  raw_timestamp, corrected_timestamp, td_used,
+                                  capture_timestamp - corrected_timestamp, time_group));
     updateFrameState(ctx, *state);
   }
 }
@@ -10093,7 +10754,24 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     ctx.img_rgb = image.clone();
     ctx.img_cp = image.clone();
     if (image.channels() == 3) cv::cvtColor(image, image, CV_BGR2GRAY);
-    ctx.new_frame.reset(new Frame(ctx.cam, image, mf.frame_id, camera_id, mf.timestamp));
+    const double raw_timestamp = camera_id < static_cast<int>(mf.raw_timestamps.size())
+                                     ? mf.raw_timestamps[camera_id]
+                                     : mf.timestamp;
+    const double corrected_timestamp = camera_id < static_cast<int>(mf.corrected_timestamps.size())
+                                           ? mf.corrected_timestamps[camera_id]
+                                           : mf.timestamp;
+    const double capture_timestamp = camera_id < static_cast<int>(mf.capture_timestamps.size())
+                                         ? mf.capture_timestamps[camera_id]
+                                         : mf.timestamp;
+    const double td_used = camera_id < static_cast<int>(mf.td_used.size()) ? mf.td_used[camera_id] : 0.0;
+    const int time_group = camera_id < static_cast<int>(mf.time_offset_group.size())
+                               ? mf.time_offset_group[camera_id]
+                               : (camera_id < static_cast<int>(camera_time_offset_groups.size())
+                                      ? camera_time_offset_groups[camera_id]
+                                      : 0);
+    ctx.new_frame.reset(new Frame(ctx.cam, image, mf.frame_id, camera_id, capture_timestamp,
+                                  raw_timestamp, corrected_timestamp, td_used,
+                                  capture_timestamp - corrected_timestamp, time_group));
     updateFrameState(ctx, *state);
     resetGrid(ctx);
     // printf("[ VIO Debug ] frame setup camera_id=%d frame=%d image=%dx%d type=%d ns=%s\n",
@@ -10146,6 +10824,7 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
       for (PendingNewPointObservation &pending : ctx.pending_new_points)
       {
         pending.T_f_w = ctx.new_frame->T_f_w_;
+        fillPendingObservationTiming(pending, ctx);
         if (pending.virtual_patch_valid) pending.T_v_w = composeVirtualPose(pending.R_v_from_c, pending.T_f_w);
       }
     }

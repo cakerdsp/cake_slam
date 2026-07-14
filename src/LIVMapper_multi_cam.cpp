@@ -121,10 +121,23 @@ LIVMapper::LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name, const
   p_imu.reset(new ImuProcess());
 
   readParameters(this->node);
-  _state.configureCameras(num_cameras, inv_expo_time_init);
-  state_propagat.configureCameras(num_cameras, inv_expo_time_init);
-  imu_propagate.configureCameras(num_cameras, inv_expo_time_init);
-  latest_ekf_state.configureCameras(num_cameras, inv_expo_time_init);
+  _state.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset);
+  state_propagat.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset);
+  imu_propagate.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset);
+  latest_ekf_state.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset);
+  auto apply_time_offset_init = [this](StatesGroup &state_value) {
+    for (int group_id = 0; group_id < state_value.num_time_offset_groups; ++group_id)
+    {
+      const double td_init = group_id < static_cast<int>(img_time_offset_groups.size())
+                                 ? img_time_offset_groups[group_id]
+                                 : img_time_offset;
+      state_value.setTimeOffset(group_id, td_init);
+    }
+  };
+  apply_time_offset_init(_state);
+  apply_time_offset_init(state_propagat);
+  apply_time_offset_init(imu_propagate);
+  apply_time_offset_init(latest_ekf_state);
   VoxelMapConfig voxel_config;
   loadVoxelConfig(this->node, voxel_config);
 
@@ -256,6 +269,16 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<double>("vio.online_extrinsic_prior_trans_std_m", 0.02);
   try_declare.template operator()<double>("vio.online_extrinsic_max_rot_update_deg", 0.02);
   try_declare.template operator()<double>("vio.online_extrinsic_max_trans_update_m", 0.0001);
+  try_declare.template operator()<bool>("vio.online_time_offset_en", false);
+  try_declare.template operator()<std::vector<int64_t>>("vio.online_time_offset_group_mask", std::vector<int64_t>{});
+  try_declare.template operator()<int>("vio.online_time_offset_start_frame", 100);
+  try_declare.template operator()<int>("vio.online_time_offset_min_tracks", 30);
+  try_declare.template operator()<double>("vio.online_time_offset_min_pixel_velocity", 15.0);
+  try_declare.template operator()<double>("vio.online_time_offset_prior_std_ms", 5.0);
+  try_declare.template operator()<double>("vio.online_time_offset_process_noise_ms_sqrt_s", 0.0);
+  try_declare.template operator()<double>("vio.online_time_offset_max_update_ms", 0.2);
+  try_declare.template operator()<double>("vio.online_time_offset_max_abs_ms", 50.0);
+  try_declare.template operator()<int>("vio.online_time_offset_min_update_interval", 5);
   try_declare.template operator()<int>("vio.outlier_threshold", 100);
   try_declare.template operator()<int>("vio.frontend_mode", 0);
   try_declare.template operator()<int>("vio.opticalflow.max_cnt", 250);
@@ -269,6 +292,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<std::string>("vio.opticalflow.triangulated_points_topic", "/fast_livo/triangulated_points");
   try_declare.template operator()<double>("time_offset.exposure_time_init", 0.0);
   try_declare.template operator()<double>("time_offset.img_time_offset", 0.0);
+  try_declare.template operator()<std::vector<double>>("time_offset.img_time_offset_groups", std::vector<double>{});
   try_declare.template operator()<bool>("uav.imu_rate_odom", false);
   try_declare.template operator()<bool>("uav.gravity_align_en", false);
 
@@ -339,6 +363,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
     const std::string rotation_key = camera_cfg_ns + ".Rcl";
     const std::string translation_key = camera_cfg_ns + ".Pcl";
     const std::string online_extrinsic_key = camera_cfg_ns + ".online_extrinsic_en";
+    const std::string time_offset_group_key = camera_cfg_ns + ".time_offset_group";
+    const std::string online_time_offset_key = camera_cfg_ns + ".online_time_offset_en";
     try_declare.template operator()<std::string>(topic_key, "");
     try_declare.template operator()<std::string>(namespace_key, "");
     try_declare.template operator()<bool>(image_undistort_key, false);
@@ -346,6 +372,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
     try_declare.template operator()<vector<double>>(rotation_key, vector<double>{});
     try_declare.template operator()<vector<double>>(translation_key, vector<double>{});
     try_declare.template operator()<bool>(online_extrinsic_key, true);
+    try_declare.template operator()<int>(time_offset_group_key, camera_id);
+    try_declare.template operator()<bool>(online_time_offset_key, true);
     node->get_parameter(topic_key, camera_configs[camera_id].img_topic);
     node->get_parameter(namespace_key, camera_configs[camera_id].camera_namespace);
     node->get_parameter(image_undistort_key, camera_configs[camera_id].image_undistort_en);
@@ -353,6 +381,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
     node->get_parameter(rotation_key, camera_configs[camera_id].Rcl);
     node->get_parameter(translation_key, camera_configs[camera_id].Pcl);
     node->get_parameter(online_extrinsic_key, camera_configs[camera_id].online_extrinsic_en);
+    node->get_parameter(time_offset_group_key, camera_configs[camera_id].time_offset_group);
+    node->get_parameter(online_time_offset_key, camera_configs[camera_id].online_time_offset_en);
     if (camera_configs[camera_id].img_topic.empty())
       throw std::runtime_error("missing required parameter " + topic_key);
     if (camera_configs[camera_id].camera_namespace.empty())
@@ -363,6 +393,9 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
       throw std::runtime_error(rotation_key + " must contain exactly 9 values");
     if (camera_configs[camera_id].Pcl.size() != 3)
       throw std::runtime_error(translation_key + " must contain exactly 3 values");
+    if (camera_configs[camera_id].time_offset_group < 0)
+      throw std::runtime_error(time_offset_group_key + " must be non-negative");
+    num_time_offset_groups = std::max(num_time_offset_groups, camera_configs[camera_id].time_offset_group + 1);
 
     const std::string camera_param_ns = camera_configs[camera_id].camera_namespace;
     try_declare.template operator()<std::string>(camera_param_ns + ".model", "Pinhole");
@@ -465,6 +498,16 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.online_extrinsic_prior_trans_std_m", online_extrinsic_prior_trans_std_m);
   this->node->get_parameter("vio.online_extrinsic_max_rot_update_deg", online_extrinsic_max_rot_update_deg);
   this->node->get_parameter("vio.online_extrinsic_max_trans_update_m", online_extrinsic_max_trans_update_m);
+  this->node->get_parameter("vio.online_time_offset_en", online_time_offset_en);
+  this->node->get_parameter("vio.online_time_offset_group_mask", online_time_offset_group_mask);
+  this->node->get_parameter("vio.online_time_offset_start_frame", online_time_offset_start_frame);
+  this->node->get_parameter("vio.online_time_offset_min_tracks", online_time_offset_min_tracks);
+  this->node->get_parameter("vio.online_time_offset_min_pixel_velocity", online_time_offset_min_pixel_velocity);
+  this->node->get_parameter("vio.online_time_offset_prior_std_ms", online_time_offset_prior_std_ms);
+  this->node->get_parameter("vio.online_time_offset_process_noise_ms_sqrt_s", online_time_offset_process_noise_ms_sqrt_s);
+  this->node->get_parameter("vio.online_time_offset_max_update_ms", online_time_offset_max_update_ms);
+  this->node->get_parameter("vio.online_time_offset_max_abs_ms", online_time_offset_max_abs_ms);
+  this->node->get_parameter("vio.online_time_offset_min_update_interval", online_time_offset_min_update_interval);
   this->node->get_parameter("vio.outlier_threshold", outlier_threshold);
   this->node->get_parameter("vio.frontend_mode", frontend_mode);
   this->node->get_parameter("vio.opticalflow.max_cnt", optical_flow_max_cnt);
@@ -478,6 +521,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.opticalflow.triangulated_points_topic", optical_flow_triangulated_points_topic);
   this->node->get_parameter("time_offset.exposure_time_init", exposure_time_init);
   this->node->get_parameter("time_offset.img_time_offset", img_time_offset);
+  this->node->get_parameter("time_offset.img_time_offset_groups", img_time_offset_groups);
   this->node->get_parameter("uav.imu_rate_odom", imu_prop_enable);
   this->node->get_parameter("uav.gravity_align_en", gravity_align_en);
 
@@ -553,6 +597,31 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   if (online_extrinsic_max_rot_update_deg < 0.0 || online_extrinsic_max_trans_update_m < 0.0)
     throw std::runtime_error("vio.online_extrinsic max update limits must be non-negative");
 
+  if (!online_time_offset_group_mask.empty() && static_cast<int>(online_time_offset_group_mask.size()) != num_time_offset_groups)
+    throw std::runtime_error("vio.online_time_offset_group_mask must be empty or have one entry per time-offset group");
+  if (!img_time_offset_groups.empty() && static_cast<int>(img_time_offset_groups.size()) != num_time_offset_groups)
+    throw std::runtime_error("time_offset.img_time_offset_groups must be empty or have one entry per time-offset group");
+  if (img_time_offset_groups.empty())
+    img_time_offset_groups.assign(num_time_offset_groups, img_time_offset);
+  if (online_time_offset_group_mask.empty())
+  {
+    online_time_offset_group_mask.assign(num_time_offset_groups, 0);
+    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+    {
+      const int group_id = camera_configs[camera_id].time_offset_group;
+      if (group_id >= 0 && group_id < num_time_offset_groups && camera_configs[camera_id].online_time_offset_en)
+        online_time_offset_group_mask[group_id] = 1;
+    }
+  }
+  if (online_time_offset_start_frame < 0) throw std::runtime_error("vio.online_time_offset_start_frame must be non-negative");
+  if (online_time_offset_min_tracks < 0) throw std::runtime_error("vio.online_time_offset_min_tracks must be non-negative");
+  if (!std::isfinite(online_time_offset_min_pixel_velocity) || online_time_offset_min_pixel_velocity < 0.0)
+    throw std::runtime_error("vio.online_time_offset_min_pixel_velocity must be finite and non-negative");
+  if (online_time_offset_prior_std_ms <= 0.0 || online_time_offset_max_update_ms < 0.0 || online_time_offset_max_abs_ms < 0.0)
+    throw std::runtime_error("vio.online_time_offset std/max parameters are invalid");
+  if (online_time_offset_min_update_interval < 0)
+    throw std::runtime_error("vio.online_time_offset_min_update_interval must be non-negative");
+
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
 
@@ -572,9 +641,20 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   voxelmap_manager->extR_ << MAT_FROM_ARRAY(extrinR);
 
   vio_manager->configureCameras(num_cameras);
+  std::vector<int> camera_time_offset_groups(num_cameras, 0);
+  const double time_offset_prior_std_s = online_time_offset_prior_std_ms * 1.0e-3;
+  const double time_offset_prior_var = time_offset_prior_std_s * time_offset_prior_std_s;
+  for (int group_id = 0; group_id < num_time_offset_groups; ++group_id)
+  {
+    _state.setTimeOffsetCovariance(group_id, time_offset_prior_var);
+    state_propagat.setTimeOffsetCovariance(group_id, time_offset_prior_var);
+    imu_propagate.setTimeOffsetCovariance(group_id, time_offset_prior_var);
+    latest_ekf_state.setTimeOffsetCovariance(group_id, time_offset_prior_var);
+  }
   for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
   {
     CameraInputConfig &config = camera_configs[camera_id];
+    camera_time_offset_groups[camera_id] = config.time_offset_group;
     PerCameraData &ctx = vio_manager->cameras_[camera_id];
     if (!vk::camera_loader::loadFromRosNs(this->node, config.camera_namespace, ctx.cam))
       throw std::runtime_error("failed to load camera model for camera_id=" + std::to_string(camera_id) +
@@ -612,6 +692,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
     imu_propagate.setCameraExtrinsicCovariance(camera_id, rot_var, trans_var);
     latest_ekf_state.setCameraExtrinsicCovariance(camera_id, rot_var, trans_var);
   }
+  vio_manager->setCameraTimeOffsetGroups(camera_time_offset_groups);
   vio_manager->grid_size = grid_size;
   vio_manager->patch_size = patch_size;
   vio_manager->outlier_threshold = outlier_threshold;
@@ -671,6 +752,15 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->online_extrinsic_prior_trans_std_m = online_extrinsic_prior_trans_std_m;
   vio_manager->online_extrinsic_max_rot_update_deg = online_extrinsic_max_rot_update_deg;
   vio_manager->online_extrinsic_max_trans_update_m = online_extrinsic_max_trans_update_m;
+  vio_manager->online_time_offset_en = online_time_offset_en;
+  vio_manager->online_time_offset_group_mask = online_time_offset_group_mask;
+  vio_manager->online_time_offset_start_frame = online_time_offset_start_frame;
+  vio_manager->online_time_offset_min_tracks = online_time_offset_min_tracks;
+  vio_manager->online_time_offset_min_pixel_velocity = online_time_offset_min_pixel_velocity;
+  vio_manager->online_time_offset_prior_std_ms = online_time_offset_prior_std_ms;
+  vio_manager->online_time_offset_max_update_ms = online_time_offset_max_update_ms;
+  vio_manager->online_time_offset_max_abs_ms = online_time_offset_max_abs_ms;
+  vio_manager->online_time_offset_min_update_interval = online_time_offset_min_update_interval;
   vio_manager->virtual_focal_length = virtual_focal_length;
   vio_manager->virtual_patch_margin = virtual_patch_margin;
   vio_manager->virtual_max_search_level = virtual_max_search_level;
@@ -718,6 +808,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   p_imu->set_gyr_cov_scale(V3D(gyr_cov, gyr_cov, gyr_cov));
   p_imu->set_acc_cov_scale(V3D(acc_cov, acc_cov, acc_cov));
   p_imu->set_inv_expo_cov(inv_expo_cov);
+  p_imu->set_time_offset_cov(std::pow(online_time_offset_process_noise_ms_sqrt_s * 1.0e-3, 2));
   p_imu->set_gyr_bias_cov(V3D(0.0001, 0.0001, 0.0001));
   p_imu->set_acc_bias_cov(V3D(0.0001, 0.0001, 0.0001));
   p_imu->set_imu_init_frame_num(imu_int_frame);
@@ -849,6 +940,7 @@ void LIVMapper::processImu()
   // double t0 = omp_get_wtime();
 
   p_imu->Process2(LidarMeasures, _state, feats_undistort);
+  if (vio_manager) vio_manager->setCurrentUnbiasedGyr(p_imu->unbiased_gyr);
 
   if (gravity_align_en) gravityAlignment();
 
@@ -1487,6 +1579,12 @@ void LIVMapper::flushCompletedImageGroupsLocked()
       frame.timestamp = oldest->second.timestamp;
       frame.frame_id = next_vio_frame_id++;
       frame.images = std::move(oldest->second.images);
+      frame.image_stamp_ns = std::move(oldest->second.image_stamp_ns);
+      frame.raw_timestamps = std::move(oldest->second.raw_timestamps);
+      frame.corrected_timestamps = std::move(oldest->second.corrected_timestamps);
+      frame.capture_timestamps = std::move(oldest->second.capture_timestamps);
+      frame.td_used = std::move(oldest->second.td_used);
+      frame.time_offset_group = std::move(oldest->second.time_offset_group);
       multi_cam_frame_buffer.push_back(std::move(frame));
       pending_images.erase(oldest);
       continue;
@@ -1512,7 +1610,13 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
   if (!img_en) return;
   if (camera_id < 0 || camera_id >= num_cameras || img_cur.empty()) return;
   const uint64_t stamp_ns = static_cast<uint64_t>(stamp.sec) * 1000000000ULL + static_cast<uint64_t>(stamp.nanosec);
-  const double image_time = static_cast<double>(stamp_ns) * 1.0e-9 + img_time_offset;
+  const double raw_time = static_cast<double>(stamp_ns) * 1.0e-9;
+  const int time_group = camera_configs[camera_id].time_offset_group;
+  const double td_used = (time_group >= 0 && time_group < _state.num_time_offset_groups)
+                             ? _state.time_offset[time_group]
+                             : img_time_offset;
+  const double image_time = raw_time + td_used;
+  const double capture_time = image_time + exposure_time_init;
   if (last_timestamp_lidar < 0) return;
   if (std::fabs(image_time - last_timestamp_img_by_camera[camera_id]) < 1.0e-9) return;
   if (image_time < last_timestamp_img_by_camera[camera_id])
@@ -1541,9 +1645,6 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
   {
     std::lock_guard<std::mutex> lock(mtx_buffer);
 
-    const auto stampDifferenceNs = [](uint64_t lhs, uint64_t rhs) {
-      return lhs >= rhs ? lhs - rhs : rhs - lhs;
-    };
     const auto initializeGroup = [this](PendingImageGroup &group, uint64_t group_stamp_ns,
                                         double group_timestamp) {
       if (!group.arrived.empty()) return;
@@ -1552,6 +1653,11 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
       group.images.resize(num_cameras);
       group.arrived.assign(num_cameras, 0);
       group.image_stamp_ns.assign(num_cameras, 0);
+      group.raw_timestamps.assign(num_cameras, 0.0);
+      group.corrected_timestamps.assign(num_cameras, 0.0);
+      group.capture_timestamps.assign(num_cameras, 0.0);
+      group.td_used.assign(num_cameras, 0.0);
+      group.time_offset_group.assign(num_cameras, 0);
     };
     const auto groupHasImages = [](const PendingImageGroup &group) {
       for (uint8_t arrived : group.arrived)
@@ -1570,10 +1676,15 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
       if (anchor.arrived[0]) return;
 
       anchor.stamp_ns = stamp_ns;
-      anchor.timestamp = image_time;
+      anchor.timestamp = std::max(anchor.timestamp, capture_time);
       anchor.images[0] = image_for_sync.clone();
       anchor.arrived[0] = 1;
       anchor.image_stamp_ns[0] = stamp_ns;
+      anchor.raw_timestamps[0] = raw_time;
+      anchor.corrected_timestamps[0] = image_time;
+      anchor.capture_timestamps[0] = capture_time;
+      anchor.td_used[0] = td_used;
+      anchor.time_offset_group[0] = time_group;
 
       for (int matched_camera_id = 1; matched_camera_id < num_cameras; ++matched_camera_id)
       {
@@ -1587,12 +1698,12 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
               !it->second.arrived[matched_camera_id])
             continue;
 
-          const uint64_t candidate_stamp_ns = it->second.image_stamp_ns[matched_camera_id];
-          const uint64_t delta_ns = stampDifferenceNs(stamp_ns, candidate_stamp_ns);
+          const double candidate_time = it->second.corrected_timestamps[matched_camera_id];
+          const uint64_t delta_ns = static_cast<uint64_t>(std::llround(std::fabs(image_time - candidate_time) * 1.0e9));
           if (delta_ns <= sync_tolerance_ns &&
               (delta_ns < best_delta_ns ||
                (delta_ns == best_delta_ns &&
-                (best_it == pending_images.end() || candidate_stamp_ns < best_it->second.image_stamp_ns[matched_camera_id]))))
+                (best_it == pending_images.end() || candidate_time < best_it->second.corrected_timestamps[matched_camera_id]))))
           {
             best_it = it;
             best_delta_ns = delta_ns;
@@ -1603,6 +1714,12 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
         anchor.images[matched_camera_id] = std::move(best_it->second.images[matched_camera_id]);
         anchor.arrived[matched_camera_id] = 1;
         anchor.image_stamp_ns[matched_camera_id] = best_it->second.image_stamp_ns[matched_camera_id];
+        anchor.raw_timestamps[matched_camera_id] = best_it->second.raw_timestamps[matched_camera_id];
+        anchor.corrected_timestamps[matched_camera_id] = best_it->second.corrected_timestamps[matched_camera_id];
+        anchor.capture_timestamps[matched_camera_id] = best_it->second.capture_timestamps[matched_camera_id];
+        anchor.td_used[matched_camera_id] = best_it->second.td_used[matched_camera_id];
+        anchor.time_offset_group[matched_camera_id] = best_it->second.time_offset_group[matched_camera_id];
+        anchor.timestamp = std::max(anchor.timestamp, anchor.capture_timestamps[matched_camera_id]);
         best_it->second.arrived[matched_camera_id] = 0;
         best_it->second.image_stamp_ns[matched_camera_id] = 0;
       }
@@ -1620,6 +1737,7 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
       const auto findClosestGroup = [&](bool require_camera0) {
         auto best_it = pending_images.end();
         uint64_t best_delta_ns = std::numeric_limits<uint64_t>::max();
+        double best_reference_time = 0.0;
         for (auto it = pending_images.begin(); it != pending_images.end(); ++it)
         {
           PendingImageGroup &candidate = it->second;
@@ -1628,16 +1746,37 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
               candidate.arrived[camera_id])
             continue;
 
-          const uint64_t reference_stamp_ns =
-              require_camera0 ? candidate.image_stamp_ns[0] : candidate.stamp_ns;
-          const uint64_t delta_ns = stampDifferenceNs(stamp_ns, reference_stamp_ns);
+          double reference_time = 0.0;
+          uint64_t delta_ns = std::numeric_limits<uint64_t>::max();
+          if (require_camera0)
+          {
+            reference_time = candidate.corrected_timestamps[0];
+            delta_ns = static_cast<uint64_t>(std::llround(std::fabs(image_time - reference_time) * 1.0e9));
+          }
+          else
+          {
+            for (int ref_camera_id = 1; ref_camera_id < num_cameras; ++ref_camera_id)
+            {
+              if (!candidate.arrived[ref_camera_id]) continue;
+              const double ref_time = candidate.corrected_timestamps[ref_camera_id];
+              const uint64_t ref_delta_ns =
+                  static_cast<uint64_t>(std::llround(std::fabs(image_time - ref_time) * 1.0e9));
+              if (ref_delta_ns < delta_ns ||
+                  (ref_delta_ns == delta_ns && ref_time < reference_time))
+              {
+                delta_ns = ref_delta_ns;
+                reference_time = ref_time;
+              }
+            }
+          }
           if (delta_ns <= sync_tolerance_ns &&
               (delta_ns < best_delta_ns ||
                (delta_ns == best_delta_ns &&
-                (best_it == pending_images.end() || reference_stamp_ns < best_it->second.stamp_ns))))
+                (best_it == pending_images.end() || reference_time < best_reference_time))))
           {
             best_it = it;
             best_delta_ns = delta_ns;
+            best_reference_time = reference_time;
           }
         }
         return best_it;
@@ -1658,6 +1797,12 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
       group.images[camera_id] = image_for_sync.clone();
       group.arrived[camera_id] = 1;
       group.image_stamp_ns[camera_id] = stamp_ns;
+      group.raw_timestamps[camera_id] = raw_time;
+      group.corrected_timestamps[camera_id] = image_time;
+      group.capture_timestamps[camera_id] = capture_time;
+      group.td_used[camera_id] = td_used;
+      group.time_offset_group[camera_id] = time_group;
+      group.timestamp = std::max(group.timestamp, capture_time);
     }
 
     last_timestamp_img_by_camera[camera_id] = image_time;
@@ -1773,7 +1918,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
     case VIO:
     {
       // printf("!!! meas.lio_vio_flg: %d \n", meas.lio_vio_flg);
-      double img_capture_time = multi_cam_frame_buffer.front().timestamp + exposure_time_init;
+      double img_capture_time = multi_cam_frame_buffer.front().timestamp;
       /*** has img topic, but img topic timestamp larger than lidar end time,
        * process lidar topic. After LIO update, the meas.lidar_frame_end_time
        * will be refresh. ***/
@@ -1866,7 +2011,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
 
     case LIO:
     {
-      double img_capture_time = multi_cam_frame_buffer.front().timestamp + exposure_time_init;
+      double img_capture_time = multi_cam_frame_buffer.front().timestamp;
       meas.lio_vio_flg = VIO;
       // printf("[ Data Cut ] VIO \n");
       meas.measures.clear();

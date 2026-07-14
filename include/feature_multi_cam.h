@@ -40,6 +40,12 @@ struct Feature
   int id_;
   int camera_id_;
   double timestamp_;
+  double raw_timestamp_;
+  double corrected_timestamp_;
+  double capture_timestamp_;
+  double td_used_;
+  double exposure_time_offset_;
+  int time_offset_group_;
   FeatureType type_;
   cv::Mat img_;  //!< Non-virtual mode: raw reference grayscale image.
                  //!< Virtual fisheye mode: immutable local virtual support image
@@ -51,6 +57,9 @@ struct Feature
   VisualPoint *point_;
   Vector2d grad_;
   SE3<double> T_f_w_;            //!< Raw fisheye pose: {}^C T_W.
+  M3D Rwi_ref_;                  //!< IMU pose at reference creation, {}^W R_I.
+  V3D Pwi_ref_;                  //!< IMU position at reference creation, world frame.
+  uint64_t extrinsic_version_;
   float *patch_; //!< Immutable core patch extracted once when this Feature is created.
                  //!< Length is always patch_size_total.
   float score_;
@@ -93,8 +102,16 @@ struct Feature
   bool pending_delete_;
   
   Feature(VisualPoint *_point, float *_patch, const Vector2d &_px, const Vector3d &_f, const SE3<double> &_T_f_w, int _level,
-          int _camera_id = 0, double _timestamp = 0.0)
-      : id_(-1), camera_id_(_camera_id), timestamp_(_timestamp), type_(CORNER), px_(_px), f_(_f), level_(_level), point_(_point), T_f_w_(_T_f_w), patch_(_patch), score_(0), mean_(0),
+          int _camera_id = 0, double _timestamp = 0.0, double _raw_timestamp = 0.0,
+          double _corrected_timestamp = 0.0, double _td_used = 0.0,
+          double _exposure_time_offset = 0.0, int _time_offset_group = 0,
+          const M3D &_Rwi_ref = M3D::Identity(), const V3D &_Pwi_ref = V3D::Zero(),
+          uint64_t _extrinsic_version = 0)
+      : id_(-1), camera_id_(_camera_id), timestamp_(_timestamp), raw_timestamp_(_raw_timestamp),
+        corrected_timestamp_(_corrected_timestamp), capture_timestamp_(_timestamp), td_used_(_td_used),
+        exposure_time_offset_(_exposure_time_offset), time_offset_group_(_time_offset_group),
+        type_(CORNER), px_(_px), f_(_f), level_(_level), point_(_point), T_f_w_(_T_f_w),
+        Rwi_ref_(_Rwi_ref), Pwi_ref_(_Pwi_ref), extrinsic_version_(_extrinsic_version), patch_(_patch), score_(0), mean_(0),
         inv_expo_time_(0), T_v_w_(_T_f_w), R_v_from_c_(Matrix3d::Identity()), R_c_from_v_(Matrix3d::Identity()),
         virtual_patch_valid_(false), virtual_source_origin_(0, 0), virtual_support_materialized_(false),
         virtual_support_materialization_failed_(false), ref_state_(RefState::VALIDATED), ref_id_(0),
