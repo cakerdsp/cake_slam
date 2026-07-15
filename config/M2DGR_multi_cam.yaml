@@ -132,7 +132,7 @@
       # Optional per-time-offset-group initial values in seconds.
       # Empty/missing means every group uses img_time_offset.
       # Example for three independent groups: [0.0, 0.0, 0.0]
-      img_time_offset_groups: []
+      # img_time_offset_groups: []
       exposure_time_init: 0.0
 
     preprocess:
@@ -234,7 +234,7 @@
       online_extrinsic_prior_factor_en: false
       # Per-camera cameras.camera{i}.online_extrinsic_en is preferred.
       # Optional legacy override: provide common.num_cameras entries, e.g. [1, 0].
-      online_extrinsic_camera_mask: []
+      # online_extrinsic_camera_mask: []
       online_extrinsic_start_frame: 100
       online_extrinsic_min_tracks: 20
       online_extrinsic_prior_rot_std_deg: 0.5
@@ -247,7 +247,7 @@
       # Cameras with the same time_offset_group share one td state. By default
       # each camera has its own group; set equal group ids for hardware-triggered cameras.
       # Optional override: provide one entry per time-offset group.
-      online_time_offset_group_mask: []
+      # online_time_offset_group_mask: []
       online_time_offset_start_frame: 100
       online_time_offset_min_tracks: 30
       online_time_offset_min_pixel_velocity: 15.0

@@ -94,7 +94,7 @@
     time_offset:
       imu_time_offset: 0.0
       img_time_offset: 0.0
-      img_time_offset_groups: []
+      # img_time_offset_groups: []
       exposure_time_init: 0.0
 
     preprocess:
@@ -120,9 +120,9 @@
       usage_stats_window: 100
       img_point_cov: 1000
       grid_size: 5
-      grid_n_height: 17
-      patch_size: 16
-      patch_pyrimid_level: 1
+      grid_n_height: 20
+      patch_size: 8
+      patch_pyrimid_level: 2
 
       virtual_fisheye_patch_en: false
       raw_camera_model_jacobian_en: true
@@ -159,9 +159,9 @@
       visual_point_information_retain: 0.90
       visual_point_suspect_reject_count: 8
       visual_point_stale_frames: 200
-      virtual_focal_length: 300.0
-      virtual_patch_margin: 8
-      virtual_max_search_level: 1
+      virtual_focal_length: 200.0
+      virtual_patch_margin: 4
+      virtual_max_search_level: 0
       virtual_patch_resampling_mode: "pull_exact"
       virtual_interp_mode: "bilinear"
       virtual_raw_window_half_size: 96
@@ -191,7 +191,7 @@
       online_extrinsic_rot_en: true
       online_extrinsic_trans_en: true
       online_extrinsic_prior_factor_en: false
-      online_extrinsic_camera_mask: []
+      # online_extrinsic_camera_mask: []
       online_extrinsic_start_frame: 100
       online_extrinsic_min_tracks: 20
       online_extrinsic_prior_rot_std_deg: 0.5
@@ -199,7 +199,7 @@
       online_extrinsic_max_rot_update_deg: 0.02
       online_extrinsic_max_trans_update_m: 0.0001
       online_time_offset_en: false
-      online_time_offset_group_mask: []
+      # online_time_offset_group_mask: []
       online_time_offset_start_frame: 100
       online_time_offset_min_tracks: 30
       online_time_offset_min_pixel_velocity: 15.0
