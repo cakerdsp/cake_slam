@@ -8091,6 +8091,17 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
     generateVisualMapPointsVirtual(ctx, img, pg, plane_map);
     return;
   }
+  const bool raw_generate_trace_en = visual_map_manage_en && visual_map_manage_log_en && frame_count < 5;
+  auto trace_raw_generate_stage = [&](const char *stage, int index) {
+    if (!raw_generate_trace_en) return;
+    printf("[ VIO Generate Trace ] frame=%d camera_id=%d stage=%s index=%d pg=%zu raycast=%zu pending=%zu img=%dx%d type=%d grid=%dx%d length=%d\n",
+           ctx.new_frame != nullptr ? ctx.new_frame->id_ : -1, ctx.camera_id, stage, index,
+           pg.size(), ctx.visual_submap != nullptr ? ctx.visual_submap->add_from_voxel_map.size() : 0,
+           ctx.pending_new_points.size(), img.cols, img.rows, img.type(),
+           ctx.grid_n_width, ctx.grid_n_height, ctx.length);
+    fflush(stdout);
+  };
+  trace_raw_generate_stage("generate_begin", -1);
   if (pg.size() <= 10) return;
 
   std::array<int, VISUAL_GEOM_REJECT_COUNT> geom_reject_counts = {};
@@ -8113,15 +8124,21 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
   // double t0 = omp_get_wtime();
   for (int i = 0; i < pg.size(); i++)
   {
+    if ((i & 255) == 0) trace_raw_generate_stage("pg_scan", i);
     if (pg[i].normal == V3D(0, 0, 0)) continue;
     if (!pass_candidate_geometry(pg[i])) continue;
 
     V3D pt = pg[i].point_w;
     V2D pc(ctx.new_frame->w2c(pt));
+    if (!pc.array().isFinite().all()) trace_raw_generate_stage("pg_projection_nonfinite", i);
 
     if (ctx.cam->isInFrame(pc.cast<int>(), border))
     {
-      int index = static_cast<int>(pc[1] / ctx.grid_size) * ctx.grid_n_width + static_cast<int>(pc[0] / ctx.grid_size);
+      const int grid_col = static_cast<int>(pc[0] / ctx.grid_size);
+      const int grid_row = static_cast<int>(pc[1] / ctx.grid_size);
+      int index = grid_row * ctx.grid_n_width + grid_col;
+      if (grid_col < 0 || grid_col >= ctx.grid_n_width || grid_row < 0 || grid_row >= ctx.grid_n_height)
+        trace_raw_generate_stage("pg_grid_oob", i);
 
       if (ctx.grid_num[index] != TYPE_MAP)
       {
@@ -8138,17 +8155,24 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
       }
     }
   }
+  trace_raw_generate_stage("pg_scan_end", static_cast<int>(pg.size()));
 
   for (int j = 0; j < ctx.visual_submap->add_from_voxel_map.size(); j++)
   {
+    if ((j & 255) == 0) trace_raw_generate_stage("raycast_scan", j);
     const pointWithVar &candidate = ctx.visual_submap->add_from_voxel_map[j];
     if (!pass_candidate_geometry(candidate)) continue;
     V3D pt = candidate.point_w;
     V2D pc(ctx.new_frame->w2c(pt));
+    if (!pc.array().isFinite().all()) trace_raw_generate_stage("raycast_projection_nonfinite", j);
 
     if (ctx.cam->isInFrame(pc.cast<int>(), border))
     {
-      int index = static_cast<int>(pc[1] / ctx.grid_size) * ctx.grid_n_width + static_cast<int>(pc[0] / ctx.grid_size);
+      const int grid_col = static_cast<int>(pc[0] / ctx.grid_size);
+      const int grid_row = static_cast<int>(pc[1] / ctx.grid_size);
+      int index = grid_row * ctx.grid_n_width + grid_col;
+      if (grid_col < 0 || grid_col >= ctx.grid_n_width || grid_row < 0 || grid_row >= ctx.grid_n_height)
+        trace_raw_generate_stage("raycast_grid_oob", j);
 
       if (ctx.grid_num[index] != TYPE_MAP)
       {
@@ -8164,10 +8188,12 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
       }
     }
   }
+  trace_raw_generate_stage("raycast_scan_end", static_cast<int>(ctx.visual_submap->add_from_voxel_map.size()));
 
   // double t_b1 = omp_get_wtime() - t0;
   // t0 = omp_get_wtime();
 
+  trace_raw_generate_stage("pending_scan_begin", -1);
   for (int i = 0; i < ctx.length; i++)
   {
     if (ctx.grid_num[i] == TYPE_POINTCLOUD)
@@ -8216,6 +8242,7 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
       ctx.pending_new_points.push_back(std::move(pending));
     }
   }
+  trace_raw_generate_stage("pending_scan_end", ctx.length);
 
   // double t_b2 = omp_get_wtime() - t0;
 
@@ -8230,6 +8257,7 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
            geom_reject_counts[VISUAL_GEOM_REJECT_CHI2], ctx.pending_new_points.size());
   }
   printf("[ VIO ] camera_id=%d selected %zu pending observations\n", ctx.camera_id, ctx.pending_new_points.size());
+  trace_raw_generate_stage("generate_end", -1);
   // printf("pg.size: %d \n", pg.size());
   // printf("B1. : %.6lf \n", t_b1);
   // printf("B2. : %.6lf \n", t_b2);
