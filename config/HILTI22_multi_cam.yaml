@@ -1,7 +1,9 @@
 /**:
   ros__parameters:
     common:
-      num_cameras: 5
+      # This launch defaults to the single camera0 stream. Increase only after
+      # validating the remaining camera intrinsics and enabling contiguous entries.
+      num_cameras: 1
       require_all_cameras: true
       multi_cam_sync_queue_size: 5
       multi_cam_sync_tolerance_ms: 40.0
@@ -97,7 +99,7 @@
 
     vio:
       frontend_mode: 0
-      cross_camera_reference_en: true
+      cross_camera_reference_en: false
       cross_camera_current_residual_en: false
       max_iterations: 5
       outlier_threshold: 1000
@@ -115,6 +117,37 @@
       raw_camera_model_jacobian_en: true
       virtual_s2_optimize_en: false
       virtual_sparse_patch_en: false
+      # Advanced visual reference/landmark management. Start HILTI22 in shadow
+      # mode: collect decisions and diagnostics without changing EKF admission,
+      # reference selection, or deleting map objects while the raw-path abort is traced.
+      visual_ref_post_ekf_build_en: true
+      visual_map_manage_en: true
+      visual_map_manage_log_en: true
+      visual_map_manage_shadow_en: true
+      visual_ref_current_select_en: true
+      visual_ref_fallback_en: true
+      visual_ref_lifecycle_en: true
+      visual_ref_view_coverage_en: true
+      visual_ref_nis_en: true
+      visual_point_seed_validation_en: true
+      visual_point_footprint_redundancy_en: true
+      visual_point_information_prune_en: true
+      visual_point_replacement_en: true
+      visual_map_retirement_apply_en: false
+      visual_ref_max_candidates: 2
+      visual_ref_validate_min_tests: 3
+      visual_ref_validate_min_ratio: 0.67
+      visual_ref_retire_reject_count: 5
+      visual_ref_max_count: 8
+      visual_ref_coverage_angle_deg: 12.0
+      visual_ref_max_anisotropy: 4.0
+      visual_ref_nis_max_per_dof: 3.0
+      visual_point_seed_min_tests: 3
+      visual_point_seed_min_ratio: 0.67
+      visual_point_footprint_iou: 0.60
+      visual_point_information_retain: 0.90
+      visual_point_suspect_reject_count: 8
+      visual_point_stale_frames: 200
       virtual_focal_length: 300.0
       virtual_patch_margin: 8
       virtual_max_search_level: 1
@@ -124,6 +157,19 @@
       virtual_splat_min_weight: 1.0e-6
       virtual_splat_require_full_core_coverage: true
       virtual_splat_debug_compare_pull_exact: false
+      # Keep the strong insertion filter disabled during diagnosis. Its lookup
+      # scale still matches HILTI22 lio.voxel_size for footprint association.
+      visual_geom_filter_en: false
+      visual_geom_filter_log_en: true
+      visual_geom_filter_require_point_cov: true
+      visual_geom_filter_voxel_size: 0.4
+      visual_geom_filter_min_plane_points: 5
+      visual_geom_filter_radius_multiplier: 3.0
+      visual_geom_filter_min_normal_cos: 0.8660254
+      visual_geom_filter_max_chi2: 9.0
+      visual_geom_filter_min_sigma: 1.0e-12
+      visual_geom_filter_max_point_cov_trace: 0.2
+      visual_geom_filter_max_normal_cov: 0.05
       draw_rejected_points_en: false
 
       normal_en: true

@@ -5707,6 +5707,23 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
 
   // resetRvizDisplay();
   ctx.visual_submap->reset();
+  // Keep this trace bounded to the first few visual frames. The raw managed-map
+  // failure reported on HILTI22/MEI aborts before the normal retrieve summary,
+  // so every marker is flushed immediately to preserve the last completed stage.
+  const bool raw_map_trace_en = visual_map_manage_en && visual_map_manage_log_en && frame_count < 5;
+  auto trace_raw_map_stage = [&](const char *stage, int grid_index, const VisualPoint *point,
+                                 const Feature *reference, int reference_count) {
+    if (!raw_map_trace_en) return;
+    printf("[ VIO Map Trace ] frame=%d camera_id=%d stage=%s grid=%d point_id=%llu point_state=%d obs=%zu ref_present=%d refs=%d\n",
+           ctx.new_frame != nullptr ? ctx.new_frame->id_ : -1, ctx.camera_id, stage, grid_index,
+           static_cast<unsigned long long>(point != nullptr ? point->point_id_ : 0),
+           point != nullptr ? static_cast<int>(point->state_) : -1,
+           point != nullptr ? point->obs_.size() : 0,
+           reference != nullptr ? 1 : 0,
+           reference_count);
+    fflush(stdout);
+  };
+  trace_raw_map_stage("retrieve_begin", -1, nullptr, nullptr, static_cast<int>(feat_map.size()));
 
   // Controls whether to include the visual submap from the previous frame.
   ctx.sub_feat_map.clear();
@@ -5940,6 +5957,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
   {
     ctx.sub_feat_map.erase(key);
   }
+  trace_raw_map_stage("grid_ready", -1, nullptr, nullptr, static_cast<int>(ctx.sub_feat_map.size()));
 
   // printf("[ VIO Debug ] retrieve map camera_id=%d sub_voxels=%zu deleted_voxels=%zu raycast=%d\n",
   //        ctx.camera_id, ctx.sub_feat_map.size(), DeleteKeyList.size(), raycast_en ? 1 : 0);
@@ -6008,6 +6026,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       if (!pt->is_normal_initialized_) continue;
 
       std::vector<Feature *> reference_candidates;
+      trace_raw_map_stage("select_begin", i, pt, nullptr, 0);
       if (visual_map_manage_en && visual_ref_current_select_en && visual_map_manage_shadow_en)
       {
         const int candidate_limit = visual_ref_fallback_en ? visual_ref_max_candidates : 1;
@@ -6077,6 +6096,9 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
           ref_ftr = nullptr;
         if (ref_ftr != nullptr) reference_candidates.push_back(ref_ftr);
       }
+      trace_raw_map_stage("select_end", i, pt,
+                          reference_candidates.empty() ? nullptr : reference_candidates.front(),
+                          static_cast<int>(reference_candidates.size()));
       if (reference_candidates.empty()) continue;
 
       for (int reference_rank = 0; reference_rank < static_cast<int>(reference_candidates.size()); ++reference_rank)
@@ -6093,8 +6115,10 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
           ++debug_ref_invalid;
           break;
         }
-      const PerCameraData &ref_ctx = cameras_[ref_ftr->camera_id_];
-      if (ref_ftr->camera_id_ != ctx.camera_id) ++debug_cross_refs;
+        trace_raw_map_stage("affine_begin", i, pt, ref_ftr,
+                            static_cast<int>(reference_candidates.size()));
+        const PerCameraData &ref_ctx = cameras_[ref_ftr->camera_id_];
+        if (ref_ftr->camera_id_ != ctx.camera_id) ++debug_cross_refs;
 
       if (normal_en)
       {
@@ -6139,7 +6163,16 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
 
       const double debug_affine_det = A_cur_ref_zero.determinant();
       const bool debug_affine_ok = A_cur_ref_zero.array().isFinite().all() && std::isfinite(debug_affine_det) && std::fabs(debug_affine_det) > 1e-9;
-      if (usage_stats_en) recordUsageObservation(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero, false);
+      trace_raw_map_stage("affine_end", i, pt, ref_ftr,
+                          static_cast<int>(reference_candidates.size()));
+      if (usage_stats_en)
+      {
+        trace_raw_map_stage("usage_begin", i, pt, ref_ftr,
+                            static_cast<int>(reference_candidates.size()));
+        recordUsageObservation(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero, false);
+        trace_raw_map_stage("usage_end", i, pt, ref_ftr,
+                            static_cast<int>(reference_candidates.size()));
+      }
       if (!debug_affine_ok)
       {
         ++debug_affine_bad;
@@ -6150,11 +6183,17 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
           // fflush(stdout);
         }
       }
-      if (visual_map_manage_en && visual_ref_current_select_en)
+      // Shadow mode must remain observational: it may evaluate managed
+      // references above, but it must not gate the legacy raw tracking path.
+      if (visual_map_manage_en && visual_ref_current_select_en && !visual_map_manage_shadow_en)
       {
         if (!debug_affine_ok) break;
+        trace_raw_map_stage("svd_begin", i, pt, ref_ftr,
+                            static_cast<int>(reference_candidates.size()));
         const Eigen::JacobiSVD<Matrix2d> affine_svd(A_cur_ref_zero);
         const V2D singular = affine_svd.singularValues();
+        trace_raw_map_stage("svd_end", i, pt, ref_ftr,
+                            static_cast<int>(reference_candidates.size()));
         if (!singular.array().isFinite().all() || singular[1] <= 1.0e-9 ||
             singular[0] / singular[1] > visual_ref_max_anisotropy)
           break;
@@ -6169,6 +6208,8 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       }
       ++debug_warp_attempts;
 
+      trace_raw_map_stage("warp_begin", i, pt, ref_ftr,
+                          static_cast<int>(reference_candidates.size()));
       bool warp_ok = true;
       for (int pyramid_level = 0; pyramid_level <= patch_pyrimid_level - 1; pyramid_level++)
       {
@@ -6179,12 +6220,18 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
           break;
         }
       }
+      trace_raw_map_stage("warp_end", i, pt, ref_ftr,
+                          static_cast<int>(reference_candidates.size()));
       if (!warp_ok) break;
 
       std::vector<double> usage_sse_levels(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
       std::vector<double> usage_ncc_levels(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
       std::vector<uint8_t> usage_level_valid(std::max(1, patch_pyrimid_level), 0);
+      trace_raw_map_stage("current_patch_begin", i, pt, ref_ftr,
+                          static_cast<int>(reference_candidates.size()));
       getImagePatch(ctx, img, pc, patch_buffer.data(), 0);
+      trace_raw_map_stage("current_patch_end", i, pt, ref_ftr,
+                          static_cast<int>(reference_candidates.size()));
       usage_level_valid[0] = 1;
 
       float error = 0.0;
@@ -6287,6 +6334,8 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
         ctx.visual_submap->usage_level_valid.push_back(usage_level_valid);
       }
       appendManagedSubmapMetadata(ctx, *pt, *ref_ftr);
+      trace_raw_map_stage("accepted", i, pt, ref_ftr,
+                          static_cast<int>(reference_candidates.size()));
       if (reference_rank > 0) ++visual_map_manage_stats_.fallback_accepted;
 
       ++debug_accepted;
@@ -6297,6 +6346,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
     }
   }
   ctx.total_points = ctx.visual_submap->voxel_points.size();
+  trace_raw_map_stage("retrieve_end", -1, nullptr, nullptr, ctx.total_points);
 
   // double t3 = omp_get_wtime();
   // cout<<"C. addSubSparseMap: "<<t3-t2<<endl;
