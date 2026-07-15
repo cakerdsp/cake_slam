@@ -224,6 +224,8 @@
       normal_en: true
       raycast_en: false
       inverse_composition_en: false
+
+
       exposure_estimate_en: true
       online_extrinsic_en: false
       online_extrinsic_rot_en: true
@@ -238,7 +240,9 @@
       online_extrinsic_prior_trans_std_m: 0.02
       online_extrinsic_max_rot_update_deg: 0.02
       online_extrinsic_max_trans_update_m: 0.0001
-      online_time_offset_en: false
+      
+      
+      online_time_offset_en: true
       # Cameras with the same time_offset_group share one td state. By default
       # each camera has its own group; set equal group ids for hardware-triggered cameras.
       # Optional override: provide one entry per time-offset group.
