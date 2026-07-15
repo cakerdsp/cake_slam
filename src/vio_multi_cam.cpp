@@ -6641,7 +6641,51 @@ void VIOManager::computeJacobianAndUpdateEKF()
   compute_jacobian_time = update_ekf_time = 0.0;
   int total_observations = 0;
   for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
+  const bool ekf_trace_en = visual_map_manage_en && visual_map_manage_log_en && frame_count < 5;
+  auto trace_ekf_stage = [&](const char *stage, int level, int iteration,
+                             int camera_id, int point_index, int measurements) {
+    if (!ekf_trace_en) return;
+    printf("[ VIO EKF Trace ] stage=%s frame_count=%d level=%d iteration=%d camera_id=%d point=%d measurements=%d total=%d state_dim=%d cov=%dx%d\n",
+           stage, frame_count, level, iteration, camera_id, point_index, measurements,
+           total_observations, state != nullptr ? state->stateDim() : -1,
+           state != nullptr ? static_cast<int>(state->cov.rows()) : -1,
+           state != nullptr ? static_cast<int>(state->cov.cols()) : -1);
+    fflush(stdout);
+  };
+  auto trace_ekf_point = [&](const char *stage, int level, int iteration,
+                             int camera_id, int point_index, int row,
+                             int local_dof, double value0, double value1) {
+    if (!ekf_trace_en) return;
+    printf("[ VIO EKF Point ] stage=%s frame_count=%d level=%d iteration=%d camera_id=%d point=%d row=%d local_dof=%d value0=%.9g value1=%.9g\n",
+           stage, frame_count, level, iteration, camera_id, point_index, row,
+           local_dof, value0, value1);
+    fflush(stdout);
+  };
+  trace_ekf_stage("ekf_begin", -1, -1, -1, -1, 0);
+  if (ekf_trace_en)
+  {
+    for (const PerCameraData &ctx : cameras_)
+    {
+      const SubSparseMap *submap = ctx.visual_submap;
+      printf("[ VIO EKF Trace ] stage=submap_sizes camera_id=%d total=%d voxel=%zu errors=%zu warp=%zu search=%zu affine=%zu refs=%zu expo=%zu contribute=%zu pose_info=%zu nis=%zu dof=%zu usage_valid=%zu\n",
+             ctx.camera_id, ctx.total_points,
+             submap != nullptr ? submap->voxel_points.size() : 0,
+             submap != nullptr ? submap->errors.size() : 0,
+             submap != nullptr ? submap->warp_patch.size() : 0,
+             submap != nullptr ? submap->search_levels.size() : 0,
+             submap != nullptr ? submap->warp_affines.size() : 0,
+             submap != nullptr ? submap->reference_features.size() : 0,
+             submap != nullptr ? submap->inv_expo_list.size() : 0,
+             submap != nullptr ? submap->contributes_to_ekf.size() : 0,
+             submap != nullptr ? submap->pose_information.size() : 0,
+             submap != nullptr ? submap->observation_nis.size() : 0,
+             submap != nullptr ? submap->observation_dof.size() : 0,
+             submap != nullptr ? submap->usage_level_valid.size() : 0);
+      fflush(stdout);
+    }
+  }
   if (total_observations == 0) return;
+  trace_ekf_stage("setup_counters_begin", -1, -1, -1, -1, 0);
   ++online_calib_visual_update_count_;
   online_calib_last_total_observations_ = total_observations;
   const int calib_camera_count = std::max(0, state->num_cameras);
@@ -6668,7 +6712,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
   double rollback_last_max_time_update_ms = last_max_time_update_ms;
   bool attempted_extrinsic_this_frame = false;
   bool attempted_time_this_frame = false;
+  trace_ekf_stage("setup_cross_pairs_begin", -1, -1, -1, -1, 0);
   if (cross_camera_current_residual_en) buildCurrentCrossCameraPairs();
+  trace_ekf_stage("setup_cross_pairs_end", -1, -1, -1, -1, 0);
   G = Eigen::MatrixXd::Zero(state->stateDim(), state->stateDim());
   const bool online_extrinsic_active = online_extrinsic_en &&
       frame_count >= online_extrinsic_start_frame &&
@@ -6719,14 +6765,17 @@ void VIOManager::computeJacobianAndUpdateEKF()
   long long rollback_usage_final_residuals_same = usage_final_residuals_same;
   long long rollback_usage_final_residuals_cross = usage_final_residuals_cross;
   long long rollback_usage_final_residuals_current_cross = usage_final_residuals_current_cross;
+  trace_ekf_stage("setup_end", -1, -1, -1, -1, 0);
 
   for (int level = patch_pyrimid_level - 1; level >= 0; --level)
   {
+    trace_ekf_stage("level_begin", level, -1, -1, -1, 0);
     StatesGroup old_state = *state;
     if (inverse_composition_en) buildFixedTemplateGradientCache(level);
     double last_error = std::numeric_limits<double>::max();
     for (int iteration = 0; iteration < max_iterations; ++iteration)
     {
+      trace_ekf_stage("iteration_begin", level, iteration, -1, -1, 0);
       const double linearize_start = omp_get_wtime();
       const int state_dim = state->stateDim();
       Eigen::MatrixXd hessian = Eigen::MatrixXd::Zero(state_dim, state_dim);
@@ -6753,7 +6802,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
       long long usage_iter_residuals_current_cross = 0;
       double error = 0.0;
       int measurement_count = 0;
+      trace_ekf_stage("frame_state_update_begin", level, iteration, -1, -1, measurement_count);
       for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
+      trace_ekf_stage("frame_state_update_end", level, iteration, -1, -1, measurement_count);
       std::vector<uint8_t> active_time_groups(state->num_time_offset_groups, 0);
       if (online_time_offset_en && frame_count >= online_time_offset_start_frame &&
           (online_time_offset_min_update_interval <= 0 ||
@@ -6818,6 +6869,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
 
       for (PerCameraData &ctx : cameras_)
       {
+        trace_ekf_stage("camera_begin", level, iteration, ctx.camera_id, -1, measurement_count);
         if (ctx.total_points == 0 || ctx.visual_submap == nullptr || ctx.new_frame == nullptr) continue;
         const cv::Mat &img = ctx.new_frame->img_;
         const M3D Rwi = ctx.Rwi;
@@ -6829,19 +6881,28 @@ void VIOManager::computeJacobianAndUpdateEKF()
 
         for (int point_index = 0; point_index < ctx.total_points; ++point_index)
         {
+          trace_ekf_stage("point_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
           VisualPoint *point = ctx.visual_submap->voxel_points[point_index];
+          trace_ekf_stage("point_pointer_loaded", level, iteration, ctx.camera_id, point_index, measurement_count);
           if (point == nullptr) continue;
+          trace_ekf_stage("point_geometry_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
           const V3D point_i_for_time = Rwi.transpose() * (point->pos_ - Pwi);
           M3D point_i_for_time_hat;
           point_i_for_time_hat << SKEW_SYM_MATRX(point_i_for_time);
           const V3D dpc_dtd =
               ctx.Rci * (point_i_for_time_hat * ctx.gyro_i - Rwi.transpose() * ctx.Vwi);
+          trace_ekf_stage("point_geometry_end", level, iteration, ctx.camera_id, point_index, measurement_count);
           const int search_level = ctx.visual_submap->search_levels[point_index];
+          trace_ekf_point("point_search_loaded", level, iteration, ctx.camera_id, point_index, -1, 0,
+                          static_cast<double>(search_level), static_cast<double>(level));
           const int pyramid_level = level + search_level;
           const int scale = 1 << pyramid_level;
           const double inv_scale = 1.0 / scale;
           const std::vector<float> &reference_patch = ctx.visual_submap->warp_patch[point_index];
+          trace_ekf_stage("point_patch_loaded", level, iteration, ctx.camera_id, point_index, measurement_count);
           const double reference_exposure = ctx.visual_submap->inv_expo_list[point_index];
+          trace_ekf_point("point_arrays_loaded", level, iteration, ctx.camera_id, point_index, -1, 0,
+                          static_cast<double>(reference_patch.size()), static_cast<double>(pyramid_level));
           double patch_error = 0.0;
           const bool contributes_to_ekf = point_index >= static_cast<int>(ctx.visual_submap->contributes_to_ekf.size()) ||
                                           ctx.visual_submap->contributes_to_ekf[point_index] != 0;
@@ -7044,6 +7105,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           }
           else
           {
+            trace_ekf_stage("raw_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
             M3D Jpc_dRcl = M3D::Zero();
             if (estimate_extrinsic)
             {
@@ -7054,12 +7116,21 @@ void VIOManager::computeJacobianAndUpdateEKF()
               Jpc_dRcl = -ctx.Rcl * point_l_hat;
             }
             const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
+            trace_ekf_point("raw_point_c", level, iteration, ctx.camera_id, point_index, -1, local_dof,
+                            point_c[0], point_c[2]);
             const V2D pixel = ctx.cam->world2cam(point_c);
+            trace_ekf_point("raw_projected", level, iteration, ctx.camera_id, point_index, -1, local_dof,
+                            pixel[0], pixel[1]);
             usage_current_px_for_stats = pixel;
             const int required_border = (patch_size_half + 1) * scale + 1;
             if (!pixel.array().isFinite().all() || !ctx.cam->isInFrame(pixel.cast<int>(), required_border)) continue;
+            trace_ekf_point("raw_in_frame", level, iteration, ctx.camera_id, point_index, -1, local_dof,
+                            static_cast<double>(required_border), static_cast<double>(scale));
             MD(2, 3) Jdpi;
+            trace_ekf_stage("raw_jacobian_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
             computeProjectionJacobian(ctx, point_c, Jdpi);
+            trace_ekf_point("raw_jacobian_end", level, iteration, ctx.camera_id, point_index, -1, local_dof,
+                            Jdpi.array().abs().maxCoeff(), Jdpi.array().isFinite().all() ? 1.0 : 0.0);
             M3D point_hat;
             point_hat << SKEW_SYM_MATRX(point_c);
             const int u_i = static_cast<int>(std::floor(pixel[0] / scale)) * scale;
@@ -7072,20 +7143,31 @@ void VIOManager::computeJacobianAndUpdateEKF()
             const double w_br = du * dv;
             for (int x = 0; x < patch_size; ++x)
             {
+              trace_ekf_point("raw_patch_row_begin", level, iteration, ctx.camera_id, point_index, x,
+                              local_dof, static_cast<double>(u_i), static_cast<double>(v_i));
               const uint8_t *img_ptr = img.data +
                   (v_i + x * scale - patch_size_half * scale) * ctx.width + u_i - patch_size_half * scale;
               for (int y = 0; y < patch_size; ++y, img_ptr += scale)
               {
                 const int patch_index = x * patch_size + y;
                 const int cache_row = point_index * patch_size_total + patch_index;
+                trace_ekf_point("raw_sample_begin", level, iteration, ctx.camera_id, point_index, patch_index,
+                                local_dof, static_cast<double>(x), static_cast<double>(y));
                 const double current_value = w_tl * img_ptr[0] + w_tr * img_ptr[scale] +
                                              w_bl * img_ptr[ctx.width * scale] + w_br * img_ptr[ctx.width * scale + scale];
+                trace_ekf_point("raw_sample_value", level, iteration, ctx.camera_id, point_index, patch_index,
+                                local_dof, current_value, static_cast<double>(cache_row));
                 MD(1, 2) Jimg;
                 if (inverse_composition_en)
                 {
                   if (cache_row >= static_cast<int>(ctx.fixed_template_cache.valid.size()) ||
                       !ctx.fixed_template_cache.valid[cache_row])
+                  {
+                    trace_ekf_point("raw_sample_skip_cache", level, iteration, ctx.camera_id, point_index,
+                                    patch_index, local_dof, static_cast<double>(cache_row),
+                                    static_cast<double>(ctx.fixed_template_cache.valid.size()));
                     continue;
+                  }
                   Jimg = ctx.fixed_template_cache.photometric_gradients.row(cache_row);
                 }
                 else
@@ -7108,8 +7190,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 const MD(1, 3) Jdp = -Jimg_Jpi;
                 const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
                 const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
+                trace_ekf_point("raw_reference_read_begin", level, iteration, ctx.camera_id, point_index,
+                                patch_index, local_dof,
+                                static_cast<double>(patch_size_total * level + patch_index),
+                                static_cast<double>(reference_patch.size()));
                 const double residual = current_exposure * current_value -
                                         reference_exposure * reference_patch[patch_size_total * level + patch_index];
+                trace_ekf_point("raw_reference_read_end", level, iteration, ctx.camera_id, point_index,
+                                patch_index, local_dof, residual, Jimg_Jpi.norm());
                 Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
                 jacobian.segment<3>(0) = JdR.transpose();
                 jacobian.segment<3>(3) = Jdt.transpose();
@@ -7123,11 +7211,22 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   if (active_extrinsic_trans[ctx.camera_id] != 0)
                     jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = Jimg_Jpi.transpose();
                 }
+                trace_ekf_point("raw_accumulate_begin", level, iteration, ctx.camera_id, point_index,
+                                patch_index, local_dof, residual, jacobian.norm());
                 accumulateObservation(jacobian, residual);
+                trace_ekf_point("raw_accumulate_end", level, iteration, ctx.camera_id, point_index,
+                                patch_index, local_dof, patch_error, local_squared_error);
               }
+              trace_ekf_point("raw_patch_row_end", level, iteration, ctx.camera_id, point_index, x,
+                              local_dof, patch_error, local_squared_error);
             }
+            trace_ekf_stage("raw_patch_end", level, iteration, ctx.camera_id, point_index, measurement_count);
           }
+          trace_ekf_stage("error_write_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
           ctx.visual_submap->errors[point_index] = patch_error;
+          trace_ekf_stage("error_write_end", level, iteration, ctx.camera_id, point_index, measurement_count);
+          trace_ekf_point("point_linearized", level, iteration, ctx.camera_id, point_index, -1, local_dof,
+                          patch_error, local_squared_error);
           if (!visual_map_manage_en)
           {
             if (usage_stats_en && usage_reference != nullptr && usage_local_dof > 0)
@@ -7156,20 +7255,27 @@ void VIOManager::computeJacobianAndUpdateEKF()
             error += patch_error;
             continue;
           }
+          trace_ekf_stage("nis_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
           double nis = std::numeric_limits<double>::quiet_NaN();
           if (!visual_ref_nis_en)
           {
             // Photometric acceptance is used below; avoid the full-state NIS solve.
           }
           else if (iteration > 0 && point_index < static_cast<int>(ctx.visual_submap->observation_nis.size()))
+          {
             nis = ctx.visual_submap->observation_nis[point_index];
+            trace_ekf_point("nis_cached", level, iteration, ctx.camera_id, point_index, -1, local_dof, nis, 0.0);
+          }
           else if (local_dof > 0 && std::isfinite(img_point_cov) && img_point_cov > 0.0)
           {
+            trace_ekf_stage("nis_inputs_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
             const double inv_r = 1.0 / img_point_cov;
             const Eigen::MatrixXd A = inv_r * local_hessian;
             const Eigen::VectorXd b = inv_r * local_gradient;
             const double c = inv_r * local_squared_error;
             Eigen::MatrixXd P = state->cov;
+            trace_ekf_point("nis_inputs_end", level, iteration, ctx.camera_id, point_index, -1, local_dof,
+                            c, b.norm());
             if (usage_reference != nullptr && usage_reference->birth_pose_cov_.array().isFinite().all())
             {
               const SE3<double> T_cur_w(ctx.Rcw, ctx.Pcw);
@@ -7188,27 +7294,47 @@ void VIOManager::computeJacobianAndUpdateEKF()
             if (point->covariance_.array().isFinite().all())
               P.block<3, 3>(3, 3) += point->covariance_;
             P.diagonal().array() += 1.0e-12;
+            trace_ekf_stage("nis_p_ldlt_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
             const Eigen::LDLT<Eigen::MatrixXd> p_ldlt(P);
+            trace_ekf_point("nis_p_ldlt_end", level, iteration, ctx.camera_id, point_index, -1, local_dof,
+                            static_cast<double>(p_ldlt.info()), P.array().isFinite().all() ? 1.0 : 0.0);
             if (p_ldlt.info() == Eigen::Success)
             {
-              const Eigen::MatrixXd system =
-                  p_ldlt.solve(Eigen::MatrixXd::Identity(state_dim, state_dim)) + A;
+              trace_ekf_stage("nis_p_solve_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
+              const Eigen::MatrixXd p_inverse =
+                  p_ldlt.solve(Eigen::MatrixXd::Identity(state_dim, state_dim));
+              trace_ekf_point("nis_p_solve_end", level, iteration, ctx.camera_id, point_index, -1, local_dof,
+                              p_inverse.norm(), p_inverse.array().isFinite().all() ? 1.0 : 0.0);
+              const Eigen::MatrixXd system = p_inverse + A;
+              trace_ekf_stage("nis_system_ldlt_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
               const Eigen::LDLT<Eigen::MatrixXd> system_ldlt(system);
+              trace_ekf_point("nis_system_ldlt_end", level, iteration, ctx.camera_id, point_index, -1, local_dof,
+                              static_cast<double>(system_ldlt.info()), system.array().isFinite().all() ? 1.0 : 0.0);
               if (system_ldlt.info() == Eigen::Success)
-                nis = std::max(0.0, c - b.dot(system_ldlt.solve(b)));
+              {
+                trace_ekf_stage("nis_system_solve_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
+                const Eigen::VectorXd system_solution = system_ldlt.solve(b);
+                trace_ekf_point("nis_system_solve_end", level, iteration, ctx.camera_id, point_index, -1, local_dof,
+                                system_solution.norm(), system_solution.array().isFinite().all() ? 1.0 : 0.0);
+                nis = std::max(0.0, c - b.dot(system_solution));
+              }
             }
           }
+          trace_ekf_point("nis_end", level, iteration, ctx.camera_id, point_index, -1, local_dof, nis, 0.0);
           if (iteration == 0 && point_index < static_cast<int>(ctx.visual_submap->pose_information.size()))
           {
+            trace_ekf_stage("metadata_write_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
             ctx.visual_submap->pose_information[point_index] = local_pose_information;
             ctx.visual_submap->observation_dof[point_index] = local_dof;
             ctx.visual_submap->observation_nis[point_index] = nis;
+            trace_ekf_stage("metadata_write_end", level, iteration, ctx.camera_id, point_index, measurement_count);
           }
           const bool nis_pass = !visual_map_manage_en || visual_map_manage_shadow_en || !visual_ref_nis_en ||
                                 (local_dof > 0 && std::isfinite(nis) &&
                                  nis / static_cast<double>(local_dof) <= visual_ref_nis_max_per_dof);
           if (contributes_to_ekf && nis_pass)
           {
+            trace_ekf_stage("contribution_begin", level, iteration, ctx.camera_id, point_index, measurement_count);
             if (usage_stats_en && usage_reference != nullptr && local_dof > 0)
             {
               const bool cross_camera = usage_reference->camera_id_ != ctx.camera_id;
@@ -7236,9 +7362,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
             gradient.noalias() += local_gradient;
             measurement_count += local_dof;
             error += patch_error;
+            trace_ekf_stage("contribution_end", level, iteration, ctx.camera_id, point_index, measurement_count);
           }
+          trace_ekf_stage("point_end", level, iteration, ctx.camera_id, point_index, measurement_count);
         }
+        trace_ekf_stage("camera_end", level, iteration, ctx.camera_id, ctx.total_points, measurement_count);
       }
+
+      trace_ekf_stage("linearize_end", level, iteration, -1, -1, measurement_count);
 
       if (cross_camera_current_residual_en)
       {
@@ -7494,9 +7625,22 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                           active_extrinsic_rot,
                                           active_extrinsic_trans,
                                           active_time_groups);
-      Eigen::MatrixXd K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
+      trace_ekf_stage("solve_begin", level, iteration, -1, -1, measurement_count);
+      trace_ekf_stage("prior_cov_scale_begin", level, iteration, -1, -1, measurement_count);
+      const Eigen::MatrixXd scaled_prior_cov = state->cov / img_point_cov;
+      trace_ekf_stage("prior_cov_scale_end", level, iteration, -1, -1, measurement_count);
+      trace_ekf_stage("prior_cov_inverse_begin", level, iteration, -1, -1, measurement_count);
+      const Eigen::MatrixXd prior_information = scaled_prior_cov.inverse();
+      trace_ekf_stage("prior_cov_inverse_end", level, iteration, -1, -1, measurement_count);
+      const Eigen::MatrixXd solve_system = solve_hessian + prior_information;
+      trace_ekf_stage("solve_system_inverse_begin", level, iteration, -1, -1, measurement_count);
+      Eigen::MatrixXd K1 = solve_system.inverse();
+      trace_ekf_stage("solve_system_inverse_end", level, iteration, -1, -1, measurement_count);
+      trace_ekf_stage("gain_begin", level, iteration, -1, -1, measurement_count);
       G = K1 * solve_hessian;
       Eigen::VectorXd solution = -K1 * solve_gradient + prior_delta - G * prior_delta;
+      trace_ekf_stage("gain_end", level, iteration, -1, -1, measurement_count);
+      trace_ekf_stage("solve_end", level, iteration, -1, -1, measurement_count);
       auto zeroInactiveCalibrationInSolution = [&](Eigen::VectorXd &delta) {
         for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
         {
@@ -7517,9 +7661,15 @@ void VIOManager::computeJacobianAndUpdateEKF()
       if (!calibrationUpdateWithinTrustRegion(solution, allow_extrinsic_rotation,
                                               allow_extrinsic_translation, active_time_groups))
       {
+        trace_ekf_stage("trust_fallback_begin", level, iteration, -1, -1, measurement_count);
         std::vector<uint8_t> deactivate_time_groups = active_time_groups;
         deactivateCalibrationBlocks(solve_hessian, solve_gradient, true, deactivate_time_groups);
-        K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
+        trace_ekf_stage("trust_prior_inverse_begin", level, iteration, -1, -1, measurement_count);
+        const Eigen::MatrixXd fallback_prior_information = (state->cov / img_point_cov).inverse();
+        trace_ekf_stage("trust_prior_inverse_end", level, iteration, -1, -1, measurement_count);
+        trace_ekf_stage("trust_system_inverse_begin", level, iteration, -1, -1, measurement_count);
+        K1 = (solve_hessian + fallback_prior_information).inverse();
+        trace_ekf_stage("trust_system_inverse_end", level, iteration, -1, -1, measurement_count);
         G = K1 * solve_hessian;
         solution = -K1 * solve_gradient + prior_delta - G * prior_delta;
         zeroInactiveCalibrationInSolution(solution);
@@ -7536,6 +7686,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
         std::fill(final_active_extrinsic_rot.begin(), final_active_extrinsic_rot.end(), 0);
         std::fill(final_active_extrinsic_trans.begin(), final_active_extrinsic_trans.end(), 0);
         std::fill(final_active_time_groups.begin(), final_active_time_groups.end(), 0);
+        trace_ekf_stage("trust_fallback_end", level, iteration, -1, -1, measurement_count);
       }
       else
       {
@@ -7577,8 +7728,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
           }
         }
       }
+      trace_ekf_stage("state_update_begin", level, iteration, -1, -1, measurement_count);
       *state += solution;
       syncCameraExtrinsicsFromState(*state);
+      trace_ekf_stage("state_update_end", level, iteration, -1, -1, measurement_count);
       update_ekf_time += omp_get_wtime() - update_start;
       double max_extrinsic_update = 0.0;
       if (allow_extrinsic_rotation || allow_extrinsic_translation)
@@ -7608,17 +7761,24 @@ void VIOManager::computeJacobianAndUpdateEKF()
         break;
     }
   }
+  trace_ekf_stage("covariance_update_begin", -1, -1, -1, -1, 0);
   state->cov -= G * state->cov;
+  trace_ekf_stage("covariance_update_end", -1, -1, -1, -1, 0);
+  trace_ekf_stage("covariance_restore_begin", -1, -1, -1, -1, 0);
   restoreInactiveCalibrationCovariance(cov_before_visual_update,
                                        final_active_extrinsic_rot,
                                        final_active_extrinsic_trans,
                                        final_active_time_groups);
+  trace_ekf_stage("covariance_restore_end", -1, -1, -1, -1, 0);
+  trace_ekf_stage("usage_record_begin", -1, -1, -1, -1, 0);
   recordUsagePoseFrameInfo(usage_prior_cov, state->cov, usage_final_h_base,
                            usage_final_h_same, usage_final_h_cross, usage_final_h_current_cross,
                            usage_final_patches_all, usage_final_residuals_all,
                            usage_final_patches_same, usage_final_residuals_same,
                            usage_final_patches_cross, usage_final_residuals_cross,
                            usage_final_patches_current_cross, usage_final_residuals_current_cross);
+  trace_ekf_stage("usage_record_end", -1, -1, -1, -1, 0);
+  trace_ekf_stage("online_bookkeeping_begin", -1, -1, -1, -1, 0);
   online_calib_last_active_extrinsic_rot_ = final_active_extrinsic_rot;
   online_calib_last_active_extrinsic_trans_ = final_active_extrinsic_trans;
   online_calib_last_active_time_groups_ = final_active_time_groups;
@@ -7665,7 +7825,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
   if (accepted_extrinsic_this_frame) ++online_extrinsic_accept_count_;
   if (attempted_time_this_frame) ++online_time_offset_attempt_count_;
   if (accepted_time_this_frame) ++online_time_offset_accept_count_;
+  trace_ekf_stage("online_bookkeeping_end", -1, -1, -1, -1, 0);
+  trace_ekf_stage("final_frame_state_update_begin", -1, -1, -1, -1, 0);
   for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
+  trace_ekf_stage("final_frame_state_update_end", -1, -1, -1, -1, 0);
+  trace_ekf_stage("ekf_end", -1, -1, -1, -1, 0);
 }
 
 void VIOManager::updateStateVirtualS2(cv::Mat img, int level)
@@ -11064,12 +11228,25 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     throw std::runtime_error("MultiCameraFrame image count does not match VIOManager camera count");
 
   const double frame_start = omp_get_wtime();
+  const bool pipeline_trace_en = visual_map_manage_en && visual_map_manage_log_en && frame_count < 5;
+  auto trace_pipeline = [&](const char *stage, int camera_id) {
+    if (!pipeline_trace_en) return;
+    const PerCameraData *ctx = camera_id >= 0 && camera_id < static_cast<int>(cameras_.size())
+                                   ? &cameras_[camera_id]
+                                   : nullptr;
+    printf("[ VIO Pipeline Trace ] stage=%s frame_id=%d frame_count=%d camera_id=%d total_points=%d pending=%zu feat_map=%zu\n",
+           stage, mf.frame_id, frame_count, camera_id, ctx != nullptr ? ctx->total_points : -1,
+           ctx != nullptr ? ctx->pending_new_points.size() : 0, feat_map.size());
+    fflush(stdout);
+  };
+  trace_pipeline("frame_begin", -1);
   // printf("[ VIO Debug ] processMultiCameraFrame begin frame=%d cameras=%d pg=%zu feat_map=%zu plane_map=%zu virtual=%d cross_ref=%d normal=%d inverse=%d raycast=%d\n",
   //        mf.frame_id, numCameras(), pg.size(), feat_map.size(), plane_map.size(), virtual_fisheye_patch_en ? 1 : 0,
   //        cross_camera_reference_en ? 1 : 0, normal_en ? 1 : 0, inverse_composition_en ? 1 : 0, raycast_en ? 1 : 0);
   // fflush(stdout);
   for (int camera_id = 0; camera_id < numCameras(); ++camera_id)
   {
+    trace_pipeline("camera_setup_begin", camera_id);
     PerCameraData &ctx = cameras_[camera_id];
     cv::Mat image = mf.images[camera_id].clone();
     if (image.empty()) throw std::runtime_error("empty image for camera_id=" + std::to_string(camera_id));
@@ -11098,24 +11275,31 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
                                   capture_timestamp - corrected_timestamp, time_group));
     updateFrameState(ctx, *state);
     resetGrid(ctx);
+    trace_pipeline("camera_setup_end", camera_id);
     // printf("[ VIO Debug ] frame setup camera_id=%d frame=%d image=%dx%d type=%d ns=%s\n",
     //        ctx.camera_id, mf.frame_id, image.cols, image.rows, image.type(), ctx.camera_namespace.c_str());
     // fflush(stdout);
   }
+  trace_pipeline("retirements_flush_begin", -1);
   flushVisualMapRetirements();
+  trace_pipeline("retirements_flush_end", -1);
   const double frame_setup_end = omp_get_wtime();
 
   for (PerCameraData &ctx : cameras_)
   {
     // printf("[ VIO Debug ] retrieve begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
     // fflush(stdout);
+    trace_pipeline("retrieve_begin", ctx.camera_id);
     retrieveFromVisualSparseMap(ctx, ctx.new_frame->img_, pg, plane_map);
+    trace_pipeline("retrieve_end", ctx.camera_id);
     // printf("[ VIO Debug ] retrieve end camera_id=%d frame=%d total_points=%d\n",
     //        ctx.camera_id, mf.frame_id, ctx.total_points);
     // fflush(stdout);
     // printf("[ VIO Debug ] generate begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
     // fflush(stdout);
+    trace_pipeline("generate_begin", ctx.camera_id);
     generateVisualMapPoints(ctx, ctx.new_frame->img_, pg, plane_map);
+    trace_pipeline("generate_end", ctx.camera_id);
     // printf("[ VIO Debug ] generate end camera_id=%d frame=%d pending=%zu\n",
     //        ctx.camera_id, mf.frame_id, ctx.pending_new_points.size());
     // fflush(stdout);
@@ -11124,25 +11308,41 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
 
   // printf("[ VIO Debug ] ekf begin frame=%d\n", mf.frame_id);
   // fflush(stdout);
+  trace_pipeline("ekf_call_begin", -1);
   computeJacobianAndUpdateEKF();
+  trace_pipeline("ekf_call_end", -1);
   // printf("[ VIO Debug ] ekf end frame=%d\n", mf.frame_id);
   // fflush(stdout);
   const double ekf_end = omp_get_wtime();
 
   if (visual_map_manage_en)
-    for (PerCameraData &ctx : cameras_) updateManagedObservationEvidence(ctx);
+    for (PerCameraData &ctx : cameras_)
+    {
+      trace_pipeline("evidence_begin", ctx.camera_id);
+      updateManagedObservationEvidence(ctx);
+      trace_pipeline("evidence_end", ctx.camera_id);
+    }
 
   if (visual_ref_post_ekf_build_en)
   {
     for (PerCameraData &ctx : cameras_)
+    {
+      trace_pipeline("materialize_begin", ctx.camera_id);
       materializePendingNewPointObservations(ctx, ctx.new_frame->img_, plane_map);
+      trace_pipeline("materialize_end", ctx.camera_id);
+    }
   }
 
   if (ref_patch_dump_en && !cameras_.empty())
+  {
+    trace_pipeline("ref_dump_begin", kRefPatchDumpCameraId);
     processRefPatchDumpProbe(cameras_[kRefPatchDumpCameraId], cameras_[kRefPatchDumpCameraId].new_frame->img_);
+    trace_pipeline("ref_dump_end", kRefPatchDumpCameraId);
+  }
 
   for (PerCameraData &ctx : cameras_)
   {
+    trace_pipeline("map_update_prepare_begin", ctx.camera_id);
     if (!visual_ref_post_ekf_build_en)
     {
       for (PendingNewPointObservation &pending : ctx.pending_new_points)
@@ -11152,17 +11352,22 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
         if (pending.virtual_patch_valid) pending.T_v_w = composeVirtualPose(pending.R_v_from_c, pending.T_f_w);
       }
     }
+    trace_pipeline("map_update_prepare_end", ctx.camera_id);
     // printf("[ VIO Debug ] updateVisualMap begin camera_id=%d frame=%d pending=%zu\n",
     //        ctx.camera_id, mf.frame_id, ctx.pending_new_points.size());
     // fflush(stdout);
+    trace_pipeline("map_update_begin", ctx.camera_id);
     updateVisualMapPoints(ctx, ctx.new_frame->img_);
+    trace_pipeline("map_update_end", ctx.camera_id);
     // printf("[ VIO Debug ] updateVisualMap end camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
     // fflush(stdout);
   }
   const double map_update_end = omp_get_wtime();
   // printf("[ VIO Debug ] commitPendingNewPoints begin frame=%d\n", mf.frame_id);
   // fflush(stdout);
+  trace_pipeline("commit_begin", -1);
   commitPendingNewPoints(plane_map);
+  trace_pipeline("commit_end", -1);
   // printf("[ VIO Debug ] commitPendingNewPoints end frame=%d feat_map=%zu\n", mf.frame_id, feat_map.size());
   // fflush(stdout);
   const double commit_end = omp_get_wtime();
@@ -11171,11 +11376,20 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     // printf("[ VIO Debug ] updateReference begin camera_id=%d frame=%d total_points=%d\n",
     //        ctx.camera_id, mf.frame_id, ctx.total_points);
     // fflush(stdout);
+    trace_pipeline("reference_update_begin", ctx.camera_id);
     updateReferencePatch(ctx, plane_map);
+    trace_pipeline("reference_update_end", ctx.camera_id);
     // printf("[ VIO Debug ] updateReference end camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
     // fflush(stdout);
+    trace_pipeline("plot_begin", ctx.camera_id);
     plotTrackedPoints(ctx);
-    if (plot_flag) projectPatchFromRefToCur(ctx, plane_map);
+    trace_pipeline("plot_end", ctx.camera_id);
+    if (plot_flag)
+    {
+      trace_pipeline("project_patch_begin", ctx.camera_id);
+      projectPatchFromRefToCur(ctx, plane_map);
+      trace_pipeline("project_patch_end", ctx.camera_id);
+    }
   }
   if (visual_map_manage_en && mf.frame_id % 20 == 0)
   {
@@ -11208,9 +11422,17 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
       }
     }
   }
+  trace_pipeline("manage_stats_begin", -1);
   printVisualMapManageStats(mf.frame_id);
-  if (colmap_output_en && numCameras() == 1) dumpDataForColmap();
+  trace_pipeline("manage_stats_end", -1);
+  if (colmap_output_en && numCameras() == 1)
+  {
+    trace_pipeline("colmap_dump_begin", 0);
+    dumpDataForColmap();
+    trace_pipeline("colmap_dump_end", 0);
+  }
   const double reference_end = omp_get_wtime();
+  trace_pipeline("frame_end", -1);
   ++frame_count;
   const double elapsed = reference_end - frame_start;
   ave_total = ave_total * (frame_count - 1) / frame_count + elapsed / frame_count;
