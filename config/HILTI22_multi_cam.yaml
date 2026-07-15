@@ -25,6 +25,8 @@
                0.006732176792, -0.999974559, 0.0023577732]
         Pcl: [-0.05497620466, 0.06754014554, -0.0520599209]
         online_extrinsic_en: true
+        time_offset_group: 0
+        online_time_offset_en: true
 
       camera1:
         img_topic: "/alphasense/cam1/image_raw"
@@ -37,6 +39,8 @@
                0.001660634281, -0.9999981924, 0.0009260608843]
         Pcl: [0.05377943234, 0.0683868197, -0.05154509159]
         online_extrinsic_en: true
+        time_offset_group: 1
+        online_time_offset_en: true
 
       camera2:
         img_topic: "/alphasense/cam2/image_raw"
@@ -49,6 +53,8 @@
                0.002774217265, 0.001588953799, 0.9999948895]
         Pcl: [-0.007986043407, 0.0007666033303, -0.08909935435]
         online_extrinsic_en: true
+        time_offset_group: 2
+        online_time_offset_en: true
 
       camera3:
         img_topic: "/alphasense/cam3/image_raw"
@@ -61,6 +67,8 @@
               -0.9999698557, -0.007425498157, -0.002269292396]
         Pcl: [-0.001388073157, 0.06618357503, -0.0656154501]
         online_extrinsic_en: true
+        time_offset_group: 3
+        online_time_offset_en: true
 
       camera4:
         img_topic: "/alphasense/cam4/image_raw"
@@ -73,6 +81,8 @@
               0.9999971577, 0.0009529249849, 0.002185542757]
         Pcl: [0.005160367447, 0.07171380895, -0.06644965352]
         online_extrinsic_en: true
+        time_offset_group: 4
+        online_time_offset_en: true
 
     extrin_calib:
       # Hilti-2022. Interpreted by code as imu<-lidar and inverted internally to lidar<-imu.
@@ -84,6 +94,7 @@
     time_offset:
       imu_time_offset: 0.0
       img_time_offset: 0.0
+      img_time_offset_groups: []
       exposure_time_init: 0.0
 
     preprocess:
@@ -180,12 +191,23 @@
       online_extrinsic_rot_en: true
       online_extrinsic_trans_en: true
       online_extrinsic_prior_factor_en: false
+      online_extrinsic_camera_mask: []
       online_extrinsic_start_frame: 100
       online_extrinsic_min_tracks: 20
       online_extrinsic_prior_rot_std_deg: 0.5
       online_extrinsic_prior_trans_std_m: 0.02
       online_extrinsic_max_rot_update_deg: 0.02
       online_extrinsic_max_trans_update_m: 0.0001
+      online_time_offset_en: false
+      online_time_offset_group_mask: []
+      online_time_offset_start_frame: 100
+      online_time_offset_min_tracks: 30
+      online_time_offset_min_pixel_velocity: 15.0
+      online_time_offset_prior_std_ms: 5.0
+      online_time_offset_process_noise_ms_sqrt_s: 0.0
+      online_time_offset_max_update_ms: 0.2
+      online_time_offset_max_abs_ms: 50.0
+      online_time_offset_min_update_interval: 5
       inv_expo_time_init: 1.0
       inv_expo_cov: 0.1
 
