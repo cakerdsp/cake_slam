@@ -9120,6 +9120,7 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
   if (ctx.total_points == 0) return;
 
   int update_num = 0;
+  int level_gate_reject_num = 0;
   const SE3<double> pose_cur = ctx.new_frame->T_f_w_;
   for (int i = 0; i < ctx.total_points; ++i)
   {
@@ -9155,6 +9156,14 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
       add_flag = shouldCreateManagedReference(ctx, *pt, raw_px, affine);
     }
 
+    // Partial pyramid admission is useful for the current pose update, but it
+    // must not add, replace, or evict persistent map observations.
+    if (add_flag && ncc_en && !allPyramidLevelsActive(*ctx.visual_submap, i))
+    {
+      ++level_gate_reject_num;
+      continue;
+    }
+
     if ((!visual_map_manage_en || visual_map_manage_shadow_en) && pt->obs_.size() >= 30)
     {
       Feature *ref_ftr;
@@ -9162,7 +9171,6 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
       pt->deleteFeatureRef(ref_ftr);
     }
     if (!add_flag) continue;
-
     std::unique_ptr<float[]> patch(new float[patch_size_total]);
     cv::Mat virtual_support_img;
     cv::Point virtual_source_origin;
@@ -9205,7 +9213,8 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
     ctx.update_flag[i] = 1;
     ++update_num;
   }
-  printf("[ VIO Virtual ] Update %d points in visual submap\n", update_num);
+  printf("[ VIO Virtual ] Update %d points in visual submap (all-level map gate rejected %d)\n",
+         update_num, level_gate_reject_num);
 }
 
 void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
@@ -9218,6 +9227,7 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
   if (ctx.total_points == 0) return;
 
   int update_num = 0;
+  int level_gate_reject_num = 0;
   SE3 pose_cur = ctx.new_frame->T_f_w_;
   for (int i = 0; i < ctx.total_points; i++)
   {
@@ -9260,6 +9270,12 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
       add_flag = shouldCreateManagedReference(ctx, *pt, pc, affine);
     }
 
+    if (add_flag && ncc_en && !allPyramidLevelsActive(*ctx.visual_submap, i))
+    {
+      ++level_gate_reject_num;
+      continue;
+    }
+
     // Maintain the size of 3D point observation features.
     if ((!visual_map_manage_en || visual_map_manage_shadow_en) && pt->obs_.size() >= 30)
     {
@@ -9293,7 +9309,9 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
       delete[] patch_temp;
     }
   }
-  // printf("[ VIO ] Update %d points in visual submap\n", update_num);
+  // Keep the raw path quiet by default, but retain the counters here for
+  // symmetric debugging with the virtual path.
+  (void)level_gate_reject_num;
 }
 
 void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)

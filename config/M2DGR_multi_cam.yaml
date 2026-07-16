@@ -153,9 +153,9 @@
       max_iterations: 5
       outlier_threshold: 1000
       ncc_en: true
-      ncc_thre: 0.7
+      # ncc_thre: 0.7
       # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
-      ncc_thre_by_level: [0.7, 0.7]
+      ncc_thre_by_level: [0.7, 0.4]
       usage_stats_en: true
       usage_stats_window: 100
       img_point_cov: 1000
@@ -202,7 +202,7 @@
       visual_point_information_retain: 0.90
       visual_point_suspect_reject_count: 8
       visual_point_stale_frames: 200
-      virtual_focal_length: 500.0
+      virtual_focal_length: 400.0
       virtual_patch_margin: 4
       virtual_max_search_level: 0
       virtual_patch_resampling_mode: "pull_exact"

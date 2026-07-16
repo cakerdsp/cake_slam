@@ -422,6 +422,16 @@ public:
                ? ncc_thre_by_level[level]
                : ncc_thre;
   }
+  bool allPyramidLevelsActive(const SubSparseMap &submap, int point_index) const
+  {
+    const int level_count = std::max(1, patch_pyrimid_level);
+    if (point_index < 0 || point_index >= static_cast<int>(submap.level_active.size()) ||
+        static_cast<int>(submap.level_active[point_index].size()) < level_count)
+      return false;
+    return std::all_of(submap.level_active[point_index].begin(),
+                       submap.level_active[point_index].begin() + level_count,
+                       [](uint8_t active) { return active != 0; });
+  }
 
   double virtual_focal_length = 300.0;
   int virtual_patch_margin = 4;
