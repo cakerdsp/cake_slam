@@ -245,11 +245,17 @@ struct StatesGroup
   void setCameraExtrinsic(int camera_id, const M3D &R_cl, const V3D &P_cl, bool reset_prior = true)
   {
     if (camera_id < 0 || camera_id >= num_cameras) throw std::out_of_range("invalid camera extrinsic index");
-    Rcl[camera_id] = R_cl;
+    if (!R_cl.allFinite() || R_cl.determinant() <= 0.0)
+      throw std::invalid_argument("camera extrinsic rotation must be finite with positive determinant");
+    Eigen::Quaterniond q_cl(R_cl);
+    if (!q_cl.coeffs().allFinite() || q_cl.norm() <= 1.0e-12)
+      throw std::invalid_argument("camera extrinsic rotation cannot be projected to SO(3)");
+    const M3D R_cl_so3 = q_cl.normalized().toRotationMatrix();
+    Rcl[camera_id] = R_cl_so3;
     Pcl[camera_id] = P_cl;
     if (reset_prior)
     {
-      Rcl_prior[camera_id] = R_cl;
+      Rcl_prior[camera_id] = R_cl_so3;
       Pcl_prior[camera_id] = P_cl;
     }
   }

@@ -447,6 +447,12 @@ void VIOManager::setCameraCalibration(int camera_id, const std::string &topic, c
   ctx.topic = topic;
   ctx.camera_namespace = camera_namespace;
   ctx.Rcl << MAT_FROM_ARRAY(R);
+  if (!ctx.Rcl.allFinite() || ctx.Rcl.determinant() <= 0.0)
+    throw std::invalid_argument("camera Rcl must be finite with positive determinant");
+  Eigen::Quaterniond q_cl(ctx.Rcl);
+  if (!q_cl.coeffs().allFinite() || q_cl.norm() <= 1.0e-12)
+    throw std::invalid_argument("camera Rcl cannot be projected to SO(3)");
+  ctx.Rcl = q_cl.normalized().toRotationMatrix();
   ctx.Pcl << VEC_FROM_ARRAY(P);
 }
 
@@ -6505,8 +6511,8 @@ void VIOManager::buildCurrentCrossCameraPairs()
 
         updateFrameState(source, *state);
         updateFrameState(target, *state);
-        const SE3<double> T_source_w(source.Rcw, source.Pcw);
-        const SE3<double> T_target_w(target.Rcw, target.Pcw);
+        const SE3<double> &T_source_w = source.new_frame->T_f_w_;
+        const SE3<double> &T_target_w = target.new_frame->T_f_w_;
         const V3D source_view = T_source_w.inverse().translation() - point->pos_;
         const V3D target_view = T_target_w.inverse().translation() - point->pos_;
         if (source_view.norm() > 1.0e-9 && target_view.norm() > 1.0e-9)
@@ -7278,7 +7284,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
                             c, b.norm());
             if (usage_reference != nullptr && usage_reference->birth_pose_cov_.array().isFinite().all())
             {
-              const SE3<double> T_cur_w(ctx.Rcw, ctx.Pcw);
+              // updateFrameState() already projects the composed camera rotation to SO(3)
+              // when it creates T_f_w_. Reuse that valid pose instead of asking Sophus
+              // to construct an SE3 directly from the numerically approximate ctx.Rcw.
+              const SE3<double> &T_cur_w = ctx.new_frame->T_f_w_;
               const SE3<double> T_cur_ref = T_cur_w * usage_reference->T_f_w_.inverse();
               const M3D R = T_cur_ref.rotationMatrix();
               const V3D t = T_cur_ref.translation();
