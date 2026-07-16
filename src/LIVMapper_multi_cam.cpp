@@ -254,6 +254,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("vio.draw_rejected_points_en", false);
   try_declare.template operator()<bool>("vio.ncc_en", false);
   try_declare.template operator()<double>("vio.ncc_thre", 0.8);
+  try_declare.template operator()<std::vector<double>>("vio.ncc_thre_by_level", std::vector<double>{});
   try_declare.template operator()<bool>("vio.usage_stats_en", false);
   try_declare.template operator()<int>("vio.usage_stats_window", 100);
   try_declare.template operator()<bool>("vio.cross_camera_reference_en", false);
@@ -483,6 +484,7 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("vio.draw_rejected_points_en", draw_rejected_points_en);
   this->node->get_parameter("vio.ncc_en", ncc_en);
   this->node->get_parameter("vio.ncc_thre", ncc_thre);
+  this->node->get_parameter("vio.ncc_thre_by_level", ncc_thre_by_level);
   this->node->get_parameter("vio.usage_stats_en", usage_stats_en);
   this->node->get_parameter("vio.usage_stats_window", usage_stats_window);
   this->node->get_parameter("vio.cross_camera_reference_en", cross_camera_reference_en);
@@ -568,6 +570,15 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
 
   if (!std::isfinite(ncc_thre) || ncc_thre < -1.0 || ncc_thre > 1.0)
     throw std::runtime_error("vio.ncc_thre must be finite and in [-1, 1]");
+  if (ncc_thre_by_level.empty())
+    ncc_thre_by_level.assign(std::max(1, patch_pyrimid_level), ncc_thre);
+  else if (ncc_thre_by_level.size() == 1)
+    ncc_thre_by_level.assign(std::max(1, patch_pyrimid_level), ncc_thre_by_level.front());
+  else if (static_cast<int>(ncc_thre_by_level.size()) != std::max(1, patch_pyrimid_level))
+    throw std::runtime_error("vio.ncc_thre_by_level must contain one value or exactly vio.patch_pyrimid_level values, ordered L0 first");
+  for (double threshold : ncc_thre_by_level)
+    if (!std::isfinite(threshold) || threshold < -1.0 || threshold > 1.0)
+      throw std::runtime_error("every vio.ncc_thre_by_level value must be finite and in [-1, 1]");
   if (usage_stats_window <= 0) throw std::runtime_error("vio.usage_stats_window must be positive");
 
   if (num_cameras > 1 && colmap_output_en)
@@ -784,6 +795,7 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->draw_rejected_points_en = draw_rejected_points_en;
   vio_manager->ncc_en = ncc_en;
   vio_manager->ncc_thre = ncc_thre;
+  vio_manager->ncc_thre_by_level = ncc_thre_by_level;
   vio_manager->usage_stats_en = usage_stats_en;
   vio_manager->usage_stats_window = usage_stats_window;
   vio_manager->ref_patch_dump_en = ref_patch_dump_en;

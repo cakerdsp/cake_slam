@@ -74,6 +74,8 @@
       outlier_threshold: 1000
       ncc_en: true
       ncc_thre: 0.7
+      # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
+      ncc_thre_by_level: [0.7, 0.7]
       usage_stats_en: true
       usage_stats_window: 100
       img_point_cov: 1000

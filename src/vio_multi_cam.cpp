@@ -3576,7 +3576,7 @@ void VIOManager::recordCurrentCrossCameraUsage(const CurrentCrossCameraPair &pai
       ++cell.ekf_patches;
       cell.ekf_residuals += residuals;
       UsageMetricStats &metric = cell.levels[pyramid_level].stages[kUsageEkfStage];
-      const bool valid = pyramid_level < static_cast<int>(pair.level_valid.size()) && pair.level_valid[pyramid_level] != 0;
+      const bool valid = pyramid_level < static_cast<int>(pair.level_active.size()) && pair.level_active[pyramid_level] != 0;
       const double ncc = pyramid_level < static_cast<int>(pair.ncc_levels.size())
                              ? pair.ncc_levels[pyramid_level] : std::numeric_limits<double>::quiet_NaN();
       const double sse = pyramid_level < static_cast<int>(pair.sse_levels.size())
@@ -3585,7 +3585,7 @@ void VIOManager::recordCurrentCrossCameraUsage(const CurrentCrossCameraPair &pai
       {
         ++metric.ncc_count;
         metric.ncc_sum += ncc;
-        if (ncc >= ncc_thre) ++metric.ncc_gate_pass_count;
+        if (ncc >= nccThresholdForLevel(pyramid_level)) ++metric.ncc_gate_pass_count;
         const int bin = usageNccBin(ncc);
         if (bin >= 0) ++metric.ncc_hist[bin];
       }
@@ -3604,14 +3604,20 @@ void VIOManager::recordCurrentCrossCameraUsage(const CurrentCrossCameraPair &pai
     if (stage == kUsageAcceptedStage)
     {
       ++cell.accepted;
-      cell.theoretical_residuals += static_cast<long long>(patch_size_total) * level_count;
+      const int active_levels = static_cast<int>(std::count_if(
+          pair.level_active.begin(), pair.level_active.end(), [](uint8_t active) { return active != 0; }));
+      cell.theoretical_residuals += static_cast<long long>(patch_size_total) * active_levels;
     }
     bool all_valid = true;
+    bool all_gate_pass = true;
     double ncc_min = std::numeric_limits<double>::infinity();
     double ncc_sum = 0.0;
+    double threshold_sum = 0.0;
     for (int level = 0; level < level_count; ++level)
     {
-      const bool valid = level < static_cast<int>(pair.level_valid.size()) && pair.level_valid[level] != 0;
+      const std::vector<uint8_t> &stage_mask =
+          stage == kUsagePreGateStage ? pair.level_valid : pair.level_active;
+      const bool valid = level < static_cast<int>(stage_mask.size()) && stage_mask[level] != 0;
       const double ncc = level < static_cast<int>(pair.ncc_levels.size())
                              ? pair.ncc_levels[level] : std::numeric_limits<double>::quiet_NaN();
       const double sse = level < static_cast<int>(pair.sse_levels.size())
@@ -3623,7 +3629,10 @@ void VIOManager::recordCurrentCrossCameraUsage(const CurrentCrossCameraPair &pai
       {
         ++metric.ncc_count;
         metric.ncc_sum += ncc;
-        if (ncc >= ncc_thre) ++metric.ncc_gate_pass_count;
+        const double threshold = nccThresholdForLevel(level);
+        if (ncc >= threshold) ++metric.ncc_gate_pass_count;
+        else all_gate_pass = false;
+        threshold_sum += threshold;
         const int bin = usageNccBin(ncc);
         if (bin >= 0) ++metric.ncc_hist[bin];
         ncc_min = std::min(ncc_min, ncc);
@@ -3645,8 +3654,8 @@ void VIOManager::recordCurrentCrossCameraUsage(const CurrentCrossCameraPair &pai
       ++joint.count;
       joint.ncc_min_sum += ncc_min;
       joint.ncc_macro_sum += macro;
-      if (ncc_min >= ncc_thre) ++joint.min_gate_pass_count;
-      if (macro >= ncc_thre) ++joint.macro_gate_pass_count;
+      if (all_gate_pass) ++joint.min_gate_pass_count;
+      if (macro >= threshold_sum / level_count) ++joint.macro_gate_pass_count;
       const int min_bin = usageNccBin(ncc_min);
       const int macro_bin = usageNccBin(macro);
       if (min_bin >= 0) ++joint.ncc_min_hist[min_bin];
@@ -3697,7 +3706,6 @@ void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature 
   const int footprint_bin = usageFootprintBin(A_cur_ref);
   const int anisotropy_bin = usageAnisotropyBin(A_cur_ref);
   const bool cross_camera = ref_ftr.camera_id_ != ctx.camera_id;
-  const long long residual_count = static_cast<long long>(patch_size_total) * std::max(1, patch_pyrimid_level);
   const int level_count = std::max(1, patch_pyrimid_level);
 
   auto updateCell = [&](UsageStatsCell &cell) {
@@ -3709,10 +3717,14 @@ void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature 
     }
 
     ++cell.accepted;
-    cell.theoretical_residuals += residual_count;
+    const int active_levels = static_cast<int>(std::count_if(
+        level_valid.begin(), level_valid.end(), [](uint8_t valid) { return valid != 0; }));
+    cell.theoretical_residuals += static_cast<long long>(patch_size_total) * active_levels;
     bool all_level_valid = true;
+    bool all_gate_pass = true;
     double ncc_min = std::numeric_limits<double>::infinity();
     double ncc_sum = 0.0;
+    double threshold_sum = 0.0;
     for (int level = 0; level < level_count; ++level)
     {
       const bool valid = level < static_cast<int>(level_valid.size()) && level_valid[level] != 0;
@@ -3731,7 +3743,10 @@ void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature 
       {
         ++metric.ncc_count;
         metric.ncc_sum += ncc;
-        if (ncc >= ncc_thre) ++metric.ncc_gate_pass_count;
+        const double threshold = nccThresholdForLevel(level);
+        if (ncc >= threshold) ++metric.ncc_gate_pass_count;
+        else all_gate_pass = false;
+        threshold_sum += threshold;
         const int ncc_bin = usageNccBin(ncc);
         if (ncc_bin >= 0) ++metric.ncc_hist[ncc_bin];
         ncc_min = std::min(ncc_min, ncc);
@@ -3755,8 +3770,8 @@ void VIOManager::recordUsageObservation(const PerCameraData &ctx, const Feature 
       ++joint.count;
       joint.ncc_min_sum += ncc_min;
       joint.ncc_macro_sum += ncc_macro;
-      if (ncc_min >= ncc_thre) ++joint.min_gate_pass_count;
-      if (ncc_macro >= ncc_thre) ++joint.macro_gate_pass_count;
+      if (all_gate_pass) ++joint.min_gate_pass_count;
+      if (ncc_macro >= threshold_sum / level_count) ++joint.macro_gate_pass_count;
       const int min_bin = usageNccBin(ncc_min);
       const int macro_bin = usageNccBin(ncc_macro);
       if (min_bin >= 0) ++joint.ncc_min_hist[min_bin];
@@ -3821,8 +3836,10 @@ void VIOManager::recordUsagePreGateMetrics(const PerCameraData &ctx, const Featu
   auto updateCell = [&](UsageStatsCell &cell) {
     cell.ensureLevels(level_count);
     bool all_level_valid = true;
+    bool all_gate_pass = true;
     double ncc_min = std::numeric_limits<double>::infinity();
     double ncc_sum = 0.0;
+    double threshold_sum = 0.0;
     for (int level = 0; level < level_count; ++level)
     {
       const bool valid = level < static_cast<int>(level_valid.size()) && level_valid[level] != 0;
@@ -3841,7 +3858,10 @@ void VIOManager::recordUsagePreGateMetrics(const PerCameraData &ctx, const Featu
       {
         ++metric.ncc_count;
         metric.ncc_sum += ncc;
-        if (ncc >= ncc_thre) ++metric.ncc_gate_pass_count;
+        const double threshold = nccThresholdForLevel(level);
+        if (ncc >= threshold) ++metric.ncc_gate_pass_count;
+        else all_gate_pass = false;
+        threshold_sum += threshold;
         const int ncc_bin = usageNccBin(ncc);
         if (ncc_bin >= 0) ++metric.ncc_hist[ncc_bin];
         ncc_min = std::min(ncc_min, ncc);
@@ -3865,8 +3885,8 @@ void VIOManager::recordUsagePreGateMetrics(const PerCameraData &ctx, const Featu
       ++joint.count;
       joint.ncc_min_sum += ncc_min;
       joint.ncc_macro_sum += ncc_macro;
-      if (ncc_min >= ncc_thre) ++joint.min_gate_pass_count;
-      if (ncc_macro >= ncc_thre) ++joint.macro_gate_pass_count;
+      if (all_gate_pass) ++joint.min_gate_pass_count;
+      if (ncc_macro >= threshold_sum / level_count) ++joint.macro_gate_pass_count;
       const int min_bin = usageNccBin(ncc_min);
       const int macro_bin = usageNccBin(ncc_macro);
       if (min_bin >= 0) ++joint.ncc_min_hist[min_bin];
@@ -3936,7 +3956,7 @@ void VIOManager::recordUsageEkfContribution(const PerCameraData &ctx, const Feat
     {
       ++metric.ncc_count;
       metric.ncc_sum += ncc;
-      if (ncc >= ncc_thre) ++metric.ncc_gate_pass_count;
+      if (ncc >= nccThresholdForLevel(pyramid_level)) ++metric.ncc_gate_pass_count;
       const int ncc_bin = usageNccBin(ncc);
       if (ncc_bin >= 0) ++metric.ncc_hist[ncc_bin];
     }
@@ -4313,7 +4333,7 @@ void VIOManager::printUsageStatsTable(int frame_id)
       printDivider();
       printLine(section_title);
       printDivider();
-      printLine("Category               CandidateAttempts  NCCReady  Ready%  AcceptedTracks  Acc%  EKFLvlPatch   EKFRes  EKFRes/F  EKF/Theory%");
+      printLine("Category               CandidateAttempts AllLvlRdy  Ready%  AcceptedTracks  Acc%  EKFLvlPatch   EKFRes  EKFRes/F  EKF/Theory%");
       printDivider();
     };
 
@@ -4550,6 +4570,14 @@ void VIOManager::printUsageStatsTable(int frame_id)
 
     printDivider();
     printLine(title);
+    std::ostringstream ncc_threshold_text;
+    ncc_threshold_text << "[";
+    for (int level = 0; level < std::max(1, patch_pyrimid_level); ++level)
+    {
+      if (level > 0) ncc_threshold_text << ",";
+      ncc_threshold_text << formatDouble(nccThresholdForLevel(level), 3);
+    }
+    ncc_threshold_text << "]";
     std::ostringstream summary;
     summary << "frame=" << frame_id << " " << frame_label << "=" << frame_count
             << " candidate_attempts=" << total.candidates
@@ -4558,10 +4586,10 @@ void VIOManager::printUsageStatsTable(int frame_id)
             << " actual_ekf_residuals=" << total.ekf_residuals
             << " pyramid_levels=" << std::max(1, patch_pyrimid_level)
             << " ncc_gate=" << (ncc_en ? "on" : "off")
-            << " ncc_threshold=" << formatDouble(ncc_thre, 3)
+            << " ncc_thresholds_L0_first=" << ncc_threshold_text.str()
             << " current_cross_residual=" << (cross_camera_current_residual_en ? "on" : "off");
     printLine(summary.str());
-    printLine("metric_scope: PRE_GATE is after geometry/warp construction but before NCC/photometric gates; POST_GATE is accepted retrieval; EKF_USED is the same metric restricted to admitted level-patches");
+    printLine("metric_scope: AllLvlReady requires every configured level to have valid PRE_GATE NCC; each level is gated independently; POST_GATE and EKF_USED contain only that level's admitted patches");
 
     printFlowHeader("TRACK_FLOW_BY_GROUP");
     printFlowRow("same_cam", same_camera);
@@ -5072,6 +5100,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     std::vector<double> level_sse;
     std::vector<double> level_ncc;
     std::vector<uint8_t> level_valid;
+    std::vector<uint8_t> level_active;
     float error = 0.0f;
     double inverse_reference_exposure = 0.0;
     double ncc = std::numeric_limits<double>::quiet_NaN();
@@ -5414,10 +5443,12 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
 
     const double current_core_start = omp_get_wtime();
     const int usage_levels = std::max(1, patch_pyrimid_level);
-    vector<float> current_core_all(usage_stats_en ? warp_len : patch_size_total, 0.0f);
+    const bool evaluate_all_levels = ncc_en || usage_stats_en;
+    vector<float> current_core_all(evaluate_all_levels ? warp_len : patch_size_total, 0.0f);
     result.level_sse.assign(usage_levels, std::numeric_limits<double>::quiet_NaN());
     result.level_ncc.assign(usage_levels, std::numeric_limits<double>::quiet_NaN());
     result.level_valid.assign(usage_levels, 0);
+    result.level_active.assign(usage_levels, 0);
     const V3D point_vcur = result.track.T_vcur_w_seed * pt->pos_;
     if (point_vcur[2] <= virtual_min_z)
     {
@@ -5437,7 +5468,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       result.rejection = VIRTUAL_REJECT_CURRENT_CORE;
       continue;
     }
-    if (usage_stats_en)
+    if (evaluate_all_levels)
     {
       for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
       {
@@ -5461,7 +5492,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     }
     result.error = static_cast<float>(level0_error);
     result.level_sse[0] = level0_error;
-    if (usage_stats_en)
+    if (evaluate_all_levels)
     {
       for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
       {
@@ -5481,7 +5512,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     {
       result.level_ncc[0] = calculateNCC(result.warped_reference.data(), current_core_all.data(), patch_size_total);
       result.ncc = result.level_ncc[0];
-      if (usage_stats_en)
+      if (evaluate_all_levels)
       {
         for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
         {
@@ -5491,19 +5522,48 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
               calculateNCC(result.warped_reference.data() + offset, current_core_all.data() + offset, patch_size_total);
         }
       }
-      if (ncc_en && result.ncc < ncc_thre)
+    }
+    bool any_level_active = false;
+    bool any_photometric_reject = false;
+    if (ncc_en)
+    {
+      for (int level = 0; level < usage_levels; ++level)
       {
-        result.current_core_time = omp_get_wtime() - current_core_start;
-        result.rejection = VIRTUAL_REJECT_NCC;
-        continue;
+        if (result.level_valid[level] == 0 || !std::isfinite(result.level_ncc[level]) ||
+            !std::isfinite(result.level_sse[level]))
+          continue;
+        if (result.level_ncc[level] < nccThresholdForLevel(level)) continue;
+        if (result.level_sse[level] > outlier_threshold * patch_size_total)
+        {
+          any_photometric_reject = true;
+          continue;
+        }
+        result.level_active[level] = 1;
+        any_level_active = true;
       }
     }
-    if (result.error > outlier_threshold * patch_size_total)
+    else if (result.error <= outlier_threshold * patch_size_total)
+    {
+      std::fill(result.level_active.begin(), result.level_active.end(), 1);
+      any_level_active = true;
+    }
+    else
+    {
+      any_photometric_reject = true;
+    }
+    if (!any_level_active)
     {
       result.current_core_time = omp_get_wtime() - current_core_start;
-      result.rejection = VIRTUAL_REJECT_PHOTOMETRIC;
+      result.rejection = any_photometric_reject ? VIRTUAL_REJECT_PHOTOMETRIC : VIRTUAL_REJECT_NCC;
       continue;
     }
+    if (result.level_active[0] == 0)
+      for (int level = 1; level < usage_levels; ++level)
+        if (result.level_active[level] != 0)
+        {
+          result.error = static_cast<float>(result.level_sse[level]);
+          break;
+        }
     result.current_core_time = omp_get_wtime() - current_core_start;
 
     if (runtime_support_dump_en)
@@ -5604,7 +5664,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     {
       const VirtualCandidate &candidate = candidates[candidate_index];
       recordUsageObservation(ctx, *candidate.reference, *candidate.point, candidate.current_raw_center_px,
-                             result.track.A_cur_ref, true, result.level_sse, result.level_ncc, result.level_valid);
+                             result.track.A_cur_ref, true, result.level_sse, result.level_ncc, result.level_active);
     }
     const VirtualCandidate &accepted_candidate = candidates[candidate_index];
     if (runtime_support_dump_en && accepted_candidate.point != nullptr)
@@ -5631,11 +5691,12 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     ctx.visual_submap->errors.push_back(result.error);
     ctx.visual_submap->warp_patch.push_back(std::move(result.warped_reference));
     ctx.visual_submap->inv_expo_list.push_back(result.inverse_reference_exposure);
+    ctx.visual_submap->level_active.push_back(result.level_active);
     if (usage_stats_en)
     {
       ctx.visual_submap->usage_ncc_levels.push_back(result.level_ncc);
       ctx.visual_submap->usage_sse_levels.push_back(result.level_sse);
-      ctx.visual_submap->usage_level_valid.push_back(result.level_valid);
+      ctx.visual_submap->usage_level_valid.push_back(result.level_active);
     }
     ctx.visual_submap->virtual_track_patches.push_back(std::move(result.track));
     appendManagedSubmapMetadata(ctx, *candidates[candidate_index].point,
@@ -6192,6 +6253,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       std::vector<double> usage_sse_levels(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
       std::vector<double> usage_ncc_levels(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
       std::vector<uint8_t> usage_level_valid(std::max(1, patch_pyrimid_level), 0);
+      std::vector<uint8_t> level_active(std::max(1, patch_pyrimid_level), 0);
       getImagePatch(ctx, img, pc, patch_buffer.data(), 0);
       usage_level_valid[0] = 1;
 
@@ -6207,8 +6269,9 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       error = static_cast<float>(level0_error);
       usage_sse_levels[0] = level0_error;
 
+      const bool evaluate_all_levels = ncc_en || usage_stats_en;
       std::vector<float> current_patch_all;
-      if (usage_stats_en)
+      if (evaluate_all_levels)
       {
         current_patch_all.assign(warp_len, 0.0f);
         std::copy(patch_buffer.begin(), patch_buffer.begin() + patch_size_total, current_patch_all.begin());
@@ -6234,7 +6297,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       {
         usage_ncc_levels[0] = calculateNCC(patch_wrap.data(), patch_buffer.data(), patch_size_total);
         usage_ncc = usage_ncc_levels[0];
-        if (usage_stats_en)
+        if (evaluate_all_levels)
         {
           for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
           {
@@ -6243,20 +6306,40 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
                 calculateNCC(patch_wrap.data() + offset, current_patch_all.data() + offset, patch_size_total);
           }
         }
-        if (usage_stats_en) recordUsagePreGateMetrics(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero,
-                                                      usage_sse_levels, usage_ncc_levels, usage_level_valid);
-        if (ncc_en && usage_ncc < ncc_thre)
+      }
+      if (usage_stats_en) recordUsagePreGateMetrics(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero,
+                                                     usage_sse_levels, usage_ncc_levels, usage_level_valid);
+      bool any_level_active = false;
+      if (ncc_en)
+      {
+        for (int level = 0; level < std::max(1, patch_pyrimid_level); ++level)
         {
-          // grid_num[i] = TYPE_UNKNOWN;
-          recordManagedReferenceRejection(*pt, *ref_ftr, ctx.new_frame->id_, ctx.camera_id);
-          continue;
+          if (usage_level_valid[level] == 0 || !std::isfinite(usage_ncc_levels[level]) ||
+              !std::isfinite(usage_sse_levels[level]))
+            continue;
+          if (usage_ncc_levels[level] < nccThresholdForLevel(level)) continue;
+          if (usage_sse_levels[level] > outlier_threshold * patch_size_total) continue;
+          level_active[level] = 1;
+          any_level_active = true;
         }
       }
-      if (error > outlier_threshold * patch_size_total)
+      else if (error <= outlier_threshold * patch_size_total)
+      {
+        std::fill(level_active.begin(), level_active.end(), 1);
+        any_level_active = true;
+      }
+      if (!any_level_active)
       {
         recordManagedReferenceRejection(*pt, *ref_ftr, ctx.new_frame->id_, ctx.camera_id);
         continue;
       }
+      if (level_active[0] == 0)
+        for (int level = 1; level < std::max(1, patch_pyrimid_level); ++level)
+          if (level_active[level] != 0)
+          {
+            error = static_cast<float>(usage_sse_levels[level]);
+            break;
+          }
 
       if (runtime_support_dump_en && pt != nullptr)
       {
@@ -6279,7 +6362,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
         }
       }
       if (usage_stats_en) recordUsageObservation(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero, true,
-                                                 usage_sse_levels, usage_ncc_levels, usage_level_valid);
+                                                  usage_sse_levels, usage_ncc_levels, level_active);
       ctx.visual_submap->voxel_points.push_back(pt);
       ctx.visual_submap->reference_features.push_back(ref_ftr);
       ctx.visual_submap->propa_errors.push_back(error);
@@ -6288,11 +6371,12 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       ctx.visual_submap->errors.push_back(error);
       ctx.visual_submap->warp_patch.push_back(patch_wrap);
       ctx.visual_submap->inv_expo_list.push_back(ref_ftr->inv_expo_time_);
+      ctx.visual_submap->level_active.push_back(level_active);
       if (usage_stats_en)
       {
         ctx.visual_submap->usage_ncc_levels.push_back(usage_ncc_levels);
         ctx.visual_submap->usage_sse_levels.push_back(usage_sse_levels);
-        ctx.visual_submap->usage_level_valid.push_back(usage_level_valid);
+        ctx.visual_submap->usage_level_valid.push_back(level_active);
       }
       appendManagedSubmapMetadata(ctx, *pt, *ref_ftr);
       if (reference_rank > 0) ++visual_map_manage_stats_.fallback_accepted;
@@ -6428,7 +6512,7 @@ void VIOManager::buildCurrentCrossCameraPairs()
     }
   }
 
-  const int metric_levels = usage_stats_en ? std::max(1, patch_pyrimid_level) : 1;
+  const int metric_levels = std::max(1, patch_pyrimid_level);
   for (auto &entry : observations_by_point)
   {
     VisualPoint *point = entry.first;
@@ -6460,6 +6544,7 @@ void VIOManager::buildCurrentCrossCameraPairs()
         pair.sse_levels.assign(metric_levels, std::numeric_limits<double>::quiet_NaN());
         pair.ncc_levels.assign(metric_levels, std::numeric_limits<double>::quiet_NaN());
         pair.level_valid.assign(metric_levels, 0);
+        pair.level_active.assign(metric_levels, 0);
 
         updateFrameState(source, *state);
         updateFrameState(target, *state);
@@ -6575,12 +6660,31 @@ void VIOManager::buildCurrentCrossCameraPairs()
         }
 
         recordCurrentCrossCameraUsage(pair, kUsagePreGateStage);
-        const bool level0_valid = !pair.level_valid.empty() && pair.level_valid[0] != 0;
-        const bool ncc_pass = level0_valid && (!ncc_en ||
-            (std::isfinite(pair.ncc_levels[0]) && pair.ncc_levels[0] >= ncc_thre));
-        const bool photometric_pass = level0_valid && std::isfinite(pair.sse_levels[0]) &&
-            pair.sse_levels[0] <= outlier_threshold * patch_size_total;
-        pair.accepted = affine_ok && ncc_pass && photometric_pass;
+        bool any_level_active = false;
+        if (ncc_en)
+        {
+          for (int level = 0; level < metric_levels; ++level)
+          {
+            const bool valid = pair.level_valid[level] != 0 &&
+                               std::isfinite(pair.ncc_levels[level]) &&
+                               std::isfinite(pair.sse_levels[level]);
+            if (valid && pair.ncc_levels[level] >= nccThresholdForLevel(level) &&
+                pair.sse_levels[level] <= outlier_threshold * patch_size_total)
+            {
+              pair.level_active[level] = 1;
+              any_level_active = true;
+            }
+          }
+        }
+        else if (!pair.level_valid.empty() && pair.level_valid[0] != 0 &&
+                 std::isfinite(pair.sse_levels[0]) &&
+                 pair.sse_levels[0] <= outlier_threshold * patch_size_total)
+        {
+          pair.level_active = pair.level_valid;
+          any_level_active = std::any_of(pair.level_active.begin(), pair.level_active.end(),
+                                         [](uint8_t active) { return active != 0; });
+        }
+        pair.accepted = affine_ok && any_level_active;
         if (pair.accepted) recordCurrentCrossCameraUsage(pair, kUsageAcceptedStage);
         current_cross_camera_pairs_.push_back(std::move(pair));
       }
@@ -6789,6 +6893,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
         {
           VisualPoint *point = ctx.visual_submap->voxel_points[point_index];
           if (point == nullptr) continue;
+          if (point_index < static_cast<int>(ctx.visual_submap->level_active.size()) &&
+              (level >= static_cast<int>(ctx.visual_submap->level_active[point_index].size()) ||
+               ctx.visual_submap->level_active[point_index][level] == 0))
+            continue;
           const V3D point_i_for_time = Rwi.transpose() * (point->pos_ - Pwi);
           M3D point_i_for_time_hat;
           point_i_for_time_hat << SKEW_SYM_MATRX(point_i_for_time);
@@ -7210,6 +7318,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           for (CurrentCrossCameraPair &pair : current_cross_camera_pairs_)
           {
         if (!pair.accepted || pair.point == nullptr) continue;
+        if (level >= static_cast<int>(pair.level_active.size()) || pair.level_active[level] == 0) continue;
         PerCameraData &source = cameras_[pair.source_camera_id];
         PerCameraData &target = cameras_[pair.target_camera_id];
         if (source.new_frame == nullptr || target.new_frame == nullptr ||

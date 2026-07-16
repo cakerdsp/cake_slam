@@ -98,6 +98,8 @@ struct SubSparseMap
   vector<vector<double>> usage_ncc_levels;
   vector<vector<double>> usage_sse_levels;
   vector<vector<uint8_t>> usage_level_valid;
+  // Runtime admission mask indexed by [track][pyramid level].
+  vector<vector<uint8_t>> level_active;
 
   SubSparseMap()
   {
@@ -118,6 +120,7 @@ struct SubSparseMap
     usage_ncc_levels.reserve(SIZE_LARGE);
     usage_sse_levels.reserve(SIZE_LARGE);
     usage_level_valid.reserve(SIZE_LARGE);
+    level_active.reserve(SIZE_LARGE);
   };
 
   void reset()
@@ -139,6 +142,7 @@ struct SubSparseMap
     usage_ncc_levels.clear();
     usage_sse_levels.clear();
     usage_level_valid.clear();
+    level_active.clear();
   }
 };
 
@@ -411,6 +415,13 @@ public:
   int max_iterations, total_points;
 
   double img_point_cov, outlier_threshold, ncc_thre = 0.8;
+  std::vector<double> ncc_thre_by_level;
+  double nccThresholdForLevel(int level) const
+  {
+    return level >= 0 && level < static_cast<int>(ncc_thre_by_level.size())
+               ? ncc_thre_by_level[level]
+               : ncc_thre;
+  }
 
   double virtual_focal_length = 300.0;
   int virtual_patch_margin = 4;
@@ -663,6 +674,7 @@ public:
     std::vector<double> sse_levels;
     std::vector<double> ncc_levels;
     std::vector<uint8_t> level_valid;
+    std::vector<uint8_t> level_active;
     double hessian_weight = 1.0;
     int view_angle_bin = -1;
     int footprint_bin = -1;
