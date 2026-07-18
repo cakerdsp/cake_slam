@@ -6,6 +6,11 @@
       require_all_cameras: true
       multi_cam_sync_queue_size: 5
       multi_cam_sync_tolerance_ms: 40.0
+      # Prior-normalized directional filtering for both sequential LIO and VIO updates.
+      # false preserves the original estimator path exactly.
+      directional_update_en: false
+      directional_drop_variance_reduction: 0.05
+      directional_full_variance_reduction: 0.50
       lid_topic: "/livox/lidar"
       imu_topic: "/livox/imu"
       img_en: 1

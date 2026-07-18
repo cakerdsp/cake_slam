@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "vio_multi_cam.h"
+#include "directional_update.h"
 
 #include <Eigen/Eigenvalues>
 
@@ -6737,11 +6738,16 @@ void VIOManager::computeJacobianAndUpdateEKF()
       total_observations >= online_extrinsic_min_tracks;
   const bool allow_extrinsic_rotation = online_extrinsic_active && online_extrinsic_rot_en;
   const bool allow_extrinsic_translation = online_extrinsic_active && online_extrinsic_trans_en;
+  const StatesGroup state_before_visual_update = *state;
   const Eigen::MatrixXd cov_before_visual_update = state->cov;
   std::vector<uint8_t> final_active_extrinsic_rot(state->num_cameras, 0);
   std::vector<uint8_t> final_active_extrinsic_trans(state->num_cameras, 0);
   std::vector<uint8_t> final_active_time_groups(state->num_time_offset_groups, 0);
   Eigen::MatrixXd rollback_G = G;
+  directional_update::Result final_directional_result;
+  directional_update::Result rollback_directional_result;
+  Eigen::MatrixXd final_directional_posterior_covariance;
+  Eigen::MatrixXd rollback_directional_posterior_covariance;
   std::vector<uint8_t> rollback_active_extrinsic_rot = final_active_extrinsic_rot;
   std::vector<uint8_t> rollback_active_extrinsic_trans = final_active_extrinsic_trans;
   std::vector<uint8_t> rollback_active_time_groups = final_active_time_groups;
@@ -6813,6 +6819,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
       long long usage_iter_residuals_same = 0;
       long long usage_iter_residuals_cross = 0;
       long long usage_iter_residuals_current_cross = 0;
+      Eigen::MatrixXd usage_effective_h_all;
+      Eigen::MatrixXd usage_effective_h_same;
+      Eigen::MatrixXd usage_effective_h_cross;
+      Eigen::MatrixXd usage_effective_h_current_cross;
+      directional_update::Result iteration_directional_result;
       double error = 0.0;
       int measurement_count = 0;
       for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
@@ -7476,6 +7487,67 @@ void VIOManager::computeJacobianAndUpdateEKF()
         linearize_current_cross_camera();
       }
 
+      if (usage_stats_en)
+      {
+        usage_effective_h_all = usage_iter_h_all;
+        usage_effective_h_same = usage_iter_h_same;
+        usage_effective_h_cross = usage_iter_h_cross;
+        if (cross_camera_current_residual_en)
+          usage_effective_h_current_cross = usage_iter_h_current_cross;
+      }
+
+      if (measurement_count > 0 && directional_update_en)
+      {
+        if (!std::isfinite(img_point_cov) || img_point_cov <= 0.0 ||
+            !directional_update::filterInformation(
+                state->cov, hessian / img_point_cov, gradient / img_point_cov,
+                directional_drop_variance_reduction,
+                directional_full_variance_reduction,
+                iteration_directional_result))
+        {
+          *state = state_before_visual_update;
+          G.setZero();
+          syncCameraExtrinsicsFromState(*state);
+          const std::string reason = iteration_directional_result.error.empty()
+              ? "img_point_cov must be finite and positive"
+              : iteration_directional_result.error;
+          std::cerr << "[ Directional VIO ] update rejected: " << reason << std::endl;
+          return;
+        }
+        hessian = iteration_directional_result.information * img_point_cov;
+        gradient = iteration_directional_result.information_vector * img_point_cov;
+
+        if (usage_stats_en)
+        {
+          std::string component_error;
+          const bool components_valid =
+              directional_update::filterInformationComponent(
+                  usage_iter_h_all, iteration_directional_result,
+                  usage_effective_h_all, component_error) &&
+              directional_update::filterInformationComponent(
+                  usage_iter_h_same, iteration_directional_result,
+                  usage_effective_h_same, component_error) &&
+              directional_update::filterInformationComponent(
+                  usage_iter_h_cross, iteration_directional_result,
+                  usage_effective_h_cross, component_error) &&
+              (!cross_camera_current_residual_en ||
+               directional_update::filterInformationComponent(
+                   usage_iter_h_current_cross, iteration_directional_result,
+                   usage_effective_h_current_cross, component_error));
+          if (!components_valid)
+          {
+            *state = state_before_visual_update;
+            G.setZero();
+            syncCameraExtrinsicsFromState(*state);
+            std::cerr << "[ Directional VIO ] usage-information filtering rejected: "
+                      << component_error << std::endl;
+            return;
+          }
+        }
+      }
+
+      // Calibration regularizers are intentionally excluded from observability
+      // classification and added only after filtering the visual measurements.
       if (online_extrinsic_active && online_extrinsic_prior_factor_en)
         applyOnlineExtrinsicPriors(hessian, gradient, allow_extrinsic_rotation, allow_extrinsic_translation);
       if (online_time_offset_en)
@@ -7510,6 +7582,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
         usage_final_residuals_same = rollback_usage_final_residuals_same;
         usage_final_residuals_cross = rollback_usage_final_residuals_cross;
         usage_final_residuals_current_cross = rollback_usage_final_residuals_current_cross;
+        final_directional_result = rollback_directional_result;
+        final_directional_posterior_covariance = rollback_directional_posterior_covariance;
         syncCameraExtrinsicsFromState(*state);
         break;
       }
@@ -7531,11 +7605,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
       rollback_usage_final_residuals_current_cross = usage_final_residuals_current_cross;
       if (usage_stats_en)
       {
-        usage_final_h_base = hessian - usage_iter_h_all;
-        usage_final_h_same = usage_iter_h_same;
-        usage_final_h_cross = usage_iter_h_cross;
+        usage_final_h_base = hessian - usage_effective_h_all;
+        usage_final_h_same = usage_effective_h_same;
+        usage_final_h_cross = usage_effective_h_cross;
         if (cross_camera_current_residual_en)
-          usage_final_h_current_cross = usage_iter_h_current_cross;
+          usage_final_h_current_cross = usage_effective_h_current_cross;
         usage_final_patches_all = usage_iter_patches_all;
         usage_final_patches_same = usage_iter_patches_same;
         usage_final_patches_cross = usage_iter_patches_cross;
@@ -7560,11 +7634,39 @@ void VIOManager::computeJacobianAndUpdateEKF()
       rollback_last_max_rot_update_deg = last_max_rot_update_deg;
       rollback_last_max_trans_update_cm = last_max_trans_update_cm;
       rollback_last_max_time_update_ms = last_max_time_update_ms;
+      rollback_directional_result = final_directional_result;
+      rollback_directional_posterior_covariance = final_directional_posterior_covariance;
       deactivateInactiveCalibrationBlocks(solve_hessian, solve_gradient,
                                           active_extrinsic_rot,
                                           active_extrinsic_trans,
                                           active_time_groups);
-      Eigen::MatrixXd K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
+      Eigen::MatrixXd K1;
+      Eigen::MatrixXd solve_posterior_covariance;
+      std::string solve_error;
+      auto factorSolveSystem = [&]() {
+        if (directional_update_en)
+        {
+          if (!directional_update::posteriorCovariance(
+                  state->cov, solve_hessian / img_point_cov,
+                  solve_posterior_covariance, solve_error))
+            return false;
+          K1 = solve_posterior_covariance / img_point_cov;
+        }
+        else
+        {
+          K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
+        }
+        return true;
+      };
+      if (!factorSolveSystem())
+      {
+        *state = state_before_visual_update;
+        G.setZero();
+        syncCameraExtrinsicsFromState(*state);
+        std::cerr << "[ Directional VIO ] system factorization rejected: "
+                  << solve_error << std::endl;
+        return;
+      }
       G = K1 * solve_hessian;
       Eigen::VectorXd solution = -K1 * solve_gradient + prior_delta - G * prior_delta;
       auto zeroInactiveCalibrationInSolution = [&](Eigen::VectorXd &delta) {
@@ -7589,7 +7691,15 @@ void VIOManager::computeJacobianAndUpdateEKF()
       {
         std::vector<uint8_t> deactivate_time_groups = active_time_groups;
         deactivateCalibrationBlocks(solve_hessian, solve_gradient, true, deactivate_time_groups);
-        K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
+        if (!factorSolveSystem())
+        {
+          *state = state_before_visual_update;
+          G.setZero();
+          syncCameraExtrinsicsFromState(*state);
+          std::cerr << "[ Directional VIO ] trust-region system factorization rejected: "
+                    << solve_error << std::endl;
+          return;
+        }
         G = K1 * solve_hessian;
         solution = -K1 * solve_gradient + prior_delta - G * prior_delta;
         zeroInactiveCalibrationInSolution(solution);
@@ -7647,6 +7757,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
           }
         }
       }
+      if (directional_update_en)
+      {
+        final_directional_result = iteration_directional_result;
+        final_directional_posterior_covariance = solve_posterior_covariance;
+      }
       *state += solution;
       syncCameraExtrinsicsFromState(*state);
       update_ekf_time += omp_get_wtime() - update_start;
@@ -7678,11 +7793,39 @@ void VIOManager::computeJacobianAndUpdateEKF()
         break;
     }
   }
-  state->cov -= G * state->cov;
+  if (directional_update_en)
+  {
+    if (final_directional_posterior_covariance.rows() == state->stateDim() &&
+        final_directional_posterior_covariance.cols() == state->stateDim())
+    {
+      state->cov = final_directional_posterior_covariance;
+    }
+    else
+    {
+      state->cov = cov_before_visual_update;
+    }
+  }
+  else
+  {
+    state->cov -= G * state->cov;
+  }
   restoreInactiveCalibrationCovariance(cov_before_visual_update,
                                        final_active_extrinsic_rot,
                                        final_active_extrinsic_trans,
                                        final_active_time_groups);
+  if (directional_update_en)
+  {
+    state->cov = directional_update::symmetrize(state->cov);
+    if (final_directional_result.valid)
+    {
+      std::cout << "[ Directional VIO ] rho_max="
+                << final_directional_result.variance_reductions.maxCoeff()
+                << " rho_mean=" << final_directional_result.variance_reductions.mean()
+                << " active=" << final_directional_result.active_rank
+                << " full=" << final_directional_result.full_rank
+                << " dim=" << state->stateDim() << std::endl;
+    }
+  }
   recordUsagePoseFrameInfo(usage_prior_cov, state->cov, usage_final_h_base,
                            usage_final_h_same, usage_final_h_cross, usage_final_h_current_cross,
                            usage_final_patches_all, usage_final_residuals_all,

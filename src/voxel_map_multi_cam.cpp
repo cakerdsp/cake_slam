@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "voxel_map_multi_cam.h"
+#include "directional_update.h"
 using namespace Eigen;
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov)
 {
@@ -56,6 +57,9 @@ void loadVoxelConfig(rclcpp::Node::SharedPtr &node, VoxelMapConfig &voxel_config
   try_declare.template operator()<double>("lio.sigma_num", 3);
   try_declare.template operator()<double>("lio.beam_err", 0.02);
   try_declare.template operator()<double>("lio.dept_err", 0.05);
+  try_declare.template operator()<bool>("common.directional_update_en", false);
+  try_declare.template operator()<double>("common.directional_drop_variance_reduction", 0.05);
+  try_declare.template operator()<double>("common.directional_full_variance_reduction", 0.50);
 
   // Declaration of parameter of type std::vector<int> won't build, https://github.com/ros2/rclcpp/issues/1585  
   try_declare.template operator()<vector<int64_t>>("lio.layer_init_num", std::vector<int64_t>{5,5,5,5,5}); 
@@ -73,6 +77,9 @@ void loadVoxelConfig(rclcpp::Node::SharedPtr &node, VoxelMapConfig &voxel_config
   node->get_parameter("lio.sigma_num", voxel_config.sigma_num_);
   node->get_parameter("lio.beam_err", voxel_config.beam_err_);
   node->get_parameter("lio.dept_err", voxel_config.dept_err_);
+  node->get_parameter("common.directional_update_en", voxel_config.directional_update_en);
+  node->get_parameter("common.directional_drop_variance_reduction", voxel_config.directional_drop_variance_reduction);
+  node->get_parameter("common.directional_full_variance_reduction", voxel_config.directional_full_variance_reduction);
   node->get_parameter("lio.layer_init_num", voxel_config.layer_init_num_);
   node->get_parameter("lio.max_points_num", voxel_config.max_points_num_);
   node->get_parameter("lio.min_iterations", voxel_config.max_iterations_);
@@ -397,6 +404,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   Eigen::MatrixXd G = Eigen::MatrixXd::Zero(state_dim, state_dim);
   Eigen::MatrixXd H_T_H = Eigen::MatrixXd::Zero(state_dim, state_dim);
   const Eigen::MatrixXd I_STATE = Eigen::MatrixXd::Identity(state_dim, state_dim);
+  directional_update::Result final_directional_result;
+  Eigen::MatrixXd final_directional_posterior_covariance;
 
   bool flg_EKF_inited, flg_EKF_converged, EKF_stop_flg = 0;
   for (int iterCount = 0; iterCount < config_setting_.max_iterations_; iterCount++)
@@ -492,12 +501,57 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     // auto &&Hsub_T = Hsub.transpose();
     auto &&HTz = Hsub_T_R_inv * meas_vec;
     // fout_dbg<<"HTz: "<<HTz<<endl;
+    if (config_setting_.directional_update_en) H_T_H.setZero();
     H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
     // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
-    const Eigen::MatrixXd K_1 = (H_T_H + state_.cov.inverse()).inverse();
-    G.leftCols(6) = K_1.leftCols(6) * H_T_H.topLeftCorner(6, 6);
+    Eigen::VectorXd information_vector = Eigen::VectorXd::Zero(state_dim);
+    information_vector.head<6>() = HTz;
+    if (config_setting_.directional_update_en)
+    {
+      directional_update::Result filtered;
+      if (!directional_update::filterInformation(
+              state_.cov, H_T_H, information_vector,
+              config_setting_.directional_drop_variance_reduction,
+              config_setting_.directional_full_variance_reduction, filtered))
+      {
+        std::cerr << "[ Directional LIO ] update rejected: " << filtered.error << std::endl;
+        state_ = state_propagat;
+        return;
+      }
+      H_T_H = filtered.information;
+      information_vector = filtered.information_vector;
+      final_directional_result = filtered;
+    }
+    Eigen::MatrixXd K_1;
+    if (config_setting_.directional_update_en)
+    {
+      std::string covariance_error;
+      if (!directional_update::posteriorCovariance(
+              state_.cov, H_T_H, K_1, covariance_error))
+      {
+        std::cerr << "[ Directional LIO ] system factorization rejected: "
+                  << covariance_error << std::endl;
+        state_ = state_propagat;
+        return;
+      }
+      final_directional_posterior_covariance = K_1;
+    }
+    else
+    {
+      K_1 = (H_T_H + state_.cov.inverse()).inverse();
+    }
     auto vec = state_propagat - state_;
-    Eigen::VectorXd solution = K_1.leftCols(6) * HTz + vec - G.leftCols(6) * vec.head(6);
+    Eigen::VectorXd solution;
+    if (config_setting_.directional_update_en)
+    {
+      G = K_1 * H_T_H;
+      solution = K_1 * information_vector + vec - G * vec;
+    }
+    else
+    {
+      G.leftCols(6) = K_1.leftCols(6) * H_T_H.topLeftCorner(6, 6);
+      solution = K_1.leftCols(6) * HTz + vec - G.leftCols(6) * vec.head(6);
+    }
     int minRow, minCol;
     state_ += solution;
     auto rot_add = solution.block<3, 1>(0, 0);
@@ -514,7 +568,28 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     {
       /*** Covariance Update ***/
       // _state.cov = (I_STATE - G) * _state.cov;
-      state_.cov = (I_STATE - G) * state_.cov;
+      if (config_setting_.directional_update_en)
+      {
+        if (final_directional_posterior_covariance.rows() != state_dim ||
+            final_directional_posterior_covariance.cols() != state_dim)
+        {
+          std::cerr << "[ Directional LIO ] covariance update rejected: missing final posterior"
+                    << std::endl;
+          state_ = state_propagat;
+          return;
+        }
+        state_.cov = final_directional_posterior_covariance;
+        std::cout << "[ Directional LIO ] rho_max="
+                  << final_directional_result.variance_reductions.maxCoeff()
+                  << " rho_mean=" << final_directional_result.variance_reductions.mean()
+                  << " active=" << final_directional_result.active_rank
+                  << " full=" << final_directional_result.full_rank
+                  << " dim=" << state_dim << std::endl;
+      }
+      else
+      {
+        state_.cov = (I_STATE - G) * state_.cov;
+      }
       // total_distance += (_state.pos_end - position_last).norm();
       position_last_ = state_.pos_end;
       geoQuat_ = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));

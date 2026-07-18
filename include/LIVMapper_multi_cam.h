@@ -183,6 +183,9 @@ public:
   std::vector<double> ncc_thre_by_level;
   bool usage_stats_en = false;
   int usage_stats_window = 100;
+  bool directional_update_en = false;
+  double directional_drop_variance_reduction = 0.05;
+  double directional_full_variance_reduction = 0.50;
   int lidar_en = 1;
   bool is_first_frame = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;

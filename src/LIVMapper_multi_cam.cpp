@@ -186,6 +186,9 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<bool>("common.require_all_cameras", true);
   try_declare.template operator()<int>("common.multi_cam_sync_queue_size", 5);
   try_declare.template operator()<double>("common.multi_cam_sync_tolerance_ms", 0.0);
+  try_declare.template operator()<bool>("common.directional_update_en", false);
+  try_declare.template operator()<double>("common.directional_drop_variance_reduction", 0.05);
+  try_declare.template operator()<double>("common.directional_full_variance_reduction", 0.50);
 
   try_declare.template operator()<bool>("vio.normal_en", true);
   try_declare.template operator()<bool>("vio.inverse_composition_en", false);
@@ -346,11 +349,23 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   this->node->get_parameter("common.require_all_cameras", require_all_cameras);
   this->node->get_parameter("common.multi_cam_sync_queue_size", multi_cam_sync_queue_size);
   this->node->get_parameter("common.multi_cam_sync_tolerance_ms", multi_cam_sync_tolerance_ms);
+  this->node->get_parameter("common.directional_update_en", directional_update_en);
+  this->node->get_parameter("common.directional_drop_variance_reduction", directional_drop_variance_reduction);
+  this->node->get_parameter("common.directional_full_variance_reduction", directional_full_variance_reduction);
   if (num_cameras < 1) throw std::runtime_error("common.num_cameras must be at least 1");
   if (!require_all_cameras) throw std::runtime_error("partial camera frames are not supported; common.require_all_cameras must be true");
   if (multi_cam_sync_queue_size < 1) throw std::runtime_error("common.multi_cam_sync_queue_size must be at least 1");
   if (!std::isfinite(multi_cam_sync_tolerance_ms) || multi_cam_sync_tolerance_ms < 0.0)
     throw std::runtime_error("common.multi_cam_sync_tolerance_ms must be finite and non-negative");
+  if (directional_update_en &&
+      (!std::isfinite(directional_drop_variance_reduction) ||
+       !std::isfinite(directional_full_variance_reduction) ||
+       directional_drop_variance_reduction < 0.0 ||
+       directional_full_variance_reduction > 1.0 ||
+       directional_full_variance_reduction <= directional_drop_variance_reduction))
+    throw std::runtime_error(
+        "directional thresholds must satisfy 0 <= common.directional_drop_variance_reduction "
+        "< common.directional_full_variance_reduction <= 1");
 
   camera_configs.resize(num_cameras);
   last_timestamp_img_by_camera.assign(num_cameras, -1.0);
@@ -752,6 +767,9 @@ void LIVMapper::initializeComponents(rclcpp::Node::SharedPtr &node)
   vio_manager->raw_camera_model_jacobian_en = raw_camera_model_jacobian_en && !virtual_fisheye_patch_en;
   vio_manager->cross_camera_reference_en = cross_camera_reference_en;
   vio_manager->cross_camera_current_residual_en = cross_camera_current_residual_en;
+  vio_manager->directional_update_en = directional_update_en;
+  vio_manager->directional_drop_variance_reduction = directional_drop_variance_reduction;
+  vio_manager->directional_full_variance_reduction = directional_full_variance_reduction;
   vio_manager->online_extrinsic_en = online_extrinsic_en;
   vio_manager->online_extrinsic_rot_en = online_extrinsic_rot_en;
   vio_manager->online_extrinsic_trans_en = online_extrinsic_trans_en;
