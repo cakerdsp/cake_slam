@@ -11,7 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "IMU_Processing_multi_cam.h"
-#include <rcpputils/asserts.hpp>
+#include <cassert>
 
 const bool time_list(PointType &x, PointType &y) { return (x.curvature < y.curvature); }
 
@@ -565,7 +565,7 @@ void ImuProcess::Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, Poin
 {
   double t1, t2, t3;
   t1 = omp_get_wtime();
-  rcpputils::assert_true(lidar_meas.lidar != nullptr);
+  assert(lidar_meas.lidar != nullptr);
   if (!imu_en)
   {
     Forward_without_imu(lidar_meas, stat, *cur_pcl_un_);

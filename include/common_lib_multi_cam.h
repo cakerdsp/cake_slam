@@ -32,8 +32,8 @@ which is included as part of this source code package.
 #include <visualization_msgs/MarkerArray.h>
 #include <vikit/sophus_compat.h>
 #include <tf2_ros/transform_broadcaster.h>
-#include <tf2/LinearMath/Transform.hpp>
-#include <tf2/LinearMath/Quaternion.hpp>
+#include <tf2/LinearMath/Transform.h>
+#include <tf2/LinearMath/Quaternion.h>
 
 using namespace std;
 // Avoid `using namespace Eigen`; Matrix is otherwise ambiguous in this project.
