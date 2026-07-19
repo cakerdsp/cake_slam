@@ -1627,7 +1627,7 @@ void LIVMapper::handleImageFrame(int camera_id, const ros::Time &stamp, const cv
 {
   if (!img_en) return;
   if (camera_id < 0 || camera_id >= num_cameras || img_cur.empty()) return;
-  const uint64_t stamp_ns = static_cast<uint64_t>(stamp.sec) * 1000000000ULL + static_cast<uint64_t>(stamp.nanosec);
+  const uint64_t stamp_ns = stamp.toNSec();
   const double raw_time = static_cast<double>(stamp_ns) * 1.0e-9;
   const int time_group = camera_configs[camera_id].time_offset_group;
   const double td_used = (time_group >= 0 && time_group < _state.num_time_offset_groups)
