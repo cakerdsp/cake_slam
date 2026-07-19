@@ -37,7 +37,7 @@ typedef struct VoxelMapConfig
   double max_voxel_size_;
   int max_layer_;
   int max_iterations_;
-  std::vector<int64_t> layer_init_num_;
+  std::vector<int> layer_init_num_;
   int max_points_num_;
   double planner_threshold_;
   double beam_err_;

@@ -258,7 +258,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<bool>("vio.online_extrinsic_rot_en", true);
   try_declare.template operator()<bool>("vio.online_extrinsic_trans_en", true);
   try_declare.template operator()<bool>("vio.online_extrinsic_prior_factor_en", false);
-  try_declare.template operator()<std::vector<int64_t>>("vio.online_extrinsic_camera_mask", std::vector<int64_t>{});
+  try_declare.template operator()<std::vector<int>>("vio.online_extrinsic_camera_mask", std::vector<int>{});
   try_declare.template operator()<int>("vio.online_extrinsic_start_frame", 100);
   try_declare.template operator()<int>("vio.online_extrinsic_min_tracks", 20);
   try_declare.template operator()<double>("vio.online_extrinsic_prior_rot_std_deg", 0.5);
@@ -266,7 +266,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<double>("vio.online_extrinsic_max_rot_update_deg", 0.02);
   try_declare.template operator()<double>("vio.online_extrinsic_max_trans_update_m", 0.0001);
   try_declare.template operator()<bool>("vio.online_time_offset_en", false);
-  try_declare.template operator()<std::vector<int64_t>>("vio.online_time_offset_group_mask", std::vector<int64_t>{});
+  try_declare.template operator()<std::vector<int>>("vio.online_time_offset_group_mask", std::vector<int>{});
   try_declare.template operator()<int>("vio.online_time_offset_start_frame", 100);
   try_declare.template operator()<int>("vio.online_time_offset_min_tracks", 30);
   try_declare.template operator()<double>("vio.online_time_offset_min_pixel_velocity", 15.0);

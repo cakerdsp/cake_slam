@@ -227,7 +227,7 @@ public:
   bool online_extrinsic_rot_en = true;
   bool online_extrinsic_trans_en = true;
   bool online_extrinsic_prior_factor_en = false;
-  std::vector<int64_t> online_extrinsic_camera_mask;
+  std::vector<int> online_extrinsic_camera_mask;
   int online_extrinsic_start_frame = 100;
   int online_extrinsic_min_tracks = 20;
   double online_extrinsic_prior_rot_std_deg = 0.5;
@@ -236,7 +236,7 @@ public:
   double online_extrinsic_max_trans_update_m = 0.0001;
   bool online_time_offset_en = false;
   int num_time_offset_groups = 1;
-  std::vector<int64_t> online_time_offset_group_mask;
+  std::vector<int> online_time_offset_group_mask;
   int online_time_offset_start_frame = 100;
   int online_time_offset_min_tracks = 30;
   double online_time_offset_min_pixel_velocity = 15.0;

@@ -55,8 +55,7 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   try_declare.template operator()<double>("common.directional_drop_variance_reduction", 0.05);
   try_declare.template operator()<double>("common.directional_full_variance_reduction", 0.50);
 
-  // Declaration of parameter of type std::vector<int> won't build, https://github.com/ros2/rclcpp/issues/1585  
-  try_declare.template operator()<vector<int64_t>>("lio.layer_init_num", std::vector<int64_t>{5,5,5,5,5}); 
+  try_declare.template operator()<std::vector<int>>("lio.layer_init_num", std::vector<int>{5,5,5,5,5});
   try_declare.template operator()<int>("lio.max_points_num", 50);
   try_declare.template operator()<int>("lio.min_iterations", 5);
   try_declare.template operator()<bool>("local_map.map_sliding_en", false);
@@ -631,7 +630,7 @@ void VoxelMapManager::BuildVoxelMap()
   float planer_threshold = config_setting_.planner_threshold_;
   int max_layer = config_setting_.max_layer_;
   int max_points_num = config_setting_.max_points_num_;
-  std::vector<int> layer_init_num = convertToIntVectorSafe(config_setting_.layer_init_num_);
+  std::vector<int> layer_init_num = config_setting_.layer_init_num_;
 
   std::vector<pointWithVar> input_points;
 
@@ -708,7 +707,7 @@ void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_poin
   float planer_threshold = config_setting_.planner_threshold_;
   int max_layer = config_setting_.max_layer_;
   int max_points_num = config_setting_.max_points_num_;
-  std::vector<int> layer_init_num = convertToIntVectorSafe(config_setting_.layer_init_num_);
+  std::vector<int> layer_init_num = config_setting_.layer_init_num_;
   uint plsize = input_points.size();
   for (uint i = 0; i < plsize; i++)
   {
