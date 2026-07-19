@@ -80,6 +80,11 @@ find_package(OpenCV REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(Boost REQUIRED COMPONENTS thread)
 
+set(SOPHUS_LIBS ${Sophus_LIBRARIES})
+if(TARGET Sophus::Sophus)
+  list(APPEND SOPHUS_LIBS Sophus::Sophus)
+endif()
+
 catkin_package(
   INCLUDE_DIRS include
   CATKIN_DEPENDS
@@ -96,6 +101,7 @@ include_directories(
   ${PCL_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
   ${Sophus_INCLUDE_DIRS}
+  ${Sophus_INCLUDE_DIR}
 )
 
 add_library(utils src/utils.cpp)
@@ -110,11 +116,11 @@ add_library(pre_multi_cam src/preprocess_multi_cam.cpp)
 add_library(imu_proc_multi_cam src/IMU_Processing_multi_cam.cpp)
 add_library(laser_mapping_multi_cam src/LIVMapper_multi_cam.cpp)
 
-target_link_libraries(laser_mapping_multi_cam ${OPENMP_TARGET} ${catkin_LIBRARIES})
-target_link_libraries(vio_multi_cam ${OPENMP_TARGET} ${catkin_LIBRARIES})
-target_link_libraries(lio_multi_cam utils ${OPENMP_TARGET} ${catkin_LIBRARIES})
-target_link_libraries(pre_multi_cam ${OPENMP_TARGET} ${catkin_LIBRARIES})
-target_link_libraries(imu_proc_multi_cam ${OPENMP_TARGET} ${catkin_LIBRARIES})
+target_link_libraries(laser_mapping_multi_cam ${OPENMP_TARGET} ${catkin_LIBRARIES} ${SOPHUS_LIBS})
+target_link_libraries(vio_multi_cam ${OPENMP_TARGET} ${catkin_LIBRARIES} ${SOPHUS_LIBS})
+target_link_libraries(lio_multi_cam utils ${OPENMP_TARGET} ${catkin_LIBRARIES} ${SOPHUS_LIBS})
+target_link_libraries(pre_multi_cam ${OPENMP_TARGET} ${catkin_LIBRARIES} ${SOPHUS_LIBS})
+target_link_libraries(imu_proc_multi_cam ${OPENMP_TARGET} ${catkin_LIBRARIES} ${SOPHUS_LIBS})
 
 add_executable(fastlivo_mapping_multi_cam src/main_multi_cam.cpp)
 add_dependencies(fastlivo_mapping_multi_cam ${catkin_EXPORTED_TARGETS})
@@ -128,7 +134,7 @@ target_link_libraries(fastlivo_mapping_multi_cam
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${OpenCV_LIBRARIES}
-  ${Sophus_LIBRARIES}
+  ${SOPHUS_LIBS}
   ${Boost_LIBRARIES}
 )
 
