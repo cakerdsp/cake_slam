@@ -23,11 +23,11 @@
   <depend>livox_ros_driver</depend>
   <depend>cv_bridge</depend>
   <depend>image_transport</depend>
-  <depend>vikit_common</depend>
-  <depend>vikit_ros</depend>
 
   <build_depend>libopencv-dev</build_depend>
   <exec_depend>libopencv-dev</exec_depend>
   <build_depend>libsophus-dev</build_depend>
   <exec_depend>libsophus-dev</exec_depend>
+  <build_depend>libfmt-dev</build_depend>
+  <exec_depend>libfmt-dev</exec_depend>
 </package>

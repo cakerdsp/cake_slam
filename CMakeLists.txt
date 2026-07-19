@@ -57,31 +57,67 @@ find_package(catkin REQUIRED COMPONENTS
   livox_ros_driver
   cv_bridge
   image_transport
-  vikit_common
-  vikit_ros
 )
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Sophus REQUIRED)
+find_package(fmt REQUIRED)
 find_package(Boost REQUIRED COMPONENTS thread)
+
+set(FAST_LIVO_SOPHUS_LIBS ${Sophus_LIBRARIES})
+if(TARGET Sophus::Sophus)
+  set(FAST_LIVO_SOPHUS_LIBS Sophus::Sophus)
+endif()
 
 catkin_package(
   INCLUDE_DIRS include
   CATKIN_DEPENDS
     roscpp sensor_msgs geometry_msgs nav_msgs visualization_msgs
     pcl_ros pcl_conversions tf2 tf2_ros tf2_geometry_msgs
-    livox_ros_driver cv_bridge image_transport vikit_common vikit_ros
-  DEPENDS Eigen3 PCL OpenCV Sophus Boost
+    livox_ros_driver cv_bridge image_transport
+  DEPENDS Eigen3 PCL OpenCV Sophus fmt Boost
 )
 
 include_directories(
   include
+  third_party/rpg_vikit/vikit_common/include
+  third_party/rpg_vikit/vikit_ros/include
   ${catkin_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
   ${Sophus_INCLUDE_DIRS}
+)
+
+add_library(vikit_common_vendor SHARED
+  third_party/rpg_vikit/vikit_common/src/atan_camera.cpp
+  third_party/rpg_vikit/vikit_common/src/omni_camera.cpp
+  third_party/rpg_vikit/vikit_common/src/math_utils.cpp
+  third_party/rpg_vikit/vikit_common/src/vision.cpp
+  third_party/rpg_vikit/vikit_common/src/performance_monitor.cpp
+  third_party/rpg_vikit/vikit_common/src/robust_cost.cpp
+  third_party/rpg_vikit/vikit_common/src/user_input_thread.cpp
+  third_party/rpg_vikit/vikit_common/src/pinhole_camera.cpp
+  third_party/rpg_vikit/vikit_common/src/equidistant_camera.cpp
+  third_party/rpg_vikit/vikit_common/src/polynomial_camera.cpp
+  third_party/rpg_vikit/vikit_common/src/mei_camera.cpp
+  third_party/rpg_vikit/vikit_common/src/homography.cpp
+  third_party/rpg_vikit/vikit_common/src/img_align.cpp
+)
+target_link_libraries(vikit_common_vendor
+  ${OpenCV_LIBRARIES}
+  ${FAST_LIVO_SOPHUS_LIBS}
+  fmt::fmt
+)
+
+add_library(vikit_ros_vendor SHARED
+  third_party/rpg_vikit/vikit_ros/src/output_helper.cpp
+)
+target_link_libraries(vikit_ros_vendor
+  vikit_common_vendor
+  ${catkin_LIBRARIES}
+  ${FAST_LIVO_SOPHUS_LIBS}
 )
 
 add_library(utils src/utils.cpp)
@@ -95,6 +131,8 @@ add_library(pre_multi_cam src/preprocess_multi_cam.cpp)
 add_library(imu_proc_multi_cam src/IMU_Processing_multi_cam.cpp)
 add_library(laser_mapping_multi_cam src/LIVMapper_multi_cam.cpp)
 
+add_dependencies(vikit_common_vendor ${catkin_EXPORTED_TARGETS})
+add_dependencies(vikit_ros_vendor ${catkin_EXPORTED_TARGETS})
 add_dependencies(utils ${catkin_EXPORTED_TARGETS})
 add_dependencies(vio_multi_cam ${catkin_EXPORTED_TARGETS})
 add_dependencies(lio_multi_cam ${catkin_EXPORTED_TARGETS})
@@ -104,9 +142,11 @@ add_dependencies(laser_mapping_multi_cam ${catkin_EXPORTED_TARGETS})
 
 set(COMMON_LIBS
   ${catkin_LIBRARIES}
+  vikit_common_vendor
+  vikit_ros_vendor
   ${PCL_LIBRARIES}
   ${OpenCV_LIBRARIES}
-  ${Sophus_LIBRARIES}
+  ${FAST_LIVO_SOPHUS_LIBS}
   ${Boost_LIBRARIES}
 )
 if(OpenMP_CXX_FOUND)
@@ -139,6 +179,8 @@ if(mimalloc_FOUND)
 endif()
 
 install(TARGETS
+  vikit_common_vendor
+  vikit_ros_vendor
   utils
   vio_multi_cam
   lio_multi_cam
