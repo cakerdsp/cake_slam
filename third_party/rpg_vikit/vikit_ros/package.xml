@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>vikit_ros</name>
+  <version>0.0.0</version>
+  <description>ROS helpers for RPG Vikit.</description>
+
+  <maintainer email="forster@ifi.uzh.ch">cforster</maintainer>
+  <license>GPLv3</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>roscpp</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>vikit_common</depend>
+</package>

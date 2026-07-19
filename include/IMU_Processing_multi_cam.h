@@ -17,7 +17,7 @@ which is included as part of this source code package.
 #include <fstream>
 #include "common_lib_multi_cam.h"
 #include <condition_variable>
-#include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/Odometry.h>
 #include <utils/so3_math.h>
 
 const bool time_list(PointType &x,
@@ -33,7 +33,7 @@ public:
   ~ImuProcess();
 
   void Reset();
-  void Reset(double start_timestamp, const sensor_msgs::msg::Imu::ConstSharedPtr &lastimu);
+  void Reset(double start_timestamp, const sensor_msgs::Imu::ConstPtr &lastimu);
   void set_extrinsic(const V3D &transl, const M3D &rot);
   void set_extrinsic(const V3D &transl);
   void set_extrinsic(const MD(4, 4) & T);
@@ -72,7 +72,7 @@ private:
   void IMU_init(const MeasureGroup &meas, StatesGroup &state, int &N);
   void Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
   PointCloudXYZI pcl_wait_proc;
-  sensor_msgs::msg::Imu::ConstSharedPtr last_imu;
+  sensor_msgs::Imu::ConstPtr last_imu;
   PointCloudXYZI::Ptr cur_pcl_un_;
   vector<Pose6D> IMUpose;
   M3D Lid_rot_to_IMU;

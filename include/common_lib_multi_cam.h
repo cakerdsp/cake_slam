@@ -20,7 +20,16 @@ which is included as part of this source code package.
 #include <opencv2/opencv.hpp>
 #include <cstdint>
 #include <stdexcept>
-#include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/Imu.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/Image.h>
+#include <sensor_msgs/CompressedImage.h>
+#include <nav_msgs/Odometry.h>
+#include <nav_msgs/Path.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Quaternion.h>
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
 #include <sophus/se3.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2/LinearMath/Transform.hpp>
@@ -82,7 +91,7 @@ struct MeasureGroup
   double vio_time;
   double lio_time;
   double img_time;
-  deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
+  deque<sensor_msgs::Imu::ConstPtr> imu;
   cv::Mat img;
   MultiCameraFrame multi_cam_frame;
   bool has_multi_cam_frame;

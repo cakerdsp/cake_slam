@@ -32,7 +32,7 @@ ImuProcess::ImuProcess() : Eye3d(M3D::Identity()),
   acc_s_last = Zero3d;
   Lid_offset_to_IMU = Zero3d;
   Lid_rot_to_IMU = Eye3d;
-  last_imu.reset(new sensor_msgs::msg::Imu());
+  last_imu.reset(new sensor_msgs::Imu());
   cur_pcl_un_.reset(new PointCloudXYZI());
 }
 
@@ -40,7 +40,7 @@ ImuProcess::~ImuProcess() {}
 
 void ImuProcess::Reset()
 {
-  RCLCPP_WARN(rclcpp::get_logger(""), "Reset ImuProcess");
+  ROS_WARN("Reset ImuProcess");
   mean_acc = V3D(0, 0, -1.0);
   mean_gyr = V3D(0, 0, 0);
   angvel_last = Zero3d;
@@ -48,7 +48,7 @@ void ImuProcess::Reset()
   init_iter_num = 1;
   IMUpose.clear();
   unbiased_gyr = Zero3d;
-  last_imu.reset(new sensor_msgs::msg::Imu());
+  last_imu.reset(new sensor_msgs::Imu());
   cur_pcl_un_.reset(new PointCloudXYZI());
 }
 
@@ -113,7 +113,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, StatesGroup &state_inout, in
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
    ** 2. normalize the acceleration measurenments to unit gravity **/
-  RCLCPP_INFO(rclcpp::get_logger(""),"IMU Initializing: %.1f %%", double(N) / MAX_INI_COUNT * 100);
+  ROS_INFO("IMU Initializing: %.1f %%", double(N) / MAX_INI_COUNT * 100);
   V3D cur_acc, cur_gyr;
 
   if (b_first_frame)
@@ -591,11 +591,11 @@ void ImuProcess::Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, Poin
     {
       // cov_acc *= pow(G_m_s2 / mean_acc.norm(), 2);
       imu_need_init = false;
-      RCLCPP_INFO(rclcpp::get_logger(""), "IMU Initials: Gravity: %.4f %.4f %.4f %.4f; acc covarience: "
+      ROS_INFO("IMU Initials: Gravity: %.4f %.4f %.4f %.4f; acc covarience: "
                "%.8f %.8f %.8f; gry covarience: %.8f %.8f %.8f \n",
                stat.gravity[0], stat.gravity[1], stat.gravity[2], mean_acc.norm(), cov_acc[0], cov_acc[1], cov_acc[2], cov_gyr[0], cov_gyr[1],
                cov_gyr[2]);
-      RCLCPP_INFO(rclcpp::get_logger(""), "IMU Initials: ba covarience: %.8f %.8f %.8f; bg covarience: "
+      ROS_INFO("IMU Initials: ba covarience: %.8f %.8f %.8f; bg covarience: "
                "%.8f %.8f %.8f",
                cov_bias_acc[0], cov_bias_acc[1], cov_bias_acc[2], cov_bias_gyr[0], cov_bias_gyr[1], cov_bias_gyr[2]);
       fout_imu.open(DEBUG_FILE_DIR("imu.txt"), ios::out);

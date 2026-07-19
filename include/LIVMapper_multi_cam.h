@@ -19,13 +19,13 @@ which is included as part of this source code package.
 #ifdef PRE_ROS_IRON
 #include <cv_bridge/cv_bridge.h>
 #else
-#include <cv_bridge/cv_bridge.hpp>
+#include <cv_bridge/cv_bridge.h>
 #endif
-#include <image_transport/image_transport.hpp>
+#include <image_transport/image_transport.h>
 #include <tf2_ros/transform_broadcaster.h>
-#include <geometry_msgs/msg/transform_stamped.hpp>
-#include <nav_msgs/msg/path.hpp>
-#include <sensor_msgs/msg/compressed_image.hpp>
+#include <geometry_msgs/TransformStamped.h>
+#include <nav_msgs/Path.h>
+#include <sensor_msgs/CompressedImage.h>
 #include <vikit/camera_loader.h>
 #include <cstdint>
 #include <map>
@@ -78,12 +78,12 @@ struct PendingImageGroup
 class LIVMapper
 {
 public:
-  LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name, const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
+  LIVMapper(ros::NodeHandle &nh, std::string node_name);
   ~LIVMapper();
-  void initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &nh, image_transport::ImageTransport &it_);
-  void initializeComponents(rclcpp::Node::SharedPtr &node);
+  void initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_transport::ImageTransport &it_);
+  void initializeComponents(ros::NodeHandle &nh);
   void initializeFiles();
-  void run(rclcpp::Node::SharedPtr &node);
+  void run(ros::NodeHandle &nh);
   void gravityAlignment();
   void handleFirstFrame();
   void stateEstimationAndMapping();
@@ -99,27 +99,27 @@ public:
   void pointBodyToWorld(const PointType &pi, PointType &po);
  
   void RGBpointBodyToWorld(PointType const *const pi, PointType *const po);
-  void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
-  void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg_in);
-  void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in);
-  void img_cbk(int camera_id, const sensor_msgs::msg::Image::ConstSharedPtr &msg_in);
-  void compressed_img_cbk(int camera_id, const sensor_msgs::msg::CompressedImage::ConstSharedPtr &msg_in);
+  void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg);
+  void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg_in);
+  void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in);
+  void img_cbk(int camera_id, const sensor_msgs::Image::ConstPtr &msg_in);
+  void compressed_img_cbk(int camera_id, const sensor_msgs::CompressedImage::ConstPtr &msg_in);
   void publish_img_rgb(VIOManagerPtr vio_manager);
   void publish_optical_flow_image(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager);
-  void publish_triangulated_points(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubCloud,
+  void publish_triangulated_points(const ros::Publisher &pubCloud,
                                    const PointCloudXYZI::Ptr &cloud);
-  void publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubLaserCloudFullRes, VIOManagerPtr vio_manager);
-  void publish_visual_sub_map(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubSubVisualMap);
-  void publish_effect_world(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubLaserCloudEffect, const std::vector<PointToPlane> &ptpl_list);
-  void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr &pmavros_pose_publisherubOdomAftMapped);
-  void publish_mavros(const rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr &mavros_pose_publisher);
-  void publish_path(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr &pubPath);
-  void readParameters(rclcpp::Node::SharedPtr &node);
+  void publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, VIOManagerPtr vio_manager);
+  void publish_visual_sub_map(const ros::Publisher &pubSubVisualMap);
+  void publish_effect_world(const ros::Publisher &pubLaserCloudEffect, const std::vector<PointToPlane> &ptpl_list);
+  void publish_odometry(const ros::Publisher &pmavros_pose_publisherubOdomAftMapped);
+  void publish_mavros(const ros::Publisher &mavros_pose_publisher);
+  void publish_path(const ros::Publisher &pubPath);
+  void readParameters(ros::NodeHandle &nh);
   template <typename T> void set_posestamp(T &out);
   template <typename T> void pointBodyToWorld(const Eigen::Matrix<T, 3, 1> &pi, Eigen::Matrix<T, 3, 1> &po);
   template <typename T> Eigen::Matrix<T, 3, 1> pointBodyToWorld(const Eigen::Matrix<T, 3, 1> &pi);
-  cv::Mat getImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &img_msg);
-  void handleImageFrame(int camera_id, const builtin_interfaces::msg::Time &stamp, const cv::Mat &img_cur);
+  cv::Mat getImageFromMsg(const sensor_msgs::Image::ConstPtr &img_msg);
+  void handleImageFrame(int camera_id, const ros::Time &stamp, const cv::Mat &img_cur);
   void flushCompletedImageGroupsLocked();
 
   std::mutex mtx_buffer, mtx_buffer_imu_prop;
@@ -158,11 +158,11 @@ public:
   StatesGroup imu_propagate, latest_ekf_state;
 
   bool new_imu = false, state_update_flg = false, imu_prop_enable = true, ekf_finish_once = false;
-  deque<sensor_msgs::msg::Imu> prop_imu_buffer;
-  sensor_msgs::msg::Imu newest_imu;
+  deque<sensor_msgs::Imu> prop_imu_buffer;
+  sensor_msgs::Imu newest_imu;
   double latest_ekf_time;
-  nav_msgs::msg::Odometry imu_prop_odom;
-  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuPropOdom;
+  nav_msgs::Odometry imu_prop_odom;
+  ros::Publisher pubImuPropOdom;
   double imu_time_offset = 0.0;
 
   bool gravity_align_en = false, gravity_align_finished = false;
@@ -289,7 +289,7 @@ public:
   std::vector<double> img_time_offset_groups;
   deque<PointCloudXYZI::Ptr> lid_raw_data_buffer;
   deque<double> lid_header_time_buffer;
-  deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
+  deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
   std::map<uint64_t, PendingImageGroup> pending_images;
   deque<MultiCameraFrame> multi_cam_frame_buffer;
   int next_vio_frame_id = 0;
@@ -317,38 +317,38 @@ public:
   StatesGroup _state;
   StatesGroup  state_propagat;
 
-  nav_msgs::msg::Path path;
-  nav_msgs::msg::Odometry odomAftMapped;
-  geometry_msgs::msg::Quaternion geoQuat;
-  geometry_msgs::msg::PoseStamped msg_body_pose;
+  nav_msgs::Path path;
+  nav_msgs::Odometry odomAftMapped;
+  geometry_msgs::Quaternion geoQuat;
+  geometry_msgs::PoseStamped msg_body_pose;
 
   PreprocessPtr p_pre;
   ImuProcessPtr p_imu;
   VoxelMapManagerPtr voxelmap_manager;
   VIOManagerPtr vio_manager;
 
-  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr plane_pub;
-  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr voxel_pub;
-  std::shared_ptr<rclcpp::SubscriptionBase> sub_pcl;
-  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
-  std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> sub_imgs;
-  std::vector<rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr> sub_imgs_compressed;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFullRes;
-  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubNormal;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubSubVisualMap;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap;
-  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped;
-  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudDyn;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudDynRmed;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudDynDbg;
+  ros::Publisher plane_pub;
+  ros::Publisher voxel_pub;
+  ros::Subscriber sub_pcl;
+  ros::Subscriber sub_imu;
+  std::vector<ros::Subscriber> sub_imgs;
+  std::vector<ros::Subscriber> sub_imgs_compressed;
+  ros::Publisher pubLaserCloudFullRes;
+  ros::Publisher pubNormal;
+  ros::Publisher pubSubVisualMap;
+  ros::Publisher pubLaserCloudEffect;
+  ros::Publisher pubLaserCloudMap;
+  ros::Publisher pubOdomAftMapped;
+  ros::Publisher pubPath;
+  ros::Publisher pubLaserCloudDyn;
+  ros::Publisher pubLaserCloudDynRmed;
+  ros::Publisher pubLaserCloudDynDbg;
   std::vector<image_transport::Publisher> pubImages;
   image_transport::Publisher pubOpticalFlowImage;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubTriangulatedPoints;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr mavros_pose_publisher;
-  rclcpp::TimerBase::SharedPtr imu_prop_timer;
-  rclcpp::Node::SharedPtr node;
+  ros::Publisher pubTriangulatedPoints;
+  ros::Publisher mavros_pose_publisher;
+  ros::Timer imu_prop_timer;
+  ros::NodeHandle node;
 
   int frame_num = 0;
   double aver_time_consu = 0;
