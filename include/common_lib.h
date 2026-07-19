@@ -19,7 +19,13 @@ which is included as part of this source code package.
 #include <utils/utils.h>
 #include <opencv2/opencv.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#if __has_include(<sophus/se3.h>)
+#include <sophus/se3.h>
+#elif __has_include(<sophus/se3.hpp>)
 #include <sophus/se3.hpp>
+#else
+#error "Cannot find Sophus SE3 header"
+#endif
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2/LinearMath/Transform.hpp>
 #include <tf2/LinearMath/Quaternion.hpp>

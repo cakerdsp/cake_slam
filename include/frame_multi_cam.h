@@ -40,8 +40,8 @@ public:
   double time_offset_delta_; //!< Current nominal td minus td_used_.
   int time_offset_group_;
   vk::AbstractCamera *cam_;  //!< Camera model.
-  SE3<double> T_f_w_;                //!< Transform (f)rame from (w)orld.
-  SE3<double> T_f_w_prior_;          //!< Transform (f)rame from (w)orld provided by the IMU prior.
+  SE3 T_f_w_;                //!< Transform (f)rame from (w)orld.
+  SE3 T_f_w_prior_;          //!< Transform (f)rame from (w)orld provided by the IMU prior.
   cv::Mat img_;              //!< Image of the frame.
   Features fts_;             //!< List of features in the image.
 

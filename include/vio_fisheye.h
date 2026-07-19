@@ -42,7 +42,7 @@ struct VirtualPatchImage
   cv::Mat valid_mask;    //!< CV_8UC1 validity mask for values.
   M3D R_v_from_c = M3D::Identity();  //!< {}^V R_C.
   M3D R_c_from_v = M3D::Identity();  //!< {}^C R_V.
-  SE3<double> T_v_w_seed;            //!< {}^V T_W at submap construction.
+  SE3 T_v_w_seed;            //!< {}^V T_W at submap construction.
   bool valid = false;
 };
 
@@ -53,7 +53,7 @@ struct VirtualTrackPatch
   VirtualPatchImage cur_support;
   M3D R_vcur_from_ccur_seed = M3D::Identity();
   M3D R_ccur_from_vcur_seed = M3D::Identity();
-  SE3<double> T_vcur_w_seed;
+  SE3 T_vcur_w_seed;
   Matrix2d A_cur_ref = Matrix2d::Identity();
   int search_level = 0;
   bool valid = false;
@@ -133,7 +133,7 @@ struct OpticalFlowObservation
   double timestamp = 0.0;
   cv::Point2f px;
   V3D bearing = V3D::Zero();
-  SE3<double> T_f_w;
+  SE3 T_f_w;
 };
 
 struct OpticalFlowTrack
@@ -324,11 +324,11 @@ public:
   void computeJacobianAndUpdateEKF(cv::Mat img);
   void resetGrid();
   void updateVisualMapPoints(cv::Mat img);
-  void getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector2d &px_ref, const Vector3d &f_ref, const double depth_ref, const SE3<double> &T_cur_ref,
+  void getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector2d &px_ref, const Vector3d &f_ref, const double depth_ref, const SE3 &T_cur_ref,
                            const int level_ref, 
                            const int pyramid_level, const int halfpatch_size, Matrix2d &A_cur_ref);
   void getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref,
-                                     const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
+                                     const V3D &xyz_ref, const V3D &normal_ref, const SE3 &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
   void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
   bool buildVirtualFrameRotation(const V3D &point_in_raw_camera, M3D &R_v_from_c, M3D &R_c_from_v) const;
@@ -345,18 +345,18 @@ public:
   bool interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value) const;
   V2D virtualProject(const V3D &p_v) const;
   V3D virtualCam2World(const V2D &px_v) const;
-  bool createVirtualFeaturePatch(const cv::Mat &raw_img, const SE3<double> &T_c_w, const V3D &point_w, float *core_patch,
-                                 cv::Mat &virtual_support_img, SE3<double> &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const;
-  bool getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
+  bool createVirtualFeaturePatch(const cv::Mat &raw_img, const SE3 &T_c_w, const V3D &point_w, float *core_patch,
+                                 cv::Mat &virtual_support_img, SE3 &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const;
+  bool getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3 &T_vcur_vref, int level_ref, int pyramid_level,
                                   int halfpatch_size, Matrix2d &A_cur_ref) const;
-  bool getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_vcur_vref,
+  bool getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3 &T_vcur_vref,
                                             int level_ref, Matrix2d &A_cur_ref) const;
   bool warpAffineVirtual(const Matrix2d &A_cur_ref, const cv::Mat &virtual_ref_img, int level_ref, int search_level,
                          int pyramid_level, int halfpatch_size, float *patch) const;
   bool sampleVirtualCorePatch(const VirtualPatchImage &support, const V2D &center, int scale, float *patch) const;
   bool sampleVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px, int scale, float &value, V2D &gradient) const;
   bool sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V2D &px, int scale, float &value, V2D &gradient) const;
-  SE3<double> composeVirtualPose(const M3D &R_v_from_c, const SE3<double> &T_c_w) const;
+  SE3 composeVirtualPose(const M3D &R_v_from_c, const SE3 &T_c_w) const;
   void retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWithVar> &pg,
                                           const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void generateVisualMapPointsVirtual(cv::Mat img, vector<pointWithVar> &pg);

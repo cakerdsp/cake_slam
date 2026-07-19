@@ -484,7 +484,7 @@ void LIVMapper::gravityAlignment()
     std::cout << "Gravity Alignment Starts" << std::endl;
     V3D ez(0, 0, -1), gz(_state.gravity);
     Eigen::Quaterniond G_q_I0 = Eigen::Quaterniond::FromTwoVectors(gz, ez);
-    M3D G_R_I0 = G_q_I0.toRotationMatrix();
+    M3D G_R_I0 = G_q_I0.torotation_matrix();
 
     _state.pos_end = G_R_I0 * _state.pos_end;
     _state.rot_end = G_R_I0 * _state.rot_end;

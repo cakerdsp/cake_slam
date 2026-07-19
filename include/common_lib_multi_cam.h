@@ -21,7 +21,13 @@ which is included as part of this source code package.
 #include <cstdint>
 #include <stdexcept>
 #include <sensor_msgs/msg/imu.hpp>
+#if __has_include(<sophus/se3.h>)
+#include <sophus/se3.h>
+#elif __has_include(<sophus/se3.hpp>)
 #include <sophus/se3.hpp>
+#else
+#error "Cannot find Sophus SE3 header"
+#endif
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2/LinearMath/Transform.hpp>
 #include <tf2/LinearMath/Quaternion.hpp>
@@ -250,7 +256,7 @@ struct StatesGroup
     Eigen::Quaterniond q_cl(R_cl);
     if (!q_cl.coeffs().allFinite() || q_cl.norm() <= 1.0e-12)
       throw std::invalid_argument("camera extrinsic rotation cannot be projected to SO(3)");
-    const M3D R_cl_so3 = q_cl.normalized().toRotationMatrix();
+    const M3D R_cl_so3 = q_cl.normalized().torotation_matrix();
     Rcl[camera_id] = R_cl_so3;
     Pcl[camera_id] = P_cl;
     if (reset_prior)
