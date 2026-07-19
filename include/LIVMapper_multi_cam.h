@@ -99,11 +99,11 @@ public:
   void pointBodyToWorld(const PointType &pi, PointType &po);
  
   void RGBpointBodyToWorld(PointType const *const pi, PointType *const po);
-  void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
-  void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg_in);
-  void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in);
-  void img_cbk(int camera_id, const sensor_msgs::msg::Image::ConstSharedPtr &msg_in);
-  void compressed_img_cbk(int camera_id, const sensor_msgs::msg::CompressedImage::ConstSharedPtr &msg_in);
+  void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstPtr &msg);
+  void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstPtr &msg_in);
+  void imu_cbk(const sensor_msgs::msg::Imu::ConstPtr &msg_in);
+  void img_cbk(int camera_id, const sensor_msgs::msg::Image::ConstPtr &msg_in);
+  void compressed_img_cbk(int camera_id, const sensor_msgs::msg::CompressedImage::ConstPtr &msg_in);
   void publish_img_rgb(VIOManagerPtr vio_manager);
   void publish_optical_flow_image(const image_transport::Publisher &pubImage, VIOManagerPtr vio_manager);
   void publish_triangulated_points(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pubCloud,
@@ -118,7 +118,7 @@ public:
   template <typename T> void set_posestamp(T &out);
   template <typename T> void pointBodyToWorld(const Eigen::Matrix<T, 3, 1> &pi, Eigen::Matrix<T, 3, 1> &po);
   template <typename T> Eigen::Matrix<T, 3, 1> pointBodyToWorld(const Eigen::Matrix<T, 3, 1> &pi);
-  cv::Mat getImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &img_msg);
+  cv::Mat getImageFromMsg(const sensor_msgs::msg::Image::ConstPtr &img_msg);
   void handleImageFrame(int camera_id, const builtin_interfaces::msg::Time &stamp, const cv::Mat &img_cur);
   void flushCompletedImageGroupsLocked();
 
@@ -289,7 +289,7 @@ public:
   std::vector<double> img_time_offset_groups;
   deque<PointCloudXYZI::Ptr> lid_raw_data_buffer;
   deque<double> lid_header_time_buffer;
-  deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
+  deque<sensor_msgs::msg::Imu::ConstPtr> imu_buffer;
   std::map<uint64_t, PendingImageGroup> pending_images;
   deque<MultiCameraFrame> multi_cam_frame_buffer;
   int next_vio_frame_id = 0;

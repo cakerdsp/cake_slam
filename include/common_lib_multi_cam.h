@@ -82,7 +82,7 @@ struct MeasureGroup
   double vio_time;
   double lio_time;
   double img_time;
-  deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
+  deque<sensor_msgs::msg::Imu::ConstPtr> imu;
   cv::Mat img;
   MultiCameraFrame multi_cam_frame;
   bool has_multi_cam_frame;

@@ -25,7 +25,7 @@ which is included as part of this source code package.
 #include <tf2/LinearMath/Quaternion.hpp>
 
 using namespace std;
-// using namespace Eigen;   // avoid cmake error: reference to ‘Matrix’ is ambiguous
+// using namespace Eigen;   // avoid cmake error: reference to ‘Matrix�?is ambiguous
 using namespace Sophus;
 
 #define print_line std::cout << __FILE__ << ", " << __LINE__ << std::endl;
@@ -65,7 +65,7 @@ struct MeasureGroup
 {
   double vio_time;
   double lio_time;
-  deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
+  deque<sensor_msgs::msg::Imu::ConstPtr> imu;
   cv::Mat img;
   MeasureGroup()
   {

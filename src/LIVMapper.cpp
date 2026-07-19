@@ -860,8 +860,7 @@ void LIVMapper::imu_prop_callback()
 {
   if (p_imu->imu_need_init || !new_imu || !ekf_finish_once) { return; }
   mtx_buffer_imu_prop.lock();
-  new_imu = false; // 控制 propagate 频率和 IMU 频率一致
-  if (imu_prop_enable && !prop_imu_buffer.empty())
+  new_imu = false; // 控制 propagate 频率�?IMU 频率一�?  if (imu_prop_enable && !prop_imu_buffer.empty())
   {
     static double last_t_from_lidar_end_time = 0;
     if (state_update_flg)
@@ -972,7 +971,7 @@ void LIVMapper::RGBpointBodyToWorld(PointType const *const pi, PointType *const 
   po->intensity = pi->intensity;
 }
 
-void LIVMapper::standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
+void LIVMapper::standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstPtr &msg)
 {
   if (!lidar_en) return;
   RCLCPP_INFO_ONCE(this->node->get_logger(), "Get standard PointCloud2 LiDAR, first header time: %.6f", stamp2Sec(msg->header.stamp));
@@ -1006,11 +1005,11 @@ void LIVMapper::standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstShare
   sig_buffer.notify_all();
 }
 
-void LIVMapper::livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg_in)
+void LIVMapper::livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstPtr &msg_in)
 {
   if (!lidar_en) return;
   mtx_buffer.lock();
-  livox_ros_driver2::msg::CustomMsg::SharedPtr msg(new livox_ros_driver2::msg::CustomMsg(*msg_in));
+  livox_ros_driver2::msg::CustomMsg::Ptr msg(new livox_ros_driver2::msg::CustomMsg(*msg_in));
   // if ((abs(stamp2Sec(msg->header.stamp) - last_timestamp_lidar) > 0.2 && last_timestamp_lidar > 0) || sync_jump_flag)
   // {
   //   ROS_WARN("lidar jumps %.3f\n", stamp2Sec(msg->header.stamp) - last_timestamp_lidar);
@@ -1049,13 +1048,13 @@ void LIVMapper::livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstShar
   sig_buffer.notify_all();
 }
 
-void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
+void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstPtr &msg_in)
 {
   if (!imu_en) return;
 
   if (last_timestamp_lidar < 0.0) return;
   RCLCPP_INFO(this->node->get_logger(), "get imu at time: %.6f", stamp2Sec(msg_in->header.stamp));
-  sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
+  sensor_msgs::msg::Imu::Ptr msg(new sensor_msgs::msg::Imu(*msg_in));
   msg->header.stamp = sec2Stamp(stamp2Sec(msg->header.stamp) - imu_time_offset);
   double timestamp = stamp2Sec(msg->header.stamp);
 
@@ -1101,7 +1100,7 @@ void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
   sig_buffer.notify_all();
 }
 
-cv::Mat LIVMapper::getImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &img_msg)
+cv::Mat LIVMapper::getImageFromMsg(const sensor_msgs::msg::Image::ConstPtr &img_msg)
 {
   const cv::Mat img = cv_bridge::toCvShare(img_msg, "bgr8")->image;
   return img.clone();
@@ -1169,13 +1168,13 @@ void LIVMapper::handleImageFrame(const builtin_interfaces::msg::Time &stamp, con
 }
 
 // static int i = 0;
-void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
+void LIVMapper::img_cbk(const sensor_msgs::msg::Image::ConstPtr &msg_in)
 {
   cv::Mat img_cur = getImageFromMsg(msg_in);
   handleImageFrame(msg_in->header.stamp, img_cur);
 }
 
-void LIVMapper::compressed_img_cbk(const sensor_msgs::msg::CompressedImage::ConstSharedPtr &msg_in)
+void LIVMapper::compressed_img_cbk(const sensor_msgs::msg::CompressedImage::ConstPtr &msg_in)
 {
   if (!img_en) return;
   const cv::Mat encoded(1, static_cast<int>(msg_in->data.size()), CV_8UC1, const_cast<uint8_t *>(msg_in->data.data()));

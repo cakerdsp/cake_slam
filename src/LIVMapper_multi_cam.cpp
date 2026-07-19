@@ -881,7 +881,7 @@ void LIVMapper::initializeFiles()
 
 void LIVMapper::initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &node, image_transport::ImageTransport &it_)
 {
-  image_transport::ImageTransport it(this->node);
+  image_transport::ImageTransport it(this->node->ros_node_handle());
   auto sensor_qos = rclcpp::QoS(rclcpp::KeepLast(200000)).best_effort().durability_volatile();
   if (p_pre->lidar_type == AVIA) {
     sub_pcl = this->node->create_subscription<livox_ros_driver2::msg::CustomMsg>(lid_topic, sensor_qos, std::bind(&LIVMapper::livox_pcl_cbk, this, std::placeholders::_1));
@@ -900,14 +900,14 @@ void LIVMapper::initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &node
     if (compressed)
     {
       sub_imgs_compressed[camera_id] = this->node->create_subscription<sensor_msgs::msg::CompressedImage>(
-          topic, sensor_qos, [this, camera_id](const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg) {
+          topic, sensor_qos, [this, camera_id](const sensor_msgs::msg::CompressedImage::ConstPtr msg) {
             compressed_img_cbk(camera_id, msg);
           });
     }
     else
     {
       sub_imgs[camera_id] = this->node->create_subscription<sensor_msgs::msg::Image>(
-          topic, sensor_qos, [this, camera_id](const sensor_msgs::msg::Image::ConstSharedPtr msg) { img_cbk(camera_id, msg); });
+          topic, sensor_qos, [this, camera_id](const sensor_msgs::msg::Image::ConstPtr msg) { img_cbk(camera_id, msg); });
     }
     RCLCPP_INFO(this->node->get_logger(), "Subscribed camera_id=%d image=%s (%s)", camera_id, topic.c_str(),
                 compressed ? "compressed" : "raw");
@@ -932,7 +932,7 @@ void LIVMapper::initializeSubscribersAndPublishers(rclcpp::Node::SharedPtr &node
   pubOpticalFlowImage = it.advertise(optical_flow_feature_image_topic, 1);
   pubTriangulatedPoints = this->node->create_publisher<sensor_msgs::msg::PointCloud2>(optical_flow_triangulated_points_topic, 10);
   pubImuPropOdom = this->node->create_publisher<nav_msgs::msg::Odometry>("/LIVO2/imu_propagate", 10000);
-  imu_prop_timer = this->node->create_wall_timer(0.004s, std::bind(&LIVMapper::imu_prop_callback, this));
+  imu_prop_timer = this->node->create_wall_timer(std::chrono::duration<double>(0.004), std::bind(&LIVMapper::imu_prop_callback, this));
   voxelmap_manager->voxel_map_pub_= this->node->create_publisher<visualization_msgs::msg::MarkerArray>("/planes", 10000);
 }
 
@@ -1455,7 +1455,7 @@ void LIVMapper::RGBpointBodyToWorld(PointType const *const pi, PointType *const 
   po->intensity = pi->intensity;
 }
 
-void LIVMapper::standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
+void LIVMapper::standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstPtr &msg)
 {
   if (!lidar_en) return;
   RCLCPP_INFO_ONCE(this->node->get_logger(), "Get standard PointCloud2 LiDAR, first header time: %.6f", stamp2Sec(msg->header.stamp));
@@ -1489,11 +1489,11 @@ void LIVMapper::standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstShare
   sig_buffer.notify_all();
 }
 
-void LIVMapper::livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg_in)
+void LIVMapper::livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstPtr &msg_in)
 {
   if (!lidar_en) return;
   mtx_buffer.lock();
-  livox_ros_driver2::msg::CustomMsg::SharedPtr msg(new livox_ros_driver2::msg::CustomMsg(*msg_in));
+  livox_ros_driver2::msg::CustomMsg::Ptr msg(new livox_ros_driver2::msg::CustomMsg(*msg_in));
   // if ((abs(stamp2Sec(msg->header.stamp) - last_timestamp_lidar) > 0.2 && last_timestamp_lidar > 0) || sync_jump_flag)
   // {
   //   ROS_WARN("lidar jumps %.3f\n", stamp2Sec(msg->header.stamp) - last_timestamp_lidar);
@@ -1532,13 +1532,13 @@ void LIVMapper::livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstShar
   sig_buffer.notify_all();
 }
 
-void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
+void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstPtr &msg_in)
 {
   if (!imu_en) return;
 
   if (last_timestamp_lidar < 0.0) return;
   RCLCPP_INFO(this->node->get_logger(), "get imu at time: %.6f", stamp2Sec(msg_in->header.stamp));
-  sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
+  sensor_msgs::msg::Imu::Ptr msg(new sensor_msgs::msg::Imu(*msg_in));
   msg->header.stamp = sec2Stamp(stamp2Sec(msg->header.stamp) - imu_time_offset);
   double timestamp = stamp2Sec(msg->header.stamp);
 
@@ -1584,7 +1584,7 @@ void LIVMapper::imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
   sig_buffer.notify_all();
 }
 
-cv::Mat LIVMapper::getImageFromMsg(const sensor_msgs::msg::Image::ConstSharedPtr &img_msg)
+cv::Mat LIVMapper::getImageFromMsg(const sensor_msgs::msg::Image::ConstPtr &img_msg)
 {
   const cv::Mat img = cv_bridge::toCvShare(img_msg, "bgr8")->image;
   return img.clone();
@@ -1852,13 +1852,13 @@ void LIVMapper::handleImageFrame(int camera_id, const builtin_interfaces::msg::T
   RCLCPP_INFO(this->node->get_logger(), "Get camera_id=%d image, header time %.6f", camera_id, image_time);
   sig_buffer.notify_all();
 }
-void LIVMapper::img_cbk(int camera_id, const sensor_msgs::msg::Image::ConstSharedPtr &msg_in)
+void LIVMapper::img_cbk(int camera_id, const sensor_msgs::msg::Image::ConstPtr &msg_in)
 {
   cv::Mat img_cur = getImageFromMsg(msg_in);
   handleImageFrame(camera_id, msg_in->header.stamp, img_cur);
 }
 
-void LIVMapper::compressed_img_cbk(int camera_id, const sensor_msgs::msg::CompressedImage::ConstSharedPtr &msg_in)
+void LIVMapper::compressed_img_cbk(int camera_id, const sensor_msgs::msg::CompressedImage::ConstPtr &msg_in)
 {
   if (!img_en) return;
   const cv::Mat encoded(1, static_cast<int>(msg_in->data.size()), CV_8UC1, const_cast<uint8_t *>(msg_in->data.data()));
@@ -2389,8 +2389,7 @@ void LIVMapper::publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry
   odomAftMapped.header.stamp = this->node->get_clock()->now(); //.ros::Time()fromSec(last_timestamp_lidar);
   set_posestamp(odomAftMapped.pose.pose);
 
-  static std::shared_ptr<tf2_ros::TransformBroadcaster> br;
-  br = std::make_shared<tf2_ros::TransformBroadcaster>(this->node);
+  static tf2_ros::TransformBroadcaster br;
   tf2::Transform transform;
   tf2::Quaternion q;
   transform.setOrigin(tf2::Vector3(_state.pos_end(0), _state.pos_end(1), _state.pos_end(2)));
@@ -2399,7 +2398,7 @@ void LIVMapper::publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry
   q.setY(geoQuat.y);
   q.setZ(geoQuat.z);
   transform.setRotation(q);
-  br->sendTransform(geometry_msgs::msg::TransformStamped(createTransformStamped(transform, odomAftMapped.header.stamp, "camera_init", "aft_mapped")));
+  br.sendTransform(geometry_msgs::msg::TransformStamped(createTransformStamped(transform, odomAftMapped.header.stamp, "camera_init", "aft_mapped")));
   pubOdomAftMapped->publish(odomAftMapped);
 }
 

@@ -138,11 +138,11 @@ public:
   Preprocess();
   ~Preprocess();
 
-  void process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
-  void process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
+  void process(const livox_ros_driver2::msg::CustomMsg::Ptr &msg, PointCloudXYZI::Ptr &pcl_out);
+  void process(const sensor_msgs::msg::PointCloud2::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out);
   void set(bool feat_en, int lid_type, double bld, int pfilt_num);
 
-  // sensor_msgs::msg::PointCloud2::ConstSharedPtr pointcloud;
+  // sensor_msgs::msg::PointCloud2::ConstPtr pointcloud;
   PointCloudXYZI pl_full, pl_corn, pl_surf;
   PointCloudXYZI pl_buff[128]; // maximum 128 line lidar
   vector<orgtype> typess[128]; // maximum 128 line lidar
@@ -155,12 +155,12 @@ public:
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pub_corn;
 
 private:
-  void avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg);
-  void oust64_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
-  void velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
-  void xt32_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
-  void Pandar128_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
-  void l515_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+  void avia_handler(const livox_ros_driver2::msg::CustomMsg::Ptr &msg);
+  void oust64_handler(const sensor_msgs::msg::PointCloud2::ConstPtr &msg);
+  void velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstPtr &msg);
+  void xt32_handler(const sensor_msgs::msg::PointCloud2::ConstPtr &msg);
+  void Pandar128_handler(const sensor_msgs::msg::PointCloud2::ConstPtr &msg);
+  void l515_handler(const sensor_msgs::msg::PointCloud2::ConstPtr &msg);
   void give_feature(PointCloudXYZI &pl, vector<orgtype> &types);
   void pub_func(PointCloudXYZI &pl, const rclcpp::Time &ct);
   int plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i, uint &i_nex, Eigen::Vector3d &curr_direct);

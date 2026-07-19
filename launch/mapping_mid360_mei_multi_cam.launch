@@ -1,0 +1,12 @@
+<launch>
+  <arg name="use_rviz" default="true"/>
+  <arg name="mapping_params_file" default="$(find fast_livo)/config/mid360_mei_multi_cam.yaml"/>
+  <arg name="camera_params_file" default="$(find fast_livo)/config/camera_mei_multi_cam.yaml"/>
+
+  <node pkg="fast_livo" type="fastlivo_mapping_multi_cam" name="laserMapping" output="screen">
+    <rosparam command="load" file="$(arg mapping_params_file)"/>
+    <rosparam command="load" file="$(arg camera_params_file)"/>
+  </node>
+
+  <node if="$(arg use_rviz)" pkg="rviz" type="rviz" name="rviz" args="-d $(find fast_livo)/rviz_cfg/fast_livo2.rviz" output="screen"/>
+</launch>

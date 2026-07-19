@@ -1,158 +1,149 @@
-/**:
-  ros__parameters:
-    common:
-      img_topic: "/alphasense/cam0/image_raw"
+common:
+  img_topic: "/alphasense/cam0/image_raw"
 
-      # Input-only remap. Enable only when the camera YAML also contains the raw model.
-      image_undistort_en: false
-      raw_camera_ns: "camera"
-      lid_topic: "/hesai/pandar"
-      imu_topic: "/alphasense/imu"
-      img_en: 1
-      lidar_en: 1
-      ros_driver_bug_fix: false
+  # Input-only remap. Enable only when the camera YAML also contains the raw model.
+  image_undistort_en: false
+  raw_camera_ns: "camera"
+  lid_topic: "/hesai/pandar"
+  imu_topic: "/alphasense/imu"
+  img_en: 1
+  lidar_en: 1
+  ros_driver_bug_fix: false
 
-    extrin_calib:
-      # Hilti-2022
-      extrinsic_T: [-0.001, -0.00855, 0.055] 
-      extrinsic_R: [0.0, -1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, -1.0]
-      
-      # Hilti-2023
-      # extrinsic_T: [-0.006730146149038548, -0.006897049862999071, 0.049898628062256645] 
-      # extrinsic_R: [0.006609639848469365, -0.9999773650294649, 0.0012578115132016717, 
-      #               -0.9999762249571927, -0.006612093869054189, -0.0019569708811106104, 
-      #               0.001965243352927244, -0.0012448467359610184, -0.9999972940839232]
+extrin_calib:
+  # Hilti-2022
+  extrinsic_T: [-0.001, -0.00855, 0.055]
+  extrinsic_R: [0.0, -1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, -1.0]
 
-      # Hilti
-      Rcl: [ -0.999926,  -0.00670802, 0.0101073,
-            -0.0100912, -0.00242564, -0.999946,
-              0.00673218,-0.999975, 0.00235777 ]
-      Pcl: [ -0.0549762, 0.0675401, -0.0520599 ]
+  # Hilti-2023
+  # extrinsic_T: [-0.006730146149038548, -0.006897049862999071, 0.049898628062256645]
+  # extrinsic_R: [0.006609639848469365, -0.9999773650294649, 0.0012578115132016717,
+  #               -0.9999762249571927, -0.006612093869054189, -0.0019569708811106104,
+  #               0.001965243352927244, -0.0012448467359610184, -0.9999972940839232]
 
-    time_offset:
-      imu_time_offset: 0.0
-      img_time_offset: 0.0
-      exposure_time_init: 0.0
+  # Hilti
+  Rcl: [ -0.999926,  -0.00670802, 0.0101073,
+        -0.0100912, -0.00242564, -0.999946,
+          0.00673218,-0.999975, 0.00235777 ]
+  Pcl: [ -0.0549762, 0.0675401, -0.0520599 ]
 
-    preprocess:
-      image_downclock_en: true
-      image_downclock_factor: 4
-      point_filter_num: 1
-      filter_size_surf: 0.1 # 0.2
-      lidar_type: 5 # HesaiXT32
-      scan_line: 32
-      scan_rate: 10
-      blind: 0.6 # 0.1 0.3
-      feature_extract_enabled: false
-    
-    vio:
-      # 0: direct; 1: optical_flow; 2: color_only.
-      frontend_mode: 0
-      max_iterations: 5
-      outlier_threshold: 1000
-      img_point_cov: 1000
-      grid_size: 5
-      grid_n_height: 17
-      patch_size: 8
-      patch_pyrimid_level: 4
+time_offset:
+  imu_time_offset: 0.0
+  img_time_offset: 0.0
+  exposure_time_init: 0.0
 
-      # HILTI22 cam0 is an equidistant fisheye camera. Keep the original raw
-      # fisheye model in camera_fisheye_HILTI22.yaml and use virtual patches
-      # for the direct image alignment in this fork.
-      virtual_fisheye_patch_en: true
-      virtual_focal_length: 300.0
-      virtual_patch_margin: 4
-      virtual_max_search_level: 1
-      # virtual_patch_resampling_mode: "forward_splat"
-      virtual_patch_resampling_mode: "pull_exact"
-      virtual_raw_window_half_size: 96
-      virtual_splat_min_weight: 1.0e-6
-      virtual_splat_require_full_core_coverage: true
-      virtual_splat_debug_compare_pull_exact: false
-      # /rgb_img 上的拒绝点颜色图例：
-      #   range_reject：紫色
-      #   support_build：黄色
-      #   warp_ref：橘黄色
-      #   affine_matrix：深红色
-      #   photometric：红色
-      #   ncc：紫罗兰色
-      #   current_z/current_core：浅粉色/玫红色
-      #   close_view：橙色
-      #   ref_missing/ref_invalid：青色/天蓝色
-      #   normal_uninit/rotation：白色/棕色
-      draw_rejected_points_en: false
-      
-      normal_en: true
-      raycast_en: true
-      inverse_composition_en: false
-      exposure_estimate_en: true
-      inv_expo_cov: 0.1
+preprocess:
+  image_downclock_en: true
+  image_downclock_factor: 4
+  point_filter_num: 1
+  filter_size_surf: 0.1 # 0.2
+  lidar_type: 5 # HesaiXT32
+  scan_line: 32
+  scan_rate: 10
+  blind: 0.6 # 0.1 0.3
+  feature_extract_enabled: false
 
-      opticalflow:
-        max_cnt: 250
-        min_dist: 20
-        quality_level: 0.01
-        flow_back: true
-        f_threshold: 0.5
-        min_track_len_for_triangulation: 3
-        track_history_size: 20
-        feature_image_topic: "/fast_livo/feature_image"
-        triangulated_points_topic: "/fast_livo/triangulated_points"
+vio:
+  # 0: direct; 1: optical_flow; 2: color_only.
+  frontend_mode: 0
+  max_iterations: 5
+  outlier_threshold: 1000
+  img_point_cov: 1000
+  grid_size: 5
+  grid_n_height: 17
+  patch_size: 8
+  patch_pyrimid_level: 4
 
-    imu:
-      imu_en: true
-      imu_int_frame: 30
-      acc_cov: 0.5 # 0.1
-      gyr_cov: 0.01
-      gravity_est_en: true
-      ba_bg_est_en: true
-      b_acc_cov: 0.0001 # 0.1
-      b_gyr_cov: 0.0001 # 0.1
+  # HILTI22 cam0 is an equidistant fisheye camera. Keep the original raw
+  # fisheye model in camera_fisheye_HILTI22.yaml and use virtual patches
+  # for the direct image alignment in this fork.
+  virtual_fisheye_patch_en: true
+  virtual_focal_length: 300.0
+  virtual_patch_margin: 4
+  virtual_max_search_level: 1
+  # virtual_patch_resampling_mode: "forward_splat"
+  virtual_patch_resampling_mode: "pull_exact"
+  virtual_raw_window_half_size: 96
+  virtual_splat_min_weight: 1.0e-6
+  virtual_splat_require_full_core_coverage: true
+  virtual_splat_debug_compare_pull_exact: false
+  # /rgb_img 上的拒绝点颜色图例：
+  #   range_reject：紫�?      #   support_build：黄�?      #   warp_ref：橘黄色
+  #   affine_matrix：深红色
+  #   photometric：红�?      #   ncc：紫罗兰�?      #   current_z/current_core：浅粉色/玫红�?      #   close_view：橙�?      #   ref_missing/ref_invalid：青�?天蓝�?      #   normal_uninit/rotation：白�?棕色
+  draw_rejected_points_en: false
 
-    lio:
-      min_iterations: 5
-      dept_err: 0.02
-      beam_err: 0.05
-      sigma_num: 3.0
-      min_eigen_value: 0.0001 # 0.0025
-      voxel_size: 0.4
-      max_layer: 2
-      max_points_num: 100
-      layer_init_num: [5, 5, 5, 5, 5]
+  normal_en: true
+  raycast_en: true
+  inverse_composition_en: false
+  exposure_estimate_en: true
+  inv_expo_cov: 0.1
 
-    local_map:  
-      map_sliding_en: true
-      half_map_size: 100
-      sliding_thresh: 8.0
+  opticalflow:
+    max_cnt: 250
+    min_dist: 20
+    quality_level: 0.01
+    flow_back: true
+    f_threshold: 0.5
+    min_track_len_for_triangulation: 3
+    track_history_size: 20
+    feature_image_topic: "/fast_livo/feature_image"
+    triangulated_points_topic: "/fast_livo/triangulated_points"
 
-    uav:
-      imu_rate_odom: false
-      gravity_align_en: false
+imu:
+  imu_en: true
+  imu_int_frame: 30
+  acc_cov: 0.5 # 0.1
+  gyr_cov: 0.01
+  gravity_est_en: true
+  ba_bg_est_en: true
+  b_acc_cov: 0.0001 # 0.1
+  b_gyr_cov: 0.0001 # 0.1
 
-    publish:
-      dense_map_en: true
-      pub_effect_point_en: false 
-      pub_plane_en: false
-      pub_scan_num: 1
-      blind_rgb_points: 0.0
+lio:
+  min_iterations: 5
+  dept_err: 0.02
+  beam_err: 0.05
+  sigma_num: 3.0
+  min_eigen_value: 0.0001 # 0.0025
+  voxel_size: 0.4
+  max_layer: 2
+  max_points_num: 100
+  layer_init_num: [5, 5, 5, 5, 5]
 
-    evo:
-      seq_name: "exp21"
-      pose_output_en: true
+local_map:
+  map_sliding_en: true
+  half_map_size: 100
+  sliding_thresh: 8.0
 
-    pcd_save:
-      pcd_save_en: false
-      type: 0 # 0: World Frame, 1: Body Frame;
-      colmap_output_en: false # need to set interval = -1
-      filter_size_pcd: 0.15
-      interval: -1
-      # how many LiDAR frames saved in each pcd file;
-      # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+uav:
+  imu_rate_odom: false
+  gravity_align_en: false
 
-    image_save:
-      img_save_en: false
-      interval: 1
+publish:
+  dense_map_en: true
+  pub_effect_point_en: false
+  pub_plane_en: false
+  pub_scan_num: 1
+  blind_rgb_points: 0.0
 
-    debug:
-      plot_time: -10.0
-      frame_cnt: 6
+evo:
+  seq_name: "exp21"
+  pose_output_en: true
+
+pcd_save:
+  pcd_save_en: false
+  type: 0 # 0: World Frame, 1: Body Frame;
+  colmap_output_en: false # need to set interval = -1
+  filter_size_pcd: 0.15
+  interval: -1
+  # how many LiDAR frames saved in each pcd file;
+  # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+
+image_save:
+  img_save_en: false
+  interval: 1
+
+debug:
+  plot_time: -10.0
+  frame_cnt: 6
