@@ -741,7 +741,7 @@ bool VIOManager::refreshReferenceCalibration(Feature &feature)
   PerCameraData &ctx = cameras_[feature.camera_id_];
   const M3D Rcw = ctx.Rci * feature.Rwi_ref_.transpose();
   const V3D Pcw = -ctx.Rci * feature.Rwi_ref_.transpose() * feature.Pwi_ref_ + ctx.Pci;
-  feature.T_f_w_ = SE3<double>(Eigen::Quaterniond(Rcw).normalized().toRotationMatrix(), Pcw);
+  feature.T_f_w_ = SE3d(Eigen::Quaterniond(Rcw).normalized().toRotationMatrix(), Pcw);
   if (feature.virtual_patch_valid_)
     feature.T_v_w_ = composeVirtualPose(feature.R_v_from_c_, feature.T_f_w_);
   feature.extrinsic_version_ = extrinsic_version_;
@@ -1292,7 +1292,7 @@ bool VIOManager::associateVisualPointSurface(
   return true;
 }
 
-bool VIOManager::computeManagedFootprint(const PerCameraData &ctx, const SE3<double> &T_c_w,
+bool VIOManager::computeManagedFootprint(const PerCameraData &ctx, const SE3d &T_c_w,
                                          const V3D &point_w, const V3D &normal_w,
                                          const Feature *feature, const VoxelPlane &plane,
                                          std::array<V3D, 4> &corners_w) const
@@ -1569,10 +1569,10 @@ bool VIOManager::sampleRawCorePatchForDump(const PerCameraData &ctx, const cv::M
   }
   return true;
 }
-SE3<double> VIOManager::composeVirtualPose(const M3D &R_v_from_c, const SE3<double> &T_c_w) const
+SE3d VIOManager::composeVirtualPose(const M3D &R_v_from_c, const SE3d &T_c_w) const
 {
   // {}^V T_W = {}^V T_C * {}^C T_W. The virtual and raw cameras share the optical center.
-  return SE3<double>(R_v_from_c * T_c_w.rotationMatrix(), R_v_from_c * T_c_w.translation());
+  return SE3d(R_v_from_c * T_c_w.rotationMatrix(), R_v_from_c * T_c_w.translation());
 }
 
 bool VIOManager::buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &point_in_raw_camera,
@@ -2536,9 +2536,9 @@ bool VIOManager::sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V
 }
 
 bool VIOManager::createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img,
-                                            const SE3<double> &T_c_w, const V3D &point_w,
+                                            const SE3d &T_c_w, const V3D &point_w,
                                             float *core_patch, cv::Mat &virtual_support_img,
-                                            cv::Point &virtual_source_origin, SE3<double> &T_v_w,
+                                            cv::Point &virtual_source_origin, SE3d &T_v_w,
                                             M3D &R_v_from_c, M3D &R_c_from_v) const
 {
   virtual_support_img.release();
@@ -2768,7 +2768,7 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
     return;
   }
 
-  const SE3<double> T_v_w = composeVirtualPose(R_v_from_c, ctx.new_frame->T_f_w_);
+  const SE3d T_v_w = composeVirtualPose(R_v_from_c, ctx.new_frame->T_f_w_);
   cv::Mat raw_patch_display;
   cv::Mat virtual_patch_display;
   std::vector<V2D> raw_sample_pixels;
@@ -2812,7 +2812,7 @@ void VIOManager::processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw
 }
 
 bool VIOManager::buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px,
-                                               const V3D &point_c, const SE3<double> &T_v_w,
+                                               const V3D &point_c, const SE3d &T_v_w,
                                                const cv::Mat &virtual_support_img, cv::Mat &raw_patch_display,
                                                cv::Mat &virtual_patch_display,
                                                std::vector<V2D> &raw_sample_pixels, std::vector<V2D> &virtual_sample_pixels,
@@ -2882,7 +2882,7 @@ bool VIOManager::buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv
   {
     source_bearing /= bearing_norm;
     // Current observation is the source; the first saved observation is the fixed target.
-    const SE3<double> T_canchor_csource =
+    const SE3d T_canchor_csource =
         ref_patch_dump_probe_.anchor_T_c_w * ctx.new_frame->T_f_w_.inverse();
     Matrix2d A_anchor_source = Matrix2d::Zero();
     bool raw_affine_valid = false;
@@ -2917,7 +2917,7 @@ bool VIOManager::buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv
 
   bool virtual_valid = false;
   const V3D point_vsource = T_v_w * ref_patch_dump_probe_.point_w;
-  const SE3<double> T_vanchor_vsource = ref_patch_dump_probe_.anchor_T_v_w * T_v_w.inverse();
+  const SE3d T_vanchor_vsource = ref_patch_dump_probe_.anchor_T_v_w * T_v_w.inverse();
   Matrix2d A_virtual_anchor_source = Matrix2d::Zero();
   bool virtual_affine_valid = false;
   if (normal_en)
@@ -3205,7 +3205,7 @@ void VIOManager::dumpRuntimeSupportRawObservation(const PerCameraData &ctx, cons
          cur_saved ? 1 : 0, core_saved ? 1 : 0, runtime_support_dump_effective_folder_.c_str());
 }
 
-bool VIOManager::getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
+bool VIOManager::getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3d &T_vcur_vref, int level_ref, int pyramid_level,
                                             int halfpatch_size, Matrix2d &A_cur_ref) const
 {
   if (xyz_ref[2] <= virtual_min_z) return false;
@@ -3228,7 +3228,7 @@ bool VIOManager::getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double
   return A_cur_ref.array().isFinite().all() && std::fabs(A_cur_ref.determinant()) > 1e-9;
 }
 
-bool VIOManager::getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_vcur_vref,
+bool VIOManager::getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3d &T_vcur_vref,
                                                       int level_ref, Matrix2d &A_cur_ref) const
 {
   const V3D t = T_vcur_vref.inverse().translation();
@@ -3313,7 +3313,7 @@ void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
 }
 
 void VIOManager::getWarpMatrixAffineHomography(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const V2D &px_ref,
-                                               const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_cur_ref,
+                                               const V3D &xyz_ref, const V3D &normal_ref, const SE3d &T_cur_ref,
                                                const int level_ref, Matrix2d &A_cur_ref)
 {
   // create homography matrix
@@ -3337,7 +3337,7 @@ void VIOManager::getWarpMatrixAffineHomography(const PerCameraData &ref_ctx, con
 }
 
 void VIOManager::getWarpMatrixAffine(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const Vector2d &px_ref,
-                                     const Vector3d &f_ref, const double depth_ref, const SE3<double> &T_cur_ref,
+                                     const Vector3d &f_ref, const double depth_ref, const SE3d &T_cur_ref,
                                      const int level_ref, const int pyramid_level, const int halfpatch_size, Matrix2d &A_cur_ref)
 {
   // Compute affine warp matrix A_ref_cur
@@ -5363,7 +5363,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     result.track.T_vcur_w_seed = composeVirtualPose(result.track.R_vcur_from_ccur_seed, ctx.new_frame->T_f_w_);
     result.track.cur_support.T_v_w_seed = result.track.T_vcur_w_seed;
 
-    const SE3<double> T_vcur_vref = result.track.T_vcur_w_seed * ref_ftr->T_v_w_.inverse();
+    const SE3d T_vcur_vref = result.track.T_vcur_w_seed * ref_ftr->T_v_w_.inverse();
     const V3D point_vref = ref_ftr->T_v_w_ * pt->pos_;
     const double affine_start = omp_get_wtime();
     bool affine_ok;
@@ -6549,8 +6549,8 @@ void VIOManager::buildCurrentCrossCameraPairs()
 
         updateFrameState(source, *state);
         updateFrameState(target, *state);
-        const SE3<double> &T_source_w = source.new_frame->T_f_w_;
-        const SE3<double> &T_target_w = target.new_frame->T_f_w_;
+        const SE3d &T_source_w = source.new_frame->T_f_w_;
+        const SE3d &T_target_w = target.new_frame->T_f_w_;
         const V3D source_view = T_source_w.inverse().translation() - point->pos_;
         const V3D target_view = T_target_w.inverse().translation() - point->pos_;
         if (source_view.norm() > 1.0e-9 && target_view.norm() > 1.0e-9)
@@ -6576,7 +6576,7 @@ void VIOManager::buildCurrentCrossCameraPairs()
             const V3D point_vsource = source_track->T_vcur_w_seed * point->pos_;
             const V3D point_vtarget = target_track->T_vcur_w_seed * point->pos_;
             const V3D normal_vsource = source_track->T_vcur_w_seed.rotationMatrix() * point->normal_;
-            const SE3<double> T_vtarget_vsource = target_track->T_vcur_w_seed * source_track->T_vcur_w_seed.inverse();
+            const SE3d T_vtarget_vsource = target_track->T_vcur_w_seed * source_track->T_vcur_w_seed.inverse();
             if (source_track->valid && target_track->valid && point_vsource[2] > virtual_min_z &&
                 point_vtarget[2] > virtual_min_z && normal_vsource.norm() > virtual_min_z)
             {
@@ -7252,8 +7252,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
               // updateFrameState() already projects the composed camera rotation to SO(3)
               // when it creates T_f_w_. Reuse that valid pose instead of asking Sophus
               // to construct an SE3 directly from the numerically approximate ctx.Rcw.
-              const SE3<double> &T_cur_w = ctx.new_frame->T_f_w_;
-              const SE3<double> T_cur_ref = T_cur_w * usage_reference->T_f_w_.inverse();
+              const SE3d &T_cur_w = ctx.new_frame->T_f_w_;
+              const SE3d T_cur_ref = T_cur_w * usage_reference->T_f_w_.inverse();
               const M3D R = T_cur_ref.rotationMatrix();
               const V3D t = T_cur_ref.translation();
               Eigen::Matrix<double, 6, 6> adjoint = Eigen::Matrix<double, 6, 6>::Zero();
@@ -8252,7 +8252,7 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
     std::vector<float> patch(patch_size_total);
     cv::Mat virtual_support_img;
     cv::Point virtual_source_origin;
-    SE3<double> T_v_w;
+    SE3d T_v_w;
     M3D R_v_from_c, R_c_from_v;
     if (!createVirtualFeaturePatch(ctx, img, ctx.new_frame->T_f_w_, pt_var.point_w, patch.data(),
                                    virtual_support_img, virtual_source_origin, T_v_w, R_v_from_c, R_c_from_v))
@@ -9001,7 +9001,7 @@ void VIOManager::materializePendingNewPointObservations(
 
       cv::Mat virtual_support_img;
       cv::Point virtual_source_origin;
-      SE3<double> T_v_w;
+      SE3d T_v_w;
       M3D R_v_from_c, R_c_from_v;
       if (!createVirtualFeaturePatch(ctx, img, pending.T_f_w, pending.pt_var.point_w, pending.patch.data(),
                                      virtual_support_img, virtual_source_origin, T_v_w,
@@ -9264,7 +9264,7 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
 
   int update_num = 0;
   int level_gate_reject_num = 0;
-  const SE3<double> pose_cur = ctx.new_frame->T_f_w_;
+  const SE3d pose_cur = ctx.new_frame->T_f_w_;
   for (int i = 0; i < ctx.total_points; ++i)
   {
     VisualPoint *pt = ctx.visual_submap->voxel_points[i];
@@ -9284,7 +9284,7 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
     if (last_feature != nullptr)
     {
       refreshReferenceCalibration(*last_feature);
-      const SE3<double> delta_pose = last_feature->T_f_w_ * pose_cur.inverse();
+      const SE3d delta_pose = last_feature->T_f_w_ * pose_cur.inverse();
       const double delta_p = delta_pose.translation().norm();
       const double trace = delta_pose.rotationMatrix().trace();
       const double delta_theta = trace > 3.0 - 1e-6 ? 0.0 : std::acos(std::clamp(0.5 * (trace - 1.0), -1.0, 1.0));
@@ -9317,7 +9317,7 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
     std::unique_ptr<float[]> patch(new float[patch_size_total]);
     cv::Mat virtual_support_img;
     cv::Point virtual_source_origin;
-    SE3<double> T_v_w;
+    SE3d T_v_w;
     M3D R_v_from_c, R_c_from_v;
     if (!createVirtualFeaturePatch(ctx, img, ctx.new_frame->T_f_w_, pt->pos_, patch.get(),
                                    virtual_support_img, virtual_source_origin, T_v_w, R_v_from_c, R_c_from_v))

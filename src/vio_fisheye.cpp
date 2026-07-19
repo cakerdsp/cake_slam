@@ -215,7 +215,7 @@ void VIOManager::initializeVIO()
     fout_camera << "# Camera list with one line of data per camera:\n";
     fout_camera << "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n";
     fout_camera << "1 PINHOLE " << width << " " << height << " "
-        << std::fixed << std::setprecision(6)  // 控制浮点数精度为10位
+        << std::fixed << std::setprecision(6)  // 閹貉冨煑濞搭喚鍋ｉ弫鎵翱鎼达缚璐?0娴?
         << fx << " " << fy << " "
         << cx << " " << cy << std::endl;
     fout_camera.close();
@@ -370,10 +370,10 @@ void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
   }
 }
 
-SE3<double> VIOManager::composeVirtualPose(const M3D &R_v_from_c, const SE3<double> &T_c_w) const
+SE3d VIOManager::composeVirtualPose(const M3D &R_v_from_c, const SE3d &T_c_w) const
 {
   // {}^V T_W = {}^V T_C * {}^C T_W. The virtual and raw cameras share the optical center.
-  return SE3<double>(R_v_from_c * T_c_w.rotationMatrix(), R_v_from_c * T_c_w.translation());
+  return SE3d(R_v_from_c * T_c_w.rotationMatrix(), R_v_from_c * T_c_w.translation());
 }
 
 bool VIOManager::buildVirtualFrameRotation(const V3D &point_in_raw_camera, M3D &R_v_from_c, M3D &R_c_from_v) const
@@ -751,8 +751,8 @@ bool VIOManager::sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V
   return true;
 }
 
-bool VIOManager::createVirtualFeaturePatch(const cv::Mat &raw_img, const SE3<double> &T_c_w, const V3D &point_w, float *core_patch,
-                                           cv::Mat &virtual_support_img, SE3<double> &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const
+bool VIOManager::createVirtualFeaturePatch(const cv::Mat &raw_img, const SE3d &T_c_w, const V3D &point_w, float *core_patch,
+                                           cv::Mat &virtual_support_img, SE3d &T_v_w, M3D &R_v_from_c, M3D &R_c_from_v) const
 {
   const V3D point_c = T_c_w * point_w;
   V2D raw_center_px;
@@ -771,7 +771,7 @@ bool VIOManager::createVirtualFeaturePatch(const cv::Mat &raw_img, const SE3<dou
   return true;
 }
 
-bool VIOManager::getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
+bool VIOManager::getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3d &T_vcur_vref, int level_ref, int pyramid_level,
                                             int halfpatch_size, Matrix2d &A_cur_ref) const
 {
   if (xyz_ref[2] <= virtual_min_z) return false;
@@ -794,7 +794,7 @@ bool VIOManager::getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double
   return A_cur_ref.array().isFinite().all() && std::fabs(A_cur_ref.determinant()) > 1e-9;
 }
 
-bool VIOManager::getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_vcur_vref,
+bool VIOManager::getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3d &T_vcur_vref,
                                                       int level_ref, Matrix2d &A_cur_ref) const
 {
   const V3D t = T_vcur_vref.inverse().translation();
@@ -866,7 +866,7 @@ void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
 }
 
 void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref, const V3D &xyz_ref, const V3D &normal_ref,
-                                                  const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref)
+                                                  const SE3d &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref)
 {
   // create homography matrix
   const V3D t = T_cur_ref.inverse().translation();
@@ -889,7 +889,7 @@ void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, co
 }
 
 void VIOManager::getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector2d &px_ref, const Vector3d &f_ref, const double depth_ref,
-                                        const SE3<double> &T_cur_ref, const int level_ref, const int pyramid_level, const int halfpatch_size,
+                                        const SE3d &T_cur_ref, const int level_ref, const int pyramid_level, const int halfpatch_size,
                                         Matrix2d &A_cur_ref)
 {
   // Compute affine warp matrix A_ref_cur
@@ -1340,7 +1340,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
       continue;
     }
 
-    const SE3<double> T_vcur_vref = result.track.T_vcur_w_seed * ref_ftr->T_v_w_.inverse();
+    const SE3d T_vcur_vref = result.track.T_vcur_w_seed * ref_ftr->T_v_w_.inverse();
     const V3D point_vref = ref_ftr->T_v_w_ * pt->pos_;
     const double affine_start = omp_get_wtime();
     bool affine_ok;
@@ -1366,7 +1366,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(cv::Mat img, vector<pointWit
     result.warped_reference.assign(warp_len, 0.0f);
     for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
     {
-      // [MODIFY] 使用第一次生成的参考 patch，不再每帧重构
+      // [MODIFY] 娴ｈ法鏁ょ粭顑跨濞嗭紕鏁撻幋鎰畱閸欏倽鈧?patch閿涘奔绗夐崘宥嗙槨鐢囧櫢閺?
       if (!warpAffineVirtual(result.track.A_cur_ref, ref_ftr->img_, ref_ftr->level_, result.track.search_level, pyramid_level,
                              patch_size_half, result.warped_reference.data()))
       {
@@ -2015,7 +2015,7 @@ void VIOManager::generateVisualMapPointsVirtual(cv::Mat img, vector<pointWithVar
 
     std::unique_ptr<float[]> patch(new float[patch_size_total]);
     cv::Mat virtual_support_img;
-    SE3<double> T_v_w;
+    SE3d T_v_w;
     M3D R_v_from_c, R_c_from_v;
     if (!createVirtualFeaturePatch(img, new_frame_->T_f_w_, pt_var.point_w, patch.get(), virtual_support_img, T_v_w, R_v_from_c,
                                    R_c_from_v))
@@ -2027,7 +2027,7 @@ void VIOManager::generateVisualMapPointsVirtual(cv::Mat img, vector<pointWithVar
     VisualPoint *pt_new = new VisualPoint(pt_var.point_w);
     const V3D bearing = cam->cam2world(raw_px);
     Feature *ftr_new = new Feature(pt_new, patch.release(), raw_px, bearing, new_frame_->T_f_w_, 0);
-    // [MODIFY] 使用第一次生成的参考 patch，不再每帧重构
+    // [MODIFY] 娴ｈ法鏁ょ粭顑跨濞嗭紕鏁撻幋鎰畱閸欏倽鈧?patch閿涘奔绗夐崘宥嗙槨鐢囧櫢閺?
     ftr_new->img_ = virtual_support_img;
     ftr_new->id_ = new_frame_->id_;
     ftr_new->inv_expo_time_ = state->inv_expo_time;
@@ -2163,7 +2163,7 @@ void VIOManager::updateVisualMapPointsVirtual(cv::Mat img)
   if (total_points == 0) return;
 
   int update_num = 0;
-  const SE3<double> pose_cur = new_frame_->T_f_w_;
+  const SE3d pose_cur = new_frame_->T_f_w_;
   for (int i = 0; i < total_points; ++i)
   {
     VisualPoint *pt = visual_submap->voxel_points[i];
@@ -2178,7 +2178,7 @@ void VIOManager::updateVisualMapPointsVirtual(cv::Mat img)
     if (!projectRawFisheyeIfValid(new_frame_->w2f(pt->pos_), 1, raw_px)) continue;
     Feature *last_feature = pt->obs_.back();
     bool add_flag = false;
-    const SE3<double> delta_pose = last_feature->T_f_w_ * pose_cur.inverse();
+    const SE3d delta_pose = last_feature->T_f_w_ * pose_cur.inverse();
     const double delta_p = delta_pose.translation().norm();
     const double trace = delta_pose.rotationMatrix().trace();
     const double delta_theta = trace > 3.0 - 1e-6 ? 0.0 : std::acos(std::clamp(0.5 * (trace - 1.0), -1.0, 1.0));
@@ -2194,7 +2194,7 @@ void VIOManager::updateVisualMapPointsVirtual(cv::Mat img)
 
     std::unique_ptr<float[]> patch(new float[patch_size_total]);
     cv::Mat virtual_support_img;
-    SE3<double> T_v_w;
+    SE3d T_v_w;
     M3D R_v_from_c, R_c_from_v;
     if (!createVirtualFeaturePatch(img, new_frame_->T_f_w_, pt->pos_, patch.get(), virtual_support_img, T_v_w, R_v_from_c, R_c_from_v))
     {
@@ -2204,7 +2204,7 @@ void VIOManager::updateVisualMapPointsVirtual(cv::Mat img)
 
     const V3D bearing = cam->cam2world(raw_px);
     Feature *ftr_new = new Feature(pt, patch.release(), raw_px, bearing, new_frame_->T_f_w_, visual_submap->search_levels[i]);
-    // [MODIFY] 使用第一次生成的参考 patch，不再每帧重构
+    // [MODIFY] 娴ｈ法鏁ょ粭顑跨濞嗭紕鏁撻幋鎰畱閸欏倽鈧?patch閿涘奔绗夐崘宥嗙槨鐢囧櫢閺?
     ftr_new->img_ = virtual_support_img;
     ftr_new->id_ = new_frame_->id_;
     ftr_new->inv_expo_time_ = state->inv_expo_time;
@@ -2684,7 +2684,7 @@ void VIOManager::precomputeReferencePatchesVirtual(int level)
         const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
         float value;
         V2D gradient;
-        // [MODIFY] 使用第一次生成的参考 patch，不再每帧重构
+        // [MODIFY] 娴ｈ法鏁ょ粭顑跨濞嗭紕鏁撻幋鎰畱閸欏倽鈧?patch閿涘奔绗夐崘宥嗙槨鐢囧櫢閺?
         if (!sampleStoredVirtualValueAndGradient(pt->ref_patch->img_, center + offset.cast<double>(), scale, value, gradient)) continue;
         MD(1, 2) Jimg;
         Jimg << gradient[0] / scale, gradient[1] / scale;
@@ -3456,10 +3456,10 @@ void VIOManager::dumpDataForColmap()
   Eigen::Quaterniond q(new_frame_->T_f_w_.rotationMatrix());
   Eigen::Vector3d t = new_frame_->T_f_w_.translation();
   fout_colmap << cnt << " "
-            << std::fixed << std::setprecision(6)  // 保证浮点数精度为6位
+            << std::fixed << std::setprecision(6)  // 娣囨繆鐦夊ù顔惧仯閺佹壆绨挎惔锔胯礋6娴?
             << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " "
             << t.x() << " " << t.y() << " " << t.z() << " "
-            << 1 << " "  // CAMERA_ID (假设相机ID为1)
+            << 1 << " "  // CAMERA_ID (閸嬪洩顔曢惄鍛婃簚ID娑?)
             << cnt_str << ".png" << std::endl;
   fout_colmap << "0.0 0.0 -1" << std::endl;
   cnt++;

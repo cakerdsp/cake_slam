@@ -138,7 +138,7 @@ void VIOManager::initializeVIO()
     fout_camera << "# Camera list with one line of data per camera:\n";
     fout_camera << "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n";
     fout_camera << "1 PINHOLE " << width << " " << height << " "
-        << std::fixed << std::setprecision(6)  // 控制浮点数精度为10位
+        << std::fixed << std::setprecision(6)  // 閹貉冨煑濞搭喚鍋ｉ弫鎵翱鎼达缚璐?0娴?
         << fx << " " << fy << " "
         << cx << " " << cy << std::endl;
     fout_camera.close();
@@ -252,7 +252,7 @@ void VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
 }
 
 void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref, const V3D &xyz_ref, const V3D &normal_ref,
-                                                  const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref)
+                                                  const SE3d &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref)
 {
   // create homography matrix
   const V3D t = T_cur_ref.inverse().translation();
@@ -275,7 +275,7 @@ void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, co
 }
 
 void VIOManager::getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector2d &px_ref, const Vector3d &f_ref, const double depth_ref,
-                                        const SE3<double> &T_cur_ref, const int level_ref, const int pyramid_level, const int halfpatch_size,
+                                        const SE3d &T_cur_ref, const int level_ref, const int pyramid_level, const int halfpatch_size,
                                         Matrix2d &A_cur_ref)
 {
   // Compute affine warp matrix A_ref_cur
@@ -1776,10 +1776,10 @@ void VIOManager::dumpDataForColmap()
   Eigen::Quaterniond q(new_frame_->T_f_w_.rotationMatrix());
   Eigen::Vector3d t = new_frame_->T_f_w_.translation();
   fout_colmap << cnt << " "
-            << std::fixed << std::setprecision(6)  // 保证浮点数精度为6位
+            << std::fixed << std::setprecision(6)  // 娣囨繆鐦夊ù顔惧仯閺佹壆绨挎惔锔胯礋6娴?
             << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " "
             << t.x() << " " << t.y() << " " << t.z() << " "
-            << 1 << " "  // CAMERA_ID (假设相机ID为1)
+            << 1 << " "  // CAMERA_ID (閸嬪洩顔曢惄鍛婃簚ID娑?)
             << cnt_str << ".png" << std::endl;
   fout_colmap << "0.0 0.0 -1" << std::endl;
   cnt++;

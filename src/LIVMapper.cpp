@@ -860,7 +860,7 @@ void LIVMapper::imu_prop_callback()
 {
   if (p_imu->imu_need_init || !new_imu || !ekf_finish_once) { return; }
   mtx_buffer_imu_prop.lock();
-  new_imu = false; // 控制 propagate 频率和 IMU 频率一致
+  new_imu = false; // 閹貉冨煑 propagate 妫版垹宸奸崪?IMU 妫版垹宸兼稉鈧懛?
   if (imu_prop_enable && !prop_imu_buffer.empty())
   {
     static double last_t_from_lidar_end_time = 0;

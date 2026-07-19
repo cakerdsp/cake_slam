@@ -56,7 +56,7 @@ struct Feature
   int level_;
   VisualPoint *point_;
   Vector2d grad_;
-  SE3<double> T_f_w_;            //!< Raw fisheye pose: {}^C T_W.
+  SE3d T_f_w_;            //!< Raw fisheye pose: {}^C T_W.
   M3D Rwi_ref_;                  //!< IMU pose at reference creation, {}^W R_I.
   V3D Pwi_ref_;                  //!< IMU position at reference creation, world frame.
   uint64_t extrinsic_version_;
@@ -68,7 +68,7 @@ struct Feature
 
   // Local virtual pinhole camera metadata. The virtual camera shares the raw
   // camera optical center, so {}^V T_C contains rotation only.
-  SE3<double> T_v_w_;            //!< Virtual pinhole pose: {}^V T_W.
+  SE3d T_v_w_;            //!< Virtual pinhole pose: {}^V T_W.
   Matrix3d R_v_from_c_;          //!< {}^V R_C.
   Matrix3d R_c_from_v_;          //!< {}^C R_V = ({}^V R_C)^T.
   bool virtual_patch_valid_;
@@ -101,7 +101,7 @@ struct Feature
   Eigen::Matrix<double, 6, 6> mean_pose_information_;
   bool pending_delete_;
   
-  Feature(VisualPoint *_point, float *_patch, const Vector2d &_px, const Vector3d &_f, const SE3<double> &_T_f_w, int _level,
+  Feature(VisualPoint *_point, float *_patch, const Vector2d &_px, const Vector3d &_f, const SE3d &_T_f_w, int _level,
           int _camera_id = 0, double _timestamp = 0.0, double _raw_timestamp = 0.0,
           double _corrected_timestamp = 0.0, double _td_used = 0.0,
           double _exposure_time_offset = 0.0, int _time_offset_group = 0,

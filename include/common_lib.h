@@ -19,13 +19,13 @@ which is included as part of this source code package.
 #include <utils/utils.h>
 #include <opencv2/opencv.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <sophus/se3.hpp>
+#include <vikit/sophus_compat.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2/LinearMath/Transform.hpp>
 #include <tf2/LinearMath/Quaternion.hpp>
 
 using namespace std;
-// using namespace Eigen;   // avoid cmake error: reference to ‘Matrix’ is ambiguous
+// using namespace Eigen;   // avoid cmake error: reference to 閳ユコatrix閳?is ambiguous
 using namespace Sophus;
 
 #define print_line std::cout << __FILE__ << ", " << __LINE__ << std::endl;

@@ -11,7 +11,7 @@
 
 #include <Eigen/Core>
 #include <Eigen/StdVector>
-#include <sophus/se3.hpp>
+#include <vikit/sophus_compat.h>
 
 namespace vk
 {

@@ -37,7 +37,7 @@ struct Feature
   int level_;
   VisualPoint *point_;
   Vector2d grad_;
-  SE3<double> T_f_w_;            //!< Raw fisheye pose: {}^C T_W.
+  SE3d T_f_w_;            //!< Raw fisheye pose: {}^C T_W.
   float *patch_; //!< Immutable core patch extracted once when this Feature is created.
                  //!< Length is always patch_size_total.
   float score_;
@@ -46,12 +46,12 @@ struct Feature
 
   // Local virtual pinhole camera metadata. The virtual camera shares the raw
   // camera optical center, so {}^V T_C contains rotation only.
-  SE3<double> T_v_w_;            //!< Virtual pinhole pose: {}^V T_W.
+  SE3d T_v_w_;            //!< Virtual pinhole pose: {}^V T_W.
   Matrix3d R_v_from_c_;          //!< {}^V R_C.
   Matrix3d R_c_from_v_;          //!< {}^C R_V = ({}^V R_C)^T.
   bool virtual_patch_valid_;
   
-  Feature(VisualPoint *_point, float *_patch, const Vector2d &_px, const Vector3d &_f, const SE3<double> &_T_f_w, int _level)
+  Feature(VisualPoint *_point, float *_patch, const Vector2d &_px, const Vector3d &_f, const SE3d &_T_f_w, int _level)
       : type_(CORNER), px_(_px), f_(_f), level_(_level), point_(_point), T_f_w_(_T_f_w), patch_(_patch), score_(0), mean_(0),
         inv_expo_time_(0), T_v_w_(_T_f_w), R_v_from_c_(Matrix3d::Identity()), R_c_from_v_(Matrix3d::Identity()),
         virtual_patch_valid_(false)

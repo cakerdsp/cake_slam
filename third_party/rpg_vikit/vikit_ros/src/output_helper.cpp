@@ -14,7 +14,7 @@ namespace vk {
 namespace output_helper {
 
 void
-publishTfTransform(const Sophus::SE3<double>& T, const ros::Time& stamp,
+publishTfTransform(const fast_livo::SE3d& T, const ros::Time& stamp,
                       const std::string& frame_id, const std::string& child_frame_id,
                       tf2_ros::TransformBroadcaster& br)
 {

@@ -47,7 +47,7 @@ struct VirtualPatchImage
   cv::Mat valid_mask;    //!< CV_8UC1 validity mask for values.
   M3D R_v_from_c = M3D::Identity();  //!< {}^V R_C.
   M3D R_c_from_v = M3D::Identity();  //!< {}^C R_V.
-  SE3<double> T_v_w_seed;            //!< {}^V T_W at submap construction.
+  SE3d T_v_w_seed;            //!< {}^V T_W at submap construction.
   bool valid = false;
 };
 
@@ -58,7 +58,7 @@ struct VirtualTrackPatch
   VirtualPatchImage cur_support;
   M3D R_vcur_from_ccur_seed = M3D::Identity();
   M3D R_ccur_from_vcur_seed = M3D::Identity();
-  SE3<double> T_vcur_w_seed;
+  SE3d T_vcur_w_seed;
   Matrix2d A_cur_ref = Matrix2d::Identity();
   int search_level = 0;
   bool valid = false;
@@ -178,7 +178,7 @@ struct OpticalFlowObservation
   double timestamp = 0.0;
   cv::Point2f px;
   V3D bearing = V3D::Zero();
-  SE3<double> T_f_w;
+  SE3d T_f_w;
 };
 
 struct OpticalFlowTrack
@@ -214,8 +214,8 @@ struct PendingNewPointObservation
   std::vector<float> patch;
   cv::Mat img;
   cv::Point virtual_source_origin;
-  SE3<double> T_f_w;
-  SE3<double> T_v_w;
+  SE3d T_f_w;
+  SE3d T_v_w;
   M3D Rwi_ref = M3D::Identity();
   V3D Pwi_ref = V3D::Zero();
   M3D R_v_from_c = M3D::Identity();
@@ -532,8 +532,8 @@ public:
     V3D point_w = V3D::Zero();
     V3D normal_w = V3D::Zero();
     bool anchor_valid = false;
-    SE3<double> anchor_T_c_w;
-    SE3<double> anchor_T_v_w;
+    SE3d anchor_T_c_w;
+    SE3d anchor_T_v_w;
     std::vector<float> anchor_virtual_patch;
   };
   RefPatchDumpProbeState ref_patch_dump_probe_;
@@ -544,7 +544,7 @@ public:
   unsigned int ref_patch_dump_effective_seed_ = 0;
   int ref_patch_dump_candidates_to_skip_ = -1;
   cv::Mat ref_patch_dump_range_img_;
-  SE3<double> ref_patch_dump_range_T_f_w_;
+  SE3d ref_patch_dump_range_T_f_w_;
   bool ref_patch_dump_range_pose_valid_ = false;
   int rejected_virtual_support_oob_ = 0;
   int rejected_virtual_projection_invalid_ = 0;
@@ -881,11 +881,11 @@ public:
   void resetGrid(PerCameraData &ctx);
   void updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img);
   void getWarpMatrixAffine(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const Vector2d &px_ref,
-                           const Vector3d &f_ref, const double depth_ref, const SE3<double> &T_cur_ref,
+                           const Vector3d &f_ref, const double depth_ref, const SE3d &T_cur_ref,
                            const int level_ref, 
                            const int pyramid_level, const int halfpatch_size, Matrix2d &A_cur_ref);
   void getWarpMatrixAffineHomography(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const V2D &px_ref,
-                                     const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
+                                     const V3D &xyz_ref, const V3D &normal_ref, const SE3d &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
   bool warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
   bool buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &point_in_raw_camera, const V2D &raw_center_px,
@@ -925,9 +925,9 @@ public:
   bool interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value) const;
   V2D virtualProject(const V3D &p_v) const;
   V3D virtualCam2World(const V2D &px_v) const;
-  bool createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img, const SE3<double> &T_c_w,
+  bool createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img, const SE3d &T_c_w,
                                  const V3D &point_w, float *core_patch, cv::Mat &virtual_support_img,
-                                 cv::Point &virtual_source_origin, SE3<double> &T_v_w,
+                                 cv::Point &virtual_source_origin, SE3d &T_v_w,
                                  M3D &R_v_from_c, M3D &R_c_from_v) const;
   bool extractRefPatchDumpRawRoi(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px,
                                  const M3D &R_c_from_v, cv::Mat &raw_roi, M3D &raw_to_roi) const;
@@ -936,7 +936,7 @@ public:
   void initializeRefPatchDump();
   void processRefPatchDumpProbe(PerCameraData &ctx, const cv::Mat &raw_img);
   bool buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px,
-                                    const V3D &point_c, const SE3<double> &T_v_w, const cv::Mat &virtual_support_img,
+                                    const V3D &point_c, const SE3d &T_v_w, const cv::Mat &virtual_support_img,
                                     cv::Mat &raw_patch_display, cv::Mat &virtual_patch_display,
                                     std::vector<V2D> &raw_sample_pixels, std::vector<V2D> &virtual_sample_pixels,
                                     double &virtual_ncc);
@@ -957,9 +957,9 @@ public:
                                         int submap_index, double error, double ncc);
   bool sampleRawCorePatchForDump(const PerCameraData &ctx, const cv::Mat &img, const V2D &pc,
                                  int scale, std::vector<float> &patch) const;
-  bool getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3<double> &T_vcur_vref, int level_ref, int pyramid_level,
+  bool getWarpMatrixAffineVirtual(const V3D &xyz_ref, const SE3d &T_vcur_vref, int level_ref, int pyramid_level,
                                   int halfpatch_size, Matrix2d &A_cur_ref) const;
-  bool getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3<double> &T_vcur_vref,
+  bool getWarpMatrixAffineHomographyVirtual(const V3D &xyz_ref, const V3D &normal_ref, const SE3d &T_vcur_vref,
                                             int level_ref, Matrix2d &A_cur_ref) const;
   bool warpAffineVirtual(const Matrix2d &A_cur_ref, const cv::Mat &virtual_ref_img, int level_ref, int search_level,
                          int pyramid_level, int halfpatch_size, float *patch) const;
@@ -976,7 +976,7 @@ public:
                                            float &value, V2D &gradient) const;
   bool sampleVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px, int scale, float &value, V2D &gradient) const;
   bool sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V2D &px, int scale, float &value, V2D &gradient) const;
-  SE3<double> composeVirtualPose(const M3D &R_v_from_c, const SE3<double> &T_c_w) const;
+  SE3d composeVirtualPose(const M3D &R_v_from_c, const SE3d &T_c_w) const;
   bool passVisualGeometryFilter(const pointWithVar &candidate,
                                 const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
                                 VisualGeomRejectReason &reject_reason) const;
@@ -1008,7 +1008,7 @@ public:
                                    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
                                    int64_t &voxel_x, int64_t &voxel_y, int64_t &voxel_z,
                                    const VoxelPlane *&plane) const;
-  bool computeManagedFootprint(const PerCameraData &ctx, const SE3<double> &T_c_w, const V3D &point_w,
+  bool computeManagedFootprint(const PerCameraData &ctx, const SE3d &T_c_w, const V3D &point_w,
                                const V3D &normal_w, const Feature *feature, const VoxelPlane &plane,
                                std::array<V3D, 4> &corners_w) const;
   double managedFootprintIoU(const std::array<V3D, 4> &a, const std::array<V3D, 4> &b,

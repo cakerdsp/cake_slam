@@ -30,7 +30,7 @@ which is included as part of this source code package.
 #include <geometry_msgs/Quaternion.h>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
-#include <sophus/se3.hpp>
+#include <vikit/sophus_compat.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2/LinearMath/Transform.hpp>
 #include <tf2/LinearMath/Quaternion.hpp>

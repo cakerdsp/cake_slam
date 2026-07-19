@@ -1332,7 +1332,7 @@ void LIVMapper::imu_prop_callback()
 {
   if (p_imu->imu_need_init || !new_imu || !ekf_finish_once) { return; }
   mtx_buffer_imu_prop.lock();
-  new_imu = false; // 閹貉冨煑 propagate 妫版垹宸奸敓?IMU 妫版垹宸兼稉鈧敓?
+  new_imu = false; // 闂佺鐭囬崘銊у幀 propagate 婵☆偆澧楅崹鐟邦啅婵傚憡鏅?IMU 婵☆偆澧楅崹鐟邦啅閸忚偐鈻旈柍褜鍓熼弫?
   if (imu_prop_enable && !prop_imu_buffer.empty())
   {
     static double last_t_from_lidar_end_time = 0;

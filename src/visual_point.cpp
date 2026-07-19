@@ -85,9 +85,9 @@ bool VisualPoint::getCloseViewObs(const Vector3d &framepos, Feature *&ftr, const
   //   return false;
   // }
 
-  if (min_cos_angle < 0.5) // assume that observations larger than 60° are useless 0.5
+  if (min_cos_angle < 0.5) // assume that observations larger than 60鎺?are useless 0.5
   {
-    // ROS_ERROR("The obseved angle is larger than 60°.");
+    // ROS_ERROR("The obseved angle is larger than 60鎺?");
     return false;
   }
 

@@ -21,11 +21,11 @@ MEICamera::~MEICamera() {
 }
 
 Eigen::Vector3d MEICamera::cam2world(const double& u, const double& v) const {
-  // 1. 转换到归一化平面 (初值)
+  // 1. 鏉烆剚宕查崚鏉跨秺娑撯偓閸栨牕閽╅棃?(閸掓繂鈧?
   double mx = (u - cx_) / fx_;
   double my = (v - cy_) / fy_;
   
-  // 2. 纯 C 标量迭代去畸变
+  // 2. 缁?C 閺嶅洭鍣烘潻顓濆敩閸樿崵鏆╅崣?
   removeDistortion(mx, my);
   
   double r2 = mx*mx + my*my;
@@ -35,7 +35,7 @@ Eigen::Vector3d MEICamera::cam2world(const double& u, const double& v) const {
 
   double scale = (xi_ + std::sqrt(term)) / (1.0 + r2);
   
-  // 3. 构建结果并归一化
+  // 3. 閺嬪嫬缂撶紒鎾寸亯楠炶泛缍婃稉鈧崠?
   Eigen::Vector3d res(scale * mx, scale * my, scale - xi_);
   // double norm = std::sqrt(res[0]*res[0] + res[1]*res[1] + res[2]*res[2]);
   // if (norm > 1e-10) {
@@ -62,11 +62,11 @@ Eigen::Vector2d MEICamera::world2cam(const Eigen::Vector3d& xyz) const {
   //   return Eigen::Vector2d(-1, -1);
   // }
 
-  // 归一化平面坐标
+  // 瑜版帊绔撮崠鏍ч挬闂堛垹娼楅弽?
   double mx = x / common_div;
   double my = y / common_div;
 
-  // 手动应用畸变
+  // 閹靛濮╂惔鏃傛暏閻ｇ褰?
   if (distortion_) {
     double r2 = mx*mx + my*my;
     double r4 = r2*r2;
@@ -117,7 +117,7 @@ Eigen::Matrix<double, 2, 3> MEICamera::errorJac(const Eigen::Vector3d& p) const 
   double dr_xi_dy = xi_ * y * d_inv;
   double dr_xi_dz = 1.0 + xi_ * z * d_inv;
 
-  // 纯标量赋值，保持高性能
+  // 缁绢垱鐖ｉ柌蹇氱ゴ閸婄》绱濇穱婵囧瘮妤傛ɑ鈧嗗厴
   J(0,0) = fx_ * (r_xi - x * dr_xi_dx) * r_xi2_inv;
   J(0,1) = fx_ * (-x * dr_xi_dy) * r_xi2_inv;
   J(0,2) = fx_ * (-x * dr_xi_dz) * r_xi2_inv;
