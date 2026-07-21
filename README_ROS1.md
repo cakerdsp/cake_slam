@@ -1,6 +1,6 @@
 # FAST-LIVO Multi-Camera ROS1 Port
 
-This branch is a ROS1/catkin port of the multi-camera IESKF pipeline. It vendors the matching `rpg_vikit` sources under `third_party/rpg_vikit` so `vikit_common` and `vikit_ros` are built in the same catkin workspace as `fast_livo`.
+This branch is a ROS1/catkin port of the multi-camera IESKF pipeline. It vendors the matching `rpg_vikit` sources under `third_party/rpg_vikit` so `vikit_common` and `vikit_ros` are built in the same catkin workspace as `cake_slam`.
 
 ## Requirements
 
@@ -17,15 +17,15 @@ The old Sophus API with only `sophus/se3.h` is not compatible with this codebase
 sudo apt update
 sudo apt install ros-noetic-cv-bridge ros-noetic-image-transport ros-noetic-pcl-ros ros-noetic-pcl-conversions ros-noetic-tf2-ros ros-noetic-tf2-geometry-msgs libfmt-dev
 
-mkdir -p ~/catkin_fast_livo/src
-cd ~/catkin_fast_livo/src
-git clone -b multi-cam-ieskf-ros1-clean <your-fast-livo-repo-url> fast_livo
+mkdir -p ~/catkin_cake_slam/src
+cd ~/catkin_cake_slam/src
+git clone -b multi-cam-ieskf-ros1-clean <your-cake-slam-repo-url> cake_slam
 
 # Put the ROS1 livox driver here as livox_ros_driver.
 # Example:
 # git clone https://github.com/Livox-SDK/livox_ros_driver.git
 
-cd ~/catkin_fast_livo
+cd ~/catkin_cake_slam
 catkin_make -DCMAKE_BUILD_TYPE=Release
 source devel/setup.bash
 ```
@@ -46,8 +46,8 @@ catkin_make -DCMAKE_BUILD_TYPE=Release -DSophus_DIR=/path/to/sophus/install/shar
 ## Run M2DGR Multi-Camera
 
 ```bash
-source ~/catkin_fast_livo/devel/setup.bash
-roslaunch fast_livo mapping_m2dgr_multi_cam.launch use_rviz:=false
+source ~/catkin_cake_slam/devel/setup.bash
+roslaunch cake_slam mapping_m2dgr_multi_cam.launch use_rviz:=false
 ```
 
 The ROS1 launch loads:

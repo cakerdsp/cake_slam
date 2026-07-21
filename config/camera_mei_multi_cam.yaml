@@ -1,58 +1,56 @@
-/**:
-  ros__parameters:
-    camera0:
-      model: MEI
-      width: 1088
-      height: 1280
-      scale: 1.0
-      fx: 1661.519541
-      fy: 1661.186841
-      cx: 535.124575
-      cy: 646.963644
-      xi: 3.177956
-      k1: -0.056745
-      k2: 0.426441
-      p1: -0.000266
-      p2: -0.001028
+camera0:
+  model: MEI
+  width: 1088
+  height: 1280
+  scale: 1.0
+  fx: 1661.519541
+  fy: 1661.186841
+  cx: 535.124575
+  cy: 646.963644
+  xi: 3.177956
+  k1: -0.056745
+  k2: 0.426441
+  p1: -0.000266
+  p2: -0.001028
 
-      # Downsampled alternative. Use only if the incoming image topic is resized
-      # to 544x640 before fast_livo consumes it.
-      # width: 1088
-      # height: 1280
-      # scale: 0.5
-      # fx: 1661.519541
-      # fy: 1661.186841
-      # cx: 535.124575
-      # cy: 646.963644
+  # Downsampled alternative. Use only if the incoming image topic is resized
+  # to 544x640 before cake_slam consumes it.
+  # width: 1088
+  # height: 1280
+  # scale: 0.5
+  # fx: 1661.519541
+  # fy: 1661.186841
+  # cx: 535.124575
+  # cy: 646.963644
 
-    # Generated undistort-baseline output model for camera0.
-    # Policy: output_size=1088x1280, target_hfov=120deg, centered principal point.
-    # Distortion is zero because this namespace represents the already-undistorted pinhole image.
-    camera0_undistort:
-      model: Pinhole
-      width: 1088
-      height: 1280
-      scale: 1.0
-      fx: 314.078546
-      fy: 314.078546
-      cx: 543.5
-      cy: 639.5
-      d0: 0.0
-      d1: 0.0
-      d2: 0.0
-      d3: 0.0
+# Generated undistort-baseline output model for camera0.
+# Policy: output_size=1088x1280, target_hfov=120deg, centered principal point.
+# Distortion is zero because this namespace represents the already-undistorted pinhole image.
+camera0_undistort:
+  model: Pinhole
+  width: 1088
+  height: 1280
+  scale: 1.0
+  fx: 314.078546
+  fy: 314.078546
+  cx: 543.5
+  cy: 639.5
+  d0: 0.0
+  d1: 0.0
+  d2: 0.0
+  d3: 0.0
 
-    camera1:
-      model: MEI
-      width: 1088
-      height: 1280
-      scale: 1.0
-      fx: 1654.557758
-      fy: 1654.555501
-      cx: 550.895470
-      cy: 630.361929
-      xi: 3.181583
-      k1: -0.043850
-      k2: 0.280148
-      p1: -0.003198
-      p2: -0.001684
+camera1:
+  model: MEI
+  width: 1088
+  height: 1280
+  scale: 1.0
+  fx: 1654.557758
+  fy: 1654.555501
+  cx: 550.895470
+  cy: 630.361929
+  xi: 3.181583
+  k1: -0.043850
+  k2: 0.280148
+  p1: -0.003198
+  p2: -0.001684

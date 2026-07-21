@@ -284,8 +284,8 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<double>("vio.opticalflow.quality_level", 0.01);
   try_declare.template operator()<double>("vio.opticalflow.f_threshold", 0.5);
   try_declare.template operator()<bool>("vio.opticalflow.flow_back", true);
-  try_declare.template operator()<std::string>("vio.opticalflow.feature_image_topic", "/fast_livo/feature_image");
-  try_declare.template operator()<std::string>("vio.opticalflow.triangulated_points_topic", "/fast_livo/triangulated_points");
+  try_declare.template operator()<std::string>("vio.opticalflow.feature_image_topic", "/cake_slam/feature_image");
+  try_declare.template operator()<std::string>("vio.opticalflow.triangulated_points_topic", "/cake_slam/triangulated_points");
   try_declare.template operator()<double>("time_offset.exposure_time_init", 0.0);
   try_declare.template operator()<double>("time_offset.img_time_offset", 0.0);
   try_declare.template operator()<std::vector<double>>("time_offset.img_time_offset_groups", std::vector<double>{});
@@ -1332,7 +1332,7 @@ void LIVMapper::imu_prop_callback()
 {
   if (p_imu->imu_need_init || !new_imu || !ekf_finish_once) { return; }
   mtx_buffer_imu_prop.lock();
-  new_imu = false; // 闂佺鐭囬崘銊у幀 propagate 婵☆偆澧楅崹鐟邦啅婵傚憡鏅?IMU 婵☆偆澧楅崹鐟邦啅閸忚偐鈻旈柍褜鍓熼弫?
+  new_imu = false; // 闂備胶顢婇惌鍥礃閵娧冨箑 propagate 濠碘槅鍋嗘晶妤呭垂閻熼偊鍟呭┑鍌氭啞閺?IMU 濠碘槅鍋嗘晶妤呭垂閻熼偊鍟呴柛蹇氬亹閳绘棃鏌嶈閸撶喖寮?
   if (imu_prop_enable && !prop_imu_buffer.empty())
   {
     static double last_t_from_lidar_end_time = 0;

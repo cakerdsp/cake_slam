@@ -1,5 +1,5 @@
-function(configure_fast_livo_multi_cam_targets)
-  if(TARGET fastlivo_mapping_multi_cam)
+function(configure_cake_slam_multi_cam_targets)
+  if(TARGET cake_slam_mapping_multi_cam)
     return()
   endif()
 
@@ -18,9 +18,9 @@ function(configure_fast_livo_multi_cam_targets)
   endforeach()
   target_link_libraries(lio_multi_cam utils)
 
-  add_executable(fastlivo_mapping_multi_cam ${CMAKE_SOURCE_DIR}/src/main_multi_cam.cpp)
-  ament_target_dependencies(fastlivo_mapping_multi_cam ${dependencies})
-  target_link_libraries(fastlivo_mapping_multi_cam
+  add_executable(cake_slam_mapping_multi_cam ${CMAKE_SOURCE_DIR}/src/main_multi_cam.cpp)
+  ament_target_dependencies(cake_slam_mapping_multi_cam ${dependencies})
+  target_link_libraries(cake_slam_mapping_multi_cam
     laser_mapping_multi_cam
     vio_multi_cam
     lio_multi_cam
@@ -32,10 +32,10 @@ function(configure_fast_livo_multi_cam_targets)
     ${Boost_LIBRARIES})
 
   if(mimalloc_FOUND)
-    target_link_libraries(fastlivo_mapping_multi_cam mimalloc)
+    target_link_libraries(cake_slam_mapping_multi_cam mimalloc)
   endif()
 
-  install(TARGETS fastlivo_mapping_multi_cam DESTINATION lib/${PROJECT_NAME})
+  install(TARGETS cake_slam_mapping_multi_cam DESTINATION lib/${PROJECT_NAME})
 endfunction()
 
-cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL configure_fast_livo_multi_cam_targets)
+cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL configure_cake_slam_multi_cam_targets)

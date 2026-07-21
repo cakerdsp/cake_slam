@@ -10,10 +10,10 @@ from ament_index_python.packages import get_package_share_directory
 from launch_ros.actions import Node
 
 def generate_launch_description():
-    
+
     # Find path
-    config_file_dir = os.path.join(get_package_share_directory("fast_livo"), "config")
-    rviz_config_file = os.path.join(get_package_share_directory("fast_livo"), "rviz_cfg", "M300.rviz")
+    config_file_dir = os.path.join(get_package_share_directory("cake_slam"), "config")
+    rviz_config_file = os.path.join(get_package_share_directory("cake_slam"), "rviz_cfg", "M300.rviz")
 
     #Load parameters
     avia_config_cmd = os.path.join(config_file_dir, "MARS_LVIG.yaml")
@@ -29,7 +29,7 @@ def generate_launch_description():
     avia_config_arg = DeclareLaunchArgument(
         'avia_params_file',
         default_value=avia_config_cmd,
-        description='Full path to the ROS2 parameters file to use for fast_livo2 nodes',
+        description='Full path to the ROS2 parameters file to use for cake_slam2 nodes',
     )
 
     camera_config_arg = DeclareLaunchArgument(
@@ -40,7 +40,7 @@ def generate_launch_description():
 
     # https://github.com/ros-navigation/navigation2/blob/1c68c212db01f9f75fcb8263a0fbb5dfa711bdea/nav2_bringup/launch/navigation_launch.py#L40
     use_respawn_arg = DeclareLaunchArgument(
-        'use_respawn', 
+        'use_respawn',
         default_value='True',
         description='Whether to respawn if a node crashes. Applied when composition is disabled.')
 
@@ -74,20 +74,20 @@ def generate_launch_description():
             executable="republish",
             name="republish",
             arguments=[ # Array of strings/parametric arguments that will end up in process's argv
-                'compressed', 
+                'compressed',
                 'raw',
             ],
             remappings=[
-                ("in",  "/left_camera/image"), 
+                ("in",  "/left_camera/image"),
                 ("out", "/left_camera/image")
             ],
             output="screen",
             respawn=use_respawn,
         ),
-        
+
         Node(
-            package="fast_livo",
-            executable="fastlivo_mapping",
+            package="cake_slam",
+            executable="cake_slam_mapping",
             name="laserMapping",
             parameters=[
                 avia_params_file,

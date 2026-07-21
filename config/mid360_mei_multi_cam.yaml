@@ -1,267 +1,276 @@
-/**:
-  ros__parameters:
-    common:
-      # This launch defaults to the single raw MEI camera0 stream.
-      num_cameras: 1
-      require_all_cameras: true
-      multi_cam_sync_queue_size: 5
-      multi_cam_sync_tolerance_ms: 40.0
-      # Prior-normalized directional filtering for both sequential LIO and VIO updates.
-      # false preserves the original estimator path exactly.
-      directional_update_en: false
-      directional_drop_variance_reduction: 0.05
-      directional_full_variance_reduction: 0.50
-      lid_topic: "/livox/lidar"
-      imu_topic: "/livox/imu"
-      img_en: 1
-      lidar_en: 1
-      ros_driver_bug_fix: false
+common:
+  # This launch defaults to the single raw MEI camera0 stream.
+  num_cameras: 1
+  require_all_cameras: true
+  multi_cam_sync_queue_size: 5
+  multi_cam_sync_tolerance_ms: 40.0
+  # Prior-normalized directional filtering for both sequential LIO and VIO updates.
+  # false preserves the original estimator path exactly.
+  directional_update_en: true
+  directional_drop_variance_reduction: 0.05
+  directional_full_variance_reduction: 0.40
+  lid_topic: "/livox/lidar"
+  imu_topic: "/livox/imu"
+  img_en: 1
+  lidar_en: 1
+  ros_driver_bug_fix: false
 
-    cameras:
-      camera0:
-        img_topic: "/fisheye/left/image_raw"
-        camera_ns: "camera0"
-        image_undistort_en: false
-        raw_camera_ns: "camera0"
-        Rcl: [0.71787, -0.69617, -0.00210,
-              -0.02115, -0.01878, -0.99960,
-               0.69585,  0.71763, -0.02821]
-        Pcl: [-0.01710, 0.11155, -0.01546]
-        online_extrinsic_en: true
-        time_offset_group: 0
-        online_time_offset_en: true
-      camera1:
-        img_topic: "/fisheye/right/image_raw"
-        camera_ns: "camera1"
-        image_undistort_en: false
-        raw_camera_ns: "camera1"
-        Rcl: [-0.6996424752, -0.7128739047,  0.0480331004,
-              -0.0343341177, -0.0335986769, -0.9988454714,
-               0.7136620048, -0.7004856166, -0.0009589922]
-        Pcl: [-0.0189238408, 0.1110594056, -0.0498532729]
-        online_extrinsic_en: true
-        time_offset_group: 1
-        online_time_offset_en: true
+cameras:
+  camera0:
+    img_topic: "/fisheye/left/image_raw"
+    camera_ns: "camera0"
+    image_undistort_en: false
+    raw_camera_ns: "camera0"
+    # Rcl: [0.71787, -0.69617, -0.00210,
+    #       -0.02115, -0.01878, -0.99960,
+    #        0.69585,  0.71763, -0.02821]
+    # Pcl: [-0.01710, 0.11155, -0.01546]
 
-    extrin_calib:
-      # LiDAR to IMU: P_imu = R_imu_lidar * P_lidar + t_imu_lidar
-      extrinsic_T: [-0.011, -0.02329, 0.04412]
-      extrinsic_R: [1.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0,
-                    0.0, 0.0, 1.0]
+    Rcl: [  0.675951,  -0.713331,  -0.185065,
+          -0.276306,  -0.012511,  -0.960988,
+            0.683187,   0.700715,  -0.205555]
+    Pcl: [  0.021730,   0.051802,  -0.020456]
+    online_extrinsic_en: true
+    time_offset_group: 0
+    online_time_offset_en: true
+  camera1:
+    img_topic: "/fisheye/right/image_raw"
+    camera_ns: "camera1"
+    image_undistort_en: false
+    raw_camera_ns: "camera1"
+    # Rcl: [-0.6996424752, -0.7128739047,  0.0480331004,
+    #       -0.0343341177, -0.0335986769, -0.9988454714,
+    #        0.7136620048, -0.7004856166, -0.0009589922]
+    # Pcl: [-0.0189238408, 0.1110594056, -0.0498532729]
 
-    time_offset:
-      # Current LIVMapper reads img_time_offset/exposure_time_init. imu_time_offset
-      # is kept for compatibility with your source config but is not consumed here.
-      imu_time_offset: 0.0
-      img_time_offset: 0.0
-      # img_time_offset_groups: []
-      exposure_time_init: 0.0
+    Rcl: [ -0.682758,  -0.698383,   0.214718,
+          -0.283641,  -0.017479,  -0.958772,
+            0.673343,  -0.715511,  -0.186156]
+    Pcl: [  0.011663,   0.045931,  -0.027709]
+    online_extrinsic_en: true
+    time_offset_group: 1
+    online_time_offset_en: true
 
-    preprocess:
-      image_downclock_en: true
-      image_downclock_factor: 2
-      point_filter_num: 1
-      filter_size_surf: 0.1
-      lidar_type: 1
-      scan_line: 4
-      scan_rate: 10
-      blind: 0.8
-      feature_extract_enabled: false
+extrin_calib:
+  # LiDAR to IMU: P_imu = R_imu_lidar * P_lidar + t_imu_lidar
+  extrinsic_T: [-0.011, -0.02329, 0.04412]
+  extrinsic_R: [1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0]
 
-    vio:
-      # 0: direct; 1: optical_flow; 2: color_only.
-      # Virtual fisheye patch logic is used by the direct/fisheye frontend.
-      frontend_mode: 0
-      cross_camera_reference_en: false
-      cross_camera_current_residual_en: false
-      max_iterations: 5
-      outlier_threshold: 1000
-      ncc_en: true
-      ncc_thre: 0.7
-      # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
-      ncc_thre_by_level: [0.7, 0.7]
-      usage_stats_en: true
-      usage_stats_window: 100
-      img_point_cov: 1000
-      grid_size: 5
-      grid_n_height: 20
-      patch_size: 8
-      patch_pyrimid_level: 2
+time_offset:
+  # Current LIVMapper reads img_time_offset/exposure_time_init. imu_time_offset
+  # is kept for compatibility with your source config but is not consumed here.
+  imu_time_offset: 0.0
+  img_time_offset: 0.0
+  # img_time_offset_groups: []
+  exposure_time_init: 0.0
 
-      # Adapted from the original cam0 virtual-patch values:
-      # virtual_width/height and sphere LUT fields are not read by this project;
-      # ax/ay=120 maps to the current virtual_focal_length parameter.
-      virtual_fisheye_patch_en: false
-      raw_camera_model_jacobian_en: true
-      virtual_s2_optimize_en: false
-      virtual_sparse_patch_en: false
-      # Advanced visual reference/landmark management. Start MEI in shadow mode:
-      # collect decisions and diagnostics without changing EKF admission,
-      # reference selection, or deleting map objects while the raw-path abort is traced.
-      visual_ref_post_ekf_build_en: true
-      visual_map_manage_en: true
-      visual_map_manage_log_en: true
-      visual_map_manage_shadow_en: true
-      visual_ref_current_select_en: true
-      visual_ref_fallback_en: true
-      visual_ref_lifecycle_en: true
-      visual_ref_view_coverage_en: true
-      visual_ref_nis_en: true
-      visual_point_seed_validation_en: true
-      visual_point_footprint_redundancy_en: true
-      visual_point_information_prune_en: true
-      visual_point_replacement_en: true
-      visual_map_retirement_apply_en: false
-      visual_ref_max_candidates: 2
-      visual_ref_validate_min_tests: 3
-      visual_ref_validate_min_ratio: 0.67
-      visual_ref_retire_reject_count: 5
-      visual_ref_max_count: 8
-      visual_ref_coverage_angle_deg: 12.0
-      visual_ref_max_anisotropy: 4.0
-      visual_ref_nis_max_per_dof: 3.0
-      visual_point_seed_min_tests: 3
-      visual_point_seed_min_ratio: 0.67
-      visual_point_footprint_iou: 0.60
-      visual_point_information_retain: 0.90
-      visual_point_suspect_reject_count: 8
-      visual_point_stale_frames: 200
-      virtual_focal_length: 800.0
-      virtual_patch_margin: 4
-      virtual_max_search_level: 0
-      # virtual_patch_resampling_mode: "forward_splat"
-      virtual_patch_resampling_mode: "pull_exact"
-      virtual_interp_mode: "bilinear"
-      virtual_raw_window_half_size: 96
-      virtual_splat_min_weight: 1.0e-6
-      virtual_splat_require_full_core_coverage: true
-      virtual_splat_debug_compare_pull_exact: false
-      # Keep the strong insertion filter disabled during diagnosis. Its lookup
-      # scale matches mid360 lio.voxel_size so footprint association stays coherent.
-      visual_geom_filter_en: false
-      visual_geom_filter_log_en: true
-      visual_geom_filter_require_point_cov: true
-      visual_geom_filter_voxel_size: 0.5
-      visual_geom_filter_min_plane_points: 5
-      visual_geom_filter_radius_multiplier: 3.0
-      visual_geom_filter_min_normal_cos: 0.8660254
-      visual_geom_filter_max_chi2: 9.0
-      visual_geom_filter_min_sigma: 1.0e-12
-      visual_geom_filter_max_point_cov_trace: 0.2
-      visual_geom_filter_max_normal_cov: 0.05
-      # Rejected-point colors on each /rgb_img/camera_i debug image cover
-      # range, support, warp, affine, photometric, NCC and reference failures.
-      draw_rejected_points_en: false
+preprocess:
+  image_downclock_en: false
+  image_downclock_factor: 2
+  point_filter_num: 1
+  filter_size_surf: 0.1
+  lidar_type: 1
+  scan_line: 4
+  scan_rate: 10
+  blind: 0.8
+  feature_extract_enabled: false
 
-      normal_en: true
-      raycast_en: false
-      inverse_composition_en: false
-      exposure_estimate_en: true
-      online_extrinsic_en: false
-      online_extrinsic_rot_en: true
-      online_extrinsic_trans_en: true
-      online_extrinsic_prior_factor_en: false
-      # Per-camera cameras.camera{i}.online_extrinsic_en is preferred.
-      # Optional legacy override: provide common.num_cameras entries, e.g. [1, 0].
-      # online_extrinsic_camera_mask: []
-      online_extrinsic_start_frame: 100
-      online_extrinsic_min_tracks: 20
-      online_extrinsic_prior_rot_std_deg: 0.5
-      online_extrinsic_prior_trans_std_m: 0.02
-      online_extrinsic_max_rot_update_deg: 0.02
-      online_extrinsic_max_trans_update_m: 0.0001
-      online_time_offset_en: false
-      # online_time_offset_group_mask: []
-      online_time_offset_start_frame: 100
-      online_time_offset_min_tracks: 30
-      online_time_offset_min_pixel_velocity: 15.0
-      online_time_offset_prior_std_ms: 5.0
-      online_time_offset_process_noise_ms_sqrt_s: 0.0
-      online_time_offset_max_update_ms: 0.2
-      online_time_offset_max_abs_ms: 50.0
-      online_time_offset_min_update_interval: 5
-      inv_expo_time_init: 1.0
-      inv_expo_cov: 0.1
+vio:
+  # 0: direct; 1: optical_flow; 2: color_only.
+  # Virtual fisheye patch logic is used by the direct/fisheye frontend.
+  frontend_mode: 0
+  cross_camera_reference_en: true
+  cross_camera_current_residual_en: true
+  max_iterations: 5
+  outlier_threshold: 1000
+  ncc_en: true
+  ncc_thre: 0.7
+  # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
+  ncc_thre_by_level: [0.5, 0.4]
+  usage_stats_en: true
+  usage_stats_window: 100
+  img_point_cov: 1000
+  grid_size: 5
+  grid_n_height: 20
+  patch_size: 8
+  patch_pyrimid_level: 2
 
-      opticalflow:
-        max_cnt: 250
-        min_dist: 20
-        quality_level: 0.01
-        flow_back: true
-        f_threshold: 0.5
-        min_track_len_for_triangulation: 3
-        track_history_size: 20
-        feature_image_topic: "/fast_livo/feature_image"
-        triangulated_points_topic: "/fast_livo/triangulated_points"
+  # Adapted from the original cam0 virtual-patch values:
+  # virtual_width/height and sphere LUT fields are not read by this project;
+  # ax/ay=120 maps to the current virtual_focal_length parameter.
+  virtual_fisheye_patch_en: true
+  raw_camera_model_jacobian_en: true
+  virtual_s2_optimize_en: false
+  virtual_sparse_patch_en: false
+  # Advanced visual reference/landmark management. Start MEI in shadow mode:
+  # collect decisions and diagnostics without changing EKF admission,
+  # reference selection, or deleting map objects while the raw-path abort is traced.
+  visual_ref_post_ekf_build_en: true
+  visual_map_manage_en: true
+  visual_map_manage_log_en: true
+  visual_map_manage_shadow_en: true
+  visual_ref_current_select_en: true
+  visual_ref_fallback_en: true
+  visual_ref_lifecycle_en: true
+  visual_ref_view_coverage_en: true
+  visual_ref_nis_en: true
+  visual_point_seed_validation_en: true
+  visual_point_footprint_redundancy_en: true
+  visual_point_information_prune_en: true
+  visual_point_replacement_en: true
+  visual_map_retirement_apply_en: false
+  visual_ref_max_candidates: 2
+  visual_ref_validate_min_tests: 3
+  visual_ref_validate_min_ratio: 0.67
+  visual_ref_retire_reject_count: 5
+  visual_ref_max_count: 8
+  visual_ref_coverage_angle_deg: 12.0
+  visual_ref_max_anisotropy: 4.0
+  visual_ref_nis_max_per_dof: 3.0
+  visual_point_seed_min_tests: 3
+  visual_point_seed_min_ratio: 0.67
+  visual_point_footprint_iou: 0.60
+  visual_point_information_retain: 0.90
+  visual_point_suspect_reject_count: 8
+  visual_point_stale_frames: 200
+  virtual_focal_length: 300.0
+  virtual_patch_margin: 4
+  virtual_max_search_level: 0
+  # virtual_patch_resampling_mode: "forward_splat"
+  virtual_patch_resampling_mode: "pull_exact"
+  # virtual_interp_mode: "bilinear"
+  virtual_interp_mode: "bicubic"
+  virtual_raw_window_half_size: 96
+  virtual_splat_min_weight: 1.0e-6
+  virtual_splat_require_full_core_coverage: true
+  virtual_splat_debug_compare_pull_exact: false
+  # Keep the strong insertion filter disabled during diagnosis. Its lookup
+  # scale matches mid360 lio.voxel_size so footprint association stays coherent.
+  visual_geom_filter_en: false
+  visual_geom_filter_log_en: true
+  visual_geom_filter_require_point_cov: true
+  visual_geom_filter_voxel_size: 0.5
+  visual_geom_filter_min_plane_points: 5
+  visual_geom_filter_radius_multiplier: 3.0
+  visual_geom_filter_min_normal_cos: 0.8660254
+  visual_geom_filter_max_chi2: 9.0
+  visual_geom_filter_min_sigma: 1.0e-12
+  visual_geom_filter_max_point_cov_trace: 0.2
+  visual_geom_filter_max_normal_cov: 0.05
+  # Rejected-point colors on each /rgb_img/camera_i debug image cover
+  # range, support, warp, affine, photometric, NCC and reference failures.
+  draw_rejected_points_en: false
 
-    imu:
-      imu_en: true
-      imu_int_frame: 30
-      acc_cov: 0.5
-      gyr_cov: 0.3
-      gravity_est_en: true
-      ba_bg_est_en: true
+  normal_en: true
+  raycast_en: false
+  inverse_composition_en: false
+  exposure_estimate_en: true
+  online_extrinsic_en: true
+  online_extrinsic_rot_en: true
+  online_extrinsic_trans_en: true
+  online_extrinsic_prior_factor_en: false
+  # Per-camera cameras.camera{i}.online_extrinsic_en is preferred.
+  # Optional legacy override: provide common.num_cameras entries, e.g. [1, 0].
+  # online_extrinsic_camera_mask: []
+  online_extrinsic_start_frame: 100
+  online_extrinsic_min_tracks: 20
+  online_extrinsic_prior_rot_std_deg: 0.5
+  online_extrinsic_prior_trans_std_m: 0.02
+  online_extrinsic_max_rot_update_deg: 0.1
+  online_extrinsic_max_trans_update_m: 0.1
+  online_time_offset_en: true
+  # online_time_offset_group_mask: []
+  online_time_offset_start_frame: 100
+  online_time_offset_min_tracks: 30
+  online_time_offset_min_pixel_velocity: 15.0
+  online_time_offset_prior_std_ms: 5.0
+  online_time_offset_process_noise_ms_sqrt_s: 0.0
+  online_time_offset_max_update_ms: 1000.0
+  online_time_offset_max_abs_ms: 100.0
+  online_time_offset_min_update_interval: 5
+  inv_expo_time_init: 1.0
+  inv_expo_cov: 0.1
 
-      # These two fields are present in the upstream FAST-LIVO2 configs, but the
-      # current code uses fixed bias covariances in LIVMapper::initializeComponents.
-      b_acc_cov: 0.0001
-      b_gyr_cov: 0.0001
+  opticalflow:
+    max_cnt: 250
+    min_dist: 20
+    quality_level: 0.01
+    flow_back: true
+    f_threshold: 0.5
+    min_track_len_for_triangulation: 3
+    track_history_size: 20
+    feature_image_topic: "/cake_slam/feature_image"
+    triangulated_points_topic: "/cake_slam/triangulated_points"
 
-    lio:
-      min_iterations: 5
-      dept_err: 0.02
-      beam_err: 0.05
-      sigma_num: 3.0
-      min_eigen_value: 0.0025
-      voxel_size: 0.5
-      max_layer: 2
-      max_points_num: 50
-      layer_init_num: [5, 5, 5, 5, 5]
+imu:
+  imu_en: true
+  imu_int_frame: 30
+  acc_cov: 1.0
+  gyr_cov: 0.8
+  gravity_est_en: true
+  ba_bg_est_en: true
 
-    local_map:
-      map_sliding_en: false
-      half_map_size: 100
-      sliding_thresh: 8.0
+  # These two fields are present in the upstream FAST-LIVO2 configs, but the
+  # current code uses fixed bias covariances in LIVMapper::initializeComponents.
+  b_acc_cov: 0.0001
+  b_gyr_cov: 0.0001
 
-    uav:
-      imu_rate_odom: false
-      gravity_align_en: true
+lio:
+  min_iterations: 5
+  dept_err: 0.02
+  beam_err: 0.05
+  sigma_num: 3.0
+  min_eigen_value: 0.0025
+  voxel_size: 0.5
+  max_layer: 2
+  max_points_num: 50
+  layer_init_num: [5, 5, 5, 5, 5]
 
-    publish:
-      dense_map_en: true
-      pub_effect_point_en: true
-      pub_plane_en: false
-      pub_scan_num: 1
-      blind_rgb_points: 0.0
+local_map:
+  map_sliding_en: false
+  half_map_size: 100
+  sliding_thresh: 8.0
 
-    evo:
-      seq_name: "CBD_Building_01"
-      pose_output_en: false
+uav:
+  imu_rate_odom: false
+  gravity_align_en: true
 
-    pcd_save:
-      pcd_save_en: false
-      type: 0
-      colmap_output_en: false
-      filter_size_pcd: 0.15
-      interval: -1
+publish:
+  dense_map_en: true
+  pub_effect_point_en: true
+  pub_plane_en: false
+  pub_scan_num: 1
+  blind_rgb_points: 0.0
 
-    image_save:
-      img_save_en: false
-      interval: 1
+evo:
+  seq_name: "CBD_Building_01"
+  pose_output_en: true
 
-    debug:
-      plot_time: -10.0
-      frame_cnt: 6
-      # Follow up to eight camera-0 debug probes; each probe saves at most 12 paired observations.
-      ref_patch_dump_en: false
-      # Negative seed changes the selected probes on every run; use a fixed non-negative seed for reproduction.
-      ref_patch_dump_random_seed: -1
-      ref_patch_dump_max_candidate_skip: 50
-      # Stop a probe when its virtual patch NCC against the first observation falls below this value.
-      ref_patch_dump_ncc_threshold: 0.6
-      # Runtime support dump is independent from ref_patch_dump_en. It writes actual
-      # accepted virtual support images used by the optimization path under
-      # Log/result/patchs/<runtime_support_dump_folder>.
-      runtime_support_dump_en: false
-      runtime_support_dump_folder: "mid360_runtime_support"
+pcd_save:
+  pcd_save_en: true
+  type: 0
+  colmap_output_en: false
+  filter_size_pcd: 0.15
+  interval: -1
+
+image_save:
+  img_save_en: false
+  interval: 1
+
+debug:
+  plot_time: -10.0
+  frame_cnt: 6
+  # Follow up to eight camera-0 debug probes; each probe saves at most 12 paired observations.
+  ref_patch_dump_en: false
+  # Negative seed changes the selected probes on every run; use a fixed non-negative seed for reproduction.
+  ref_patch_dump_random_seed: -1
+  ref_patch_dump_max_candidate_skip: 50
+  # Stop a probe when its virtual patch NCC against the first observation falls below this value.
+  ref_patch_dump_ncc_threshold: 0.6
+  # Runtime support dump is independent from ref_patch_dump_en. It writes actual
+  # accepted virtual support images used by the optimization path under
+  # Log/result/patchs/<runtime_support_dump_folder>.
+  runtime_support_dump_en: false
+  runtime_support_dump_folder: "mid360_runtime_support"

@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>fast_livo</name>
+  <name>cake_slam</name>
   <version>0.0.0</version>
   <description>Multi-camera FAST-LIVO ROS1 port.</description>
 

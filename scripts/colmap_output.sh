@@ -1,8 +1,8 @@
 #!/bin/bash
 
 TARGET_DIRS=(
-    "$(rospack find fast_livo)/Log/Colmap/images"
-    "$(rospack find fast_livo)/Log/Colmap/sparse/0"
+    "$(rospack find cake_slam)/Log/Colmap/images"
+    "$(rospack find cake_slam)/Log/Colmap/sparse/0"
 )
 
 for dir in "${TARGET_DIRS[@]}"; do
@@ -22,4 +22,3 @@ for dir in "${TARGET_DIRS[@]}"; do
         echo "Exists: $dir"
     fi
 done
-

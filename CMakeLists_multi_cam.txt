@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(fast_livo)
+project(cake_slam)
 
 set(CMAKE_BUILD_TYPE "Release")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
@@ -36,7 +36,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64|ARM|AARCH64)")
 else()
   # x86-64 (Intel/AMD) optimizations
   set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -funroll-loops") #-flto
-  message(STATUS "Using general x86 optimizations: -O3 -march=native -mtune=native -funroll-loops") 
+  message(STATUS "Using general x86 optimizations: -O3 -march=native -mtune=native -funroll-loops")
   add_definitions(-DX86_ARCH)
 endif()
 
@@ -158,12 +158,12 @@ target_link_libraries(pre_multi_cam ${COMMON_DEPENDENCIES})
 target_link_libraries(imu_proc_multi_cam ${COMMON_DEPENDENCIES})
 
 # Add the main executable
-add_executable(fastlivo_mapping_multi_cam src/main_multi_cam.cpp)
+add_executable(cake_slam_mapping_multi_cam src/main_multi_cam.cpp)
 
-ament_target_dependencies(fastlivo_mapping_multi_cam ${dependencies})
+ament_target_dependencies(cake_slam_mapping_multi_cam ${dependencies})
 
 # Link libraries to the executable
-target_link_libraries(fastlivo_mapping_multi_cam
+target_link_libraries(cake_slam_mapping_multi_cam
   laser_mapping_multi_cam
   vio_multi_cam
   lio_multi_cam
@@ -177,12 +177,12 @@ target_link_libraries(fastlivo_mapping_multi_cam
 
 # Link mimalloc if found
 if(mimalloc_FOUND)
-  target_link_libraries(fastlivo_mapping_multi_cam mimalloc)
+  target_link_libraries(cake_slam_mapping_multi_cam mimalloc)
 endif()
 
 # Install the executable
 install(TARGETS
-  fastlivo_mapping_multi_cam
+  cake_slam_mapping_multi_cam
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -204,7 +204,7 @@ ament_export_dependencies(
   livox_ros_driver2
   Eigen3
   PCL
-  OpenCV 
+  OpenCV
   Sophus
 )
 

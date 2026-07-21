@@ -1,4 +1,4 @@
-/* 
+/*
 This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 
 Developer: Chunran Zheng <zhengcr@connect.hku.hk>
@@ -91,13 +91,13 @@ public:
   void handleLIO();
   void savePCD();
   void processImu();
-  
+
   bool sync_packages(LidarMeasureGroup &meas);
   void prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr);
   void imu_prop_callback();
   void transformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud, PointCloudXYZI::Ptr &trans_cloud);
   void pointBodyToWorld(const PointType &pi, PointType &po);
- 
+
   void RGBpointBodyToWorld(PointType const *const pi, PointType *const po);
   void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg_in);
@@ -127,7 +127,7 @@ public:
 
   SLAM_MODE slam_mode_;
   std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map;
-  
+
   string root_dir;
   string lid_topic, imu_topic, seq_name;
   int num_cameras = 1;
@@ -280,8 +280,8 @@ public:
   double optical_flow_quality_level = 0.01;
   double optical_flow_f_threshold = 0.5;
   bool optical_flow_flow_back = true;
-  std::string optical_flow_feature_image_topic = "/fast_livo/feature_image";
-  std::string optical_flow_triangulated_points_topic = "/fast_livo/triangulated_points";
+  std::string optical_flow_feature_image_topic = "/cake_slam/feature_image";
+  std::string optical_flow_triangulated_points_topic = "/cake_slam/triangulated_points";
   int outlier_threshold;
   double plot_time;
   int frame_cnt;

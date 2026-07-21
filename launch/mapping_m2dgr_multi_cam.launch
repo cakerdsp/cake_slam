@@ -1,10 +1,10 @@
 <launch>
   <arg name="use_rviz" default="true" />
-  <arg name="mapping_params_file" default="$(find fast_livo)/config/M2DGR_multi_cam.yaml" />
-  <arg name="camera_params_file" default="$(find fast_livo)/config/camera_M2DGR_multi_cam.yaml" />
-  <arg name="rviz_config_file" default="$(find fast_livo)/rviz_cfg/fast_livo2.rviz" />
+  <arg name="mapping_params_file" default="$(find cake_slam)/config/M2DGR_multi_cam.yaml" />
+  <arg name="camera_params_file" default="$(find cake_slam)/config/camera_M2DGR_multi_cam.yaml" />
+  <arg name="rviz_config_file" default="$(find cake_slam)/rviz_cfg/cake_slam_ros1.rviz" />
 
-  <node pkg="fast_livo" type="fastlivo_mapping_multi_cam" name="laserMapping" output="screen">
+  <node pkg="cake_slam" type="cake_slam_mapping_multi_cam" name="laserMapping" output="screen">
     <rosparam command="load" file="$(arg mapping_params_file)" />
     <rosparam command="load" file="$(arg camera_params_file)" />
   </node>

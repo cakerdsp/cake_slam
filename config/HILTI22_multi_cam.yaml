@@ -1,295 +1,293 @@
-/**:
-  ros__parameters:
-    common:
-      # This launch defaults to the single camera0 stream. Increase only after
-      # validating the remaining camera intrinsics and enabling contiguous entries.
-      num_cameras: 1
-      require_all_cameras: true
-      multi_cam_sync_queue_size: 5
-      multi_cam_sync_tolerance_ms: 40.0
-      # Prior-normalized directional filtering for both sequential LIO and VIO updates.
-      # false preserves the original estimator path exactly.
-      directional_update_en: false
-      directional_drop_variance_reduction: 0.05
-      directional_full_variance_reduction: 0.50
-      lid_topic: "/hesai/pandar"
-      imu_topic: "/alphasense/imu"
-      img_en: 1
-      lidar_en: 1
-      ros_driver_bug_fix: false
+common:
+  # This launch defaults to the single camera0 stream. Increase only after
+  # validating the remaining camera intrinsics and enabling contiguous entries.
+  num_cameras: 1
+  require_all_cameras: true
+  multi_cam_sync_queue_size: 5
+  multi_cam_sync_tolerance_ms: 40.0
+  # Prior-normalized directional filtering for both sequential LIO and VIO updates.
+  # false preserves the original estimator path exactly.
+  directional_update_en: false
+  directional_drop_variance_reduction: 0.05
+  directional_full_variance_reduction: 0.50
+  lid_topic: "/hesai/pandar"
+  imu_topic: "/alphasense/imu"
+  img_en: 1
+  lidar_en: 1
+  ros_driver_bug_fix: false
 
-    cameras:
-      camera0:
-        img_topic: "/alphasense/cam0/image_raw"
-        camera_ns: "camera0"
-        image_undistort_en: false
-        raw_camera_ns: "camera0"
-        # HILTI C0. imu_to_cam0 composed with extrin_calib imu<-lidar.
-        Rcl: [-0.9999264201, -0.006708021447, 0.01010727015,
-              -0.01009119702, -0.002425643644, -0.9999461405,
-               0.006732176792, -0.999974559, 0.0023577732]
-        Pcl: [-0.05497620466, 0.06754014554, -0.0520599209]
-        online_extrinsic_en: true
-        time_offset_group: 0
-        online_time_offset_en: true
+cameras:
+  camera0:
+    img_topic: "/alphasense/cam0/image_raw"
+    camera_ns: "camera0"
+    image_undistort_en: false
+    raw_camera_ns: "camera0"
+    # HILTI C0. imu_to_cam0 composed with extrin_calib imu<-lidar.
+    Rcl: [-0.9999264201, -0.006708021447, 0.01010727015,
+          -0.01009119702, -0.002425643644, -0.9999461405,
+           0.006732176792, -0.999974559, 0.0023577732]
+    Pcl: [-0.05497620466, 0.06754014554, -0.0520599209]
+    online_extrinsic_en: true
+    time_offset_group: 0
+    online_time_offset_en: true
 
-      camera1:
-        img_topic: "/alphasense/cam1/image_raw"
-        camera_ns: "camera1"
-        image_undistort_en: false
-        raw_camera_ns: "camera1"
-        # HILTI C1. imu_to_cam1 composed with extrin_calib imu<-lidar.
-        Rcl: [-0.9999840643, -0.001655612644, 0.005397233569,
-              -0.005395690615, -0.0009350089579, -0.999985006,
-               0.001660634281, -0.9999981924, 0.0009260608843]
-        Pcl: [0.05377943234, 0.0683868197, -0.05154509159]
-        online_extrinsic_en: true
-        time_offset_group: 1
-        online_time_offset_en: true
+  camera1:
+    img_topic: "/alphasense/cam1/image_raw"
+    camera_ns: "camera1"
+    image_undistort_en: false
+    raw_camera_ns: "camera1"
+    # HILTI C1. imu_to_cam1 composed with extrin_calib imu<-lidar.
+    Rcl: [-0.9999840643, -0.001655612644, 0.005397233569,
+          -0.005395690615, -0.0009350089579, -0.999985006,
+           0.001660634281, -0.9999981924, 0.0009260608843]
+    Pcl: [0.05377943234, 0.0683868197, -0.05154509159]
+    online_extrinsic_en: true
+    time_offset_group: 1
+    online_time_offset_en: true
 
-      camera2:
-        img_topic: "/alphasense/cam2/image_raw"
-        camera_ns: "camera2"
-        image_undistort_en: false
-        raw_camera_ns: "camera2"
-        # HILTI C2. imu_to_cam2 composed with extrin_calib imu<-lidar.
-        Rcl: [-0.004234051672, -0.9999897552, 0.00160069188,
-               0.9999871882, -0.004238470701, -0.002767461132,
-               0.002774217265, 0.001588953799, 0.9999948895]
-        Pcl: [-0.007986043407, 0.0007666033303, -0.08909935435]
-        online_extrinsic_en: true
-        time_offset_group: 2
-        online_time_offset_en: true
+  camera2:
+    img_topic: "/alphasense/cam2/image_raw"
+    camera_ns: "camera2"
+    image_undistort_en: false
+    raw_camera_ns: "camera2"
+    # HILTI C2. imu_to_cam2 composed with extrin_calib imu<-lidar.
+    Rcl: [-0.004234051672, -0.9999897552, 0.00160069188,
+           0.9999871882, -0.004238470701, -0.002767461132,
+           0.002774217265, 0.001588953799, 0.9999948895]
+    Pcl: [-0.007986043407, 0.0007666033303, -0.08909935435]
+    online_extrinsic_en: true
+    time_offset_group: 2
+    online_time_offset_en: true
 
-      camera3:
-        img_topic: "/alphasense/cam3/image_raw"
-        camera_ns: "camera3"
-        image_undistort_en: false
-        raw_camera_ns: "camera3"
-        # HILTI C3. imu_to_cam3 composed with extrin_calib imu<-lidar.
-        Rcl: [-0.007396041671, 0.9998916894, -0.01272430781,
-               0.002363530932, -0.01270714046, -0.9999164677,
-              -0.9999698557, -0.007425498157, -0.002269292396]
-        Pcl: [-0.001388073157, 0.06618357503, -0.0656154501]
-        online_extrinsic_en: true
-        time_offset_group: 3
-        online_time_offset_en: true
+  camera3:
+    img_topic: "/alphasense/cam3/image_raw"
+    camera_ns: "camera3"
+    image_undistort_en: false
+    raw_camera_ns: "camera3"
+    # HILTI C3. imu_to_cam3 composed with extrin_calib imu<-lidar.
+    Rcl: [-0.007396041671, 0.9998916894, -0.01272430781,
+           0.002363530932, -0.01270714046, -0.9999164677,
+          -0.9999698557, -0.007425498157, -0.002269292396]
+    Pcl: [-0.001388073157, 0.06618357503, -0.0656154501]
+    online_extrinsic_en: true
+    time_offset_group: 3
+    online_time_offset_en: true
 
-      camera4:
-        img_topic: "/alphasense/cam4/image_raw"
-        camera_ns: "camera4"
-        image_undistort_en: false
-        raw_camera_ns: "camera4"
-        # HILTI C4. imu_to_cam4 composed with extrin_calib imu<-lidar.
-        Rcl: [0.0009424276675, -0.9999880402, 0.004799082218,
-              0.002190089783, -0.004797008862, -0.999986096,
-              0.9999971577, 0.0009529249849, 0.002185542757]
-        Pcl: [0.005160367447, 0.07171380895, -0.06644965352]
-        online_extrinsic_en: true
-        time_offset_group: 4
-        online_time_offset_en: true
+  camera4:
+    img_topic: "/alphasense/cam4/image_raw"
+    camera_ns: "camera4"
+    image_undistort_en: false
+    raw_camera_ns: "camera4"
+    # HILTI C4. imu_to_cam4 composed with extrin_calib imu<-lidar.
+    Rcl: [0.0009424276675, -0.9999880402, 0.004799082218,
+          0.002190089783, -0.004797008862, -0.999986096,
+          0.9999971577, 0.0009529249849, 0.002185542757]
+    Pcl: [0.005160367447, 0.07171380895, -0.06644965352]
+    online_extrinsic_en: true
+    time_offset_group: 4
+    online_time_offset_en: true
 
-    extrin_calib:
-      # Hilti-2022. Interpreted by code as imu<-lidar and inverted internally to lidar<-imu.
-      extrinsic_T: [-0.001, -0.00855, 0.055]
-      extrinsic_R: [0.0, -1.0, 0.0,
-                    -1.0, 0.0, 0.0,
-                     0.0, 0.0, -1.0]
+extrin_calib:
+  # Hilti-2022. Interpreted by code as imu<-lidar and inverted internally to lidar<-imu.
+  extrinsic_T: [-0.001, -0.00855, 0.055]
+  extrinsic_R: [0.0, -1.0, 0.0,
+                -1.0, 0.0, 0.0,
+                 0.0, 0.0, -1.0]
 
-    time_offset:
-      imu_time_offset: 0.0
-      img_time_offset: 0.0
-      # img_time_offset_groups: []
-      exposure_time_init: 0.0
+time_offset:
+  imu_time_offset: 0.0
+  img_time_offset: 0.0
+  # img_time_offset_groups: []
+  exposure_time_init: 0.0
 
-    preprocess:
-      image_downclock_en: true
-      image_downclock_factor: 4
-      point_filter_num: 1
-      filter_size_surf: 0.1
-      lidar_type: 5
-      scan_line: 32
-      scan_rate: 10
-      blind: 0.6
-      feature_extract_enabled: false
+preprocess:
+  image_downclock_en: true
+  image_downclock_factor: 4
+  point_filter_num: 1
+  filter_size_surf: 0.1
+  lidar_type: 5
+  scan_line: 32
+  scan_rate: 10
+  blind: 0.6
+  feature_extract_enabled: false
 
-    vio:
-      frontend_mode: 0
-      cross_camera_reference_en: false
-      cross_camera_current_residual_en: false
-      max_iterations: 5
-      outlier_threshold: 1000
-      ncc_en: true
-      ncc_thre: 0.7
-      # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
-      ncc_thre_by_level: [0.7, 0.7]
-      usage_stats_en: true
-      usage_stats_window: 100
-      img_point_cov: 1000
-      grid_size: 5
-      grid_n_height: 20
-      patch_size: 8
-      patch_pyrimid_level: 2
+vio:
+  frontend_mode: 0
+  cross_camera_reference_en: false
+  cross_camera_current_residual_en: false
+  max_iterations: 5
+  outlier_threshold: 1000
+  ncc_en: true
+  ncc_thre: 0.7
+  # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
+  ncc_thre_by_level: [0.7, 0.7]
+  usage_stats_en: true
+  usage_stats_window: 100
+  img_point_cov: 1000
+  grid_size: 5
+  grid_n_height: 20
+  patch_size: 8
+  patch_pyrimid_level: 2
 
-      virtual_fisheye_patch_en: false
-      raw_camera_model_jacobian_en: true
-      virtual_s2_optimize_en: false
-      virtual_sparse_patch_en: false
-      # Advanced visual reference/landmark management. Start HILTI22 in shadow
-      # mode: collect decisions and diagnostics without changing EKF admission,
-      # reference selection, or deleting map objects while the raw-path abort is traced.
-      visual_ref_post_ekf_build_en: true
-      visual_map_manage_en: true
-      visual_map_manage_log_en: true
-      visual_map_manage_shadow_en: true
-      visual_ref_current_select_en: true
-      visual_ref_fallback_en: true
-      visual_ref_lifecycle_en: true
-      visual_ref_view_coverage_en: true
-      visual_ref_nis_en: true
-      visual_point_seed_validation_en: true
-      visual_point_footprint_redundancy_en: true
-      visual_point_information_prune_en: true
-      visual_point_replacement_en: true
-      visual_map_retirement_apply_en: false
-      visual_ref_max_candidates: 2
-      visual_ref_validate_min_tests: 3
-      visual_ref_validate_min_ratio: 0.67
-      visual_ref_retire_reject_count: 5
-      visual_ref_max_count: 8
-      visual_ref_coverage_angle_deg: 12.0
-      visual_ref_max_anisotropy: 4.0
-      visual_ref_nis_max_per_dof: 3.0
-      visual_point_seed_min_tests: 3
-      visual_point_seed_min_ratio: 0.67
-      visual_point_footprint_iou: 0.60
-      visual_point_information_retain: 0.90
-      visual_point_suspect_reject_count: 8
-      visual_point_stale_frames: 200
-      virtual_focal_length: 200.0
-      virtual_patch_margin: 4
-      virtual_max_search_level: 0
-      virtual_patch_resampling_mode: "pull_exact"
-      virtual_interp_mode: "bilinear"
-      virtual_raw_window_half_size: 96
-      virtual_splat_min_weight: 1.0e-6
-      virtual_splat_require_full_core_coverage: true
-      virtual_splat_debug_compare_pull_exact: false
-      # Keep the strong insertion filter disabled during diagnosis. Its lookup
-      # scale still matches HILTI22 lio.voxel_size for footprint association.
-      visual_geom_filter_en: false
-      visual_geom_filter_log_en: true
-      visual_geom_filter_require_point_cov: true
-      visual_geom_filter_voxel_size: 0.4
-      visual_geom_filter_min_plane_points: 5
-      visual_geom_filter_radius_multiplier: 3.0
-      visual_geom_filter_min_normal_cos: 0.8660254
-      visual_geom_filter_max_chi2: 9.0
-      visual_geom_filter_min_sigma: 1.0e-12
-      visual_geom_filter_max_point_cov_trace: 0.2
-      visual_geom_filter_max_normal_cov: 0.05
-      draw_rejected_points_en: false
+  virtual_fisheye_patch_en: false
+  raw_camera_model_jacobian_en: true
+  virtual_s2_optimize_en: false
+  virtual_sparse_patch_en: false
+  # Advanced visual reference/landmark management. Start HILTI22 in shadow
+  # mode: collect decisions and diagnostics without changing EKF admission,
+  # reference selection, or deleting map objects while the raw-path abort is traced.
+  visual_ref_post_ekf_build_en: true
+  visual_map_manage_en: true
+  visual_map_manage_log_en: true
+  visual_map_manage_shadow_en: true
+  visual_ref_current_select_en: true
+  visual_ref_fallback_en: true
+  visual_ref_lifecycle_en: true
+  visual_ref_view_coverage_en: true
+  visual_ref_nis_en: true
+  visual_point_seed_validation_en: true
+  visual_point_footprint_redundancy_en: true
+  visual_point_information_prune_en: true
+  visual_point_replacement_en: true
+  visual_map_retirement_apply_en: false
+  visual_ref_max_candidates: 2
+  visual_ref_validate_min_tests: 3
+  visual_ref_validate_min_ratio: 0.67
+  visual_ref_retire_reject_count: 5
+  visual_ref_max_count: 8
+  visual_ref_coverage_angle_deg: 12.0
+  visual_ref_max_anisotropy: 4.0
+  visual_ref_nis_max_per_dof: 3.0
+  visual_point_seed_min_tests: 3
+  visual_point_seed_min_ratio: 0.67
+  visual_point_footprint_iou: 0.60
+  visual_point_information_retain: 0.90
+  visual_point_suspect_reject_count: 8
+  visual_point_stale_frames: 200
+  virtual_focal_length: 200.0
+  virtual_patch_margin: 4
+  virtual_max_search_level: 0
+  virtual_patch_resampling_mode: "pull_exact"
+  virtual_interp_mode: "bilinear"
+  virtual_raw_window_half_size: 96
+  virtual_splat_min_weight: 1.0e-6
+  virtual_splat_require_full_core_coverage: true
+  virtual_splat_debug_compare_pull_exact: false
+  # Keep the strong insertion filter disabled during diagnosis. Its lookup
+  # scale still matches HILTI22 lio.voxel_size for footprint association.
+  visual_geom_filter_en: false
+  visual_geom_filter_log_en: true
+  visual_geom_filter_require_point_cov: true
+  visual_geom_filter_voxel_size: 0.4
+  visual_geom_filter_min_plane_points: 5
+  visual_geom_filter_radius_multiplier: 3.0
+  visual_geom_filter_min_normal_cos: 0.8660254
+  visual_geom_filter_max_chi2: 9.0
+  visual_geom_filter_min_sigma: 1.0e-12
+  visual_geom_filter_max_point_cov_trace: 0.2
+  visual_geom_filter_max_normal_cov: 0.05
+  draw_rejected_points_en: false
 
-      normal_en: true
-      raycast_en: false
-      inverse_composition_en: false
-      exposure_estimate_en: true
-      online_extrinsic_en: false
-      online_extrinsic_rot_en: true
-      online_extrinsic_trans_en: true
-      online_extrinsic_prior_factor_en: false
-      # online_extrinsic_camera_mask: []
-      online_extrinsic_start_frame: 100
-      online_extrinsic_min_tracks: 20
-      online_extrinsic_prior_rot_std_deg: 0.5
-      online_extrinsic_prior_trans_std_m: 0.02
-      online_extrinsic_max_rot_update_deg: 0.02
-      online_extrinsic_max_trans_update_m: 0.0001
-      online_time_offset_en: false
-      # online_time_offset_group_mask: []
-      online_time_offset_start_frame: 100
-      online_time_offset_min_tracks: 30
-      online_time_offset_min_pixel_velocity: 15.0
-      online_time_offset_prior_std_ms: 5.0
-      online_time_offset_process_noise_ms_sqrt_s: 0.0
-      online_time_offset_max_update_ms: 0.2
-      online_time_offset_max_abs_ms: 50.0
-      online_time_offset_min_update_interval: 5
-      inv_expo_time_init: 1.0
-      inv_expo_cov: 0.1
+  normal_en: true
+  raycast_en: false
+  inverse_composition_en: false
+  exposure_estimate_en: true
+  online_extrinsic_en: false
+  online_extrinsic_rot_en: true
+  online_extrinsic_trans_en: true
+  online_extrinsic_prior_factor_en: false
+  # online_extrinsic_camera_mask: []
+  online_extrinsic_start_frame: 100
+  online_extrinsic_min_tracks: 20
+  online_extrinsic_prior_rot_std_deg: 0.5
+  online_extrinsic_prior_trans_std_m: 0.02
+  online_extrinsic_max_rot_update_deg: 0.02
+  online_extrinsic_max_trans_update_m: 0.0001
+  online_time_offset_en: false
+  # online_time_offset_group_mask: []
+  online_time_offset_start_frame: 100
+  online_time_offset_min_tracks: 30
+  online_time_offset_min_pixel_velocity: 15.0
+  online_time_offset_prior_std_ms: 5.0
+  online_time_offset_process_noise_ms_sqrt_s: 0.0
+  online_time_offset_max_update_ms: 0.2
+  online_time_offset_max_abs_ms: 50.0
+  online_time_offset_min_update_interval: 5
+  inv_expo_time_init: 1.0
+  inv_expo_cov: 0.1
 
-      opticalflow:
-        max_cnt: 250
-        min_dist: 20
-        quality_level: 0.01
-        flow_back: true
-        f_threshold: 0.5
-        min_track_len_for_triangulation: 3
-        track_history_size: 20
-        feature_image_topic: "/fast_livo/feature_image"
-        triangulated_points_topic: "/fast_livo/triangulated_points"
+  opticalflow:
+    max_cnt: 250
+    min_dist: 20
+    quality_level: 0.01
+    flow_back: true
+    f_threshold: 0.5
+    min_track_len_for_triangulation: 3
+    track_history_size: 20
+    feature_image_topic: "/cake_slam/feature_image"
+    triangulated_points_topic: "/cake_slam/triangulated_points"
 
-    imu:
-      imu_en: true
-      imu_int_frame: 30
-      acc_cov: 0.5
-      gyr_cov: 0.01
-      gravity_est_en: true
-      ba_bg_est_en: true
-      b_acc_cov: 0.0001
-      b_gyr_cov: 0.0001
+imu:
+  imu_en: true
+  imu_int_frame: 30
+  acc_cov: 0.5
+  gyr_cov: 0.01
+  gravity_est_en: true
+  ba_bg_est_en: true
+  b_acc_cov: 0.0001
+  b_gyr_cov: 0.0001
 
-    lio:
-      min_iterations: 5
-      dept_err: 0.02
-      beam_err: 0.05
-      sigma_num: 3.0
-      min_eigen_value: 0.0001
-      voxel_size: 0.4
-      max_layer: 2
-      max_points_num: 100
-      layer_init_num: [5, 5, 5, 5, 5]
+lio:
+  min_iterations: 5
+  dept_err: 0.02
+  beam_err: 0.05
+  sigma_num: 3.0
+  min_eigen_value: 0.0001
+  voxel_size: 0.4
+  max_layer: 2
+  max_points_num: 100
+  layer_init_num: [5, 5, 5, 5, 5]
 
-    local_map:
-      map_sliding_en: true
-      half_map_size: 100
-      sliding_thresh: 8.0
+local_map:
+  map_sliding_en: true
+  half_map_size: 100
+  sliding_thresh: 8.0
 
-    uav:
-      imu_rate_odom: false
-      gravity_align_en: false
+uav:
+  imu_rate_odom: false
+  gravity_align_en: false
 
-    publish:
-      dense_map_en: true
-      pub_effect_point_en: false
-      pub_plane_en: false
-      pub_scan_num: 1
-      blind_rgb_points: 0.0
+publish:
+  dense_map_en: true
+  pub_effect_point_en: false
+  pub_plane_en: false
+  pub_scan_num: 1
+  blind_rgb_points: 0.0
 
-    evo:
-      seq_name: "exp21"
-      pose_output_en: true
+evo:
+  seq_name: "exp21"
+  pose_output_en: true
 
-    pcd_save:
-      pcd_save_en: false
-      type: 0
-      colmap_output_en: false
-      filter_size_pcd: 0.15
-      interval: -1
+pcd_save:
+  pcd_save_en: false
+  type: 0
+  colmap_output_en: false
+  filter_size_pcd: 0.15
+  interval: -1
 
-    image_save:
-      img_save_en: false
-      interval: 1
+image_save:
+  img_save_en: false
+  interval: 1
 
-    debug:
-      plot_time: -10.0
-      frame_cnt: 6
-      ref_patch_dump_en: false
-      ref_patch_dump_random_seed: -1
-      ref_patch_dump_max_candidate_skip: 50
-      ref_patch_dump_ncc_threshold: 0.6
-      # Runtime support dump is independent from ref_patch_dump_en. It writes actual
-      # accepted virtual support images used by the optimization path under
-      # Log/result/patchs/<runtime_support_dump_folder>.
-      runtime_support_dump_en: false
-      runtime_support_dump_folder: "hilti22_runtime_support"
+debug:
+  plot_time: -10.0
+  frame_cnt: 6
+  ref_patch_dump_en: false
+  ref_patch_dump_random_seed: -1
+  ref_patch_dump_max_candidate_skip: 50
+  ref_patch_dump_ncc_threshold: 0.6
+  # Runtime support dump is independent from ref_patch_dump_en. It writes actual
+  # accepted virtual support images used by the optimization path under
+  # Log/result/patchs/<runtime_support_dump_folder>.
+  runtime_support_dump_en: false
+  runtime_support_dump_folder: "hilti22_runtime_support"

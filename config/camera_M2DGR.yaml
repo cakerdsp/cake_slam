@@ -1,33 +1,31 @@
-/**:
-  ros__parameters:
-    camera:
-      model: EquidistantCamera
-      width: 1280
-      height: 1024
-      scale: 1.0
-      fx: 540.645056202188
-      fy: 539.8545023658869
-      cx: 626.4125666883942
-      cy: 523.947634226782
-      k1: -0.07015146608431883
-      k2: 0.008586142263125124
-      k3: -0.021968993685891842
-      k4: 0.007442211946112636
+camera:
+  model: EquidistantCamera
+  width: 1280
+  height: 1024
+  scale: 1.0
+  fx: 540.645056202188
+  fy: 539.8545023658869
+  cx: 626.4125666883942
+  cy: 523.947634226782
+  k1: -0.07015146608431883
+  k2: 0.008586142263125124
+  k3: -0.021968993685891842
+  k4: 0.007442211946112636
 
-    # Generated undistort-baseline output model for M2DGR camera0.
-    # Policy: output_size=1024x1024, target_hfov=120deg, centered principal point.
-    # Single-camera mapper currently loads output namespace "camera"; use this block
-    # as the pinhole output model when wiring a single-camera undistort baseline.
-    camera_undistort:
-      model: Pinhole
-      width: 1024
-      height: 1024
-      scale: 1.0
-      fx: 295.603338
-      fy: 295.603338
-      cx: 511.5
-      cy: 511.5
-      d0: 0.0
-      d1: 0.0
-      d2: 0.0
-      d3: 0.0
+# Generated undistort-baseline output model for M2DGR camera0.
+# Policy: output_size=1024x1024, target_hfov=120deg, centered principal point.
+# Single-camera mapper currently loads output namespace "camera"; use this block
+# as the pinhole output model when wiring a single-camera undistort baseline.
+camera_undistort:
+  model: Pinhole
+  width: 1024
+  height: 1024
+  scale: 1.0
+  fx: 295.603338
+  fy: 295.603338
+  cx: 511.5
+  cy: 511.5
+  d0: 0.0
+  d1: 0.0
+  d2: 0.0
+  d3: 0.0

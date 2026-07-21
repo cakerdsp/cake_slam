@@ -6,8 +6,8 @@ Thanks to hku mars lab chunran zheng for the open source excellent work
 
 ### 📢 News
 
-- 🔓 **2025-01-23**: Code released!  
-- 🎉 **2024-10-01**: Accepted by **T-RO '24**!  
+- 🔓 **2025-01-23**: Code released!
+- 🎉 **2024-10-01**: Accepted by **T-RO '24**!
 - 🚀 **2024-07-02**: Conditionally accepted.
 
 ### 📬 Contact
@@ -28,7 +28,7 @@ Our accompanying video is now available on [**Bilibili**](https://www.bilibili.c
 
 ### 1.2 Related paper
 
-[FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry](https://arxiv.org/pdf/2408.14035)  
+[FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry](https://arxiv.org/pdf/2408.14035)
 
 [FAST-LIVO: Fast and Tightly-coupled Sparse-Direct LiDAR-Inertial-Visual Odometry](https://arxiv.org/pdf/2203.00893)
 
@@ -50,7 +50,7 @@ Ubuntu 22.04.  [ROS Installation](http://wiki.ros.org/ROS/Installation).
 
 ### 2.2 PCL && Eigen && OpenCV
 
-PCL>=1.6, Follow [PCL Installation](https://pointclouds.org/). 
+PCL>=1.6, Follow [PCL Installation](https://pointclouds.org/).
 
 Eigen>=3.3.4, Follow [Eigen Installation](https://eigen.tuxfamily.org/index.php?title=Main_Page).
 
@@ -94,7 +94,7 @@ For well-known reasons, ROS2 does not have a direct global parameter server and 
 ```bash
 # Different from the one used in fast-livo1
 cd fast_ws/src
-git clone https://github.com/Robotic-Developer-Road/rpg_vikit.git 
+git clone https://github.com/Robotic-Developer-Road/rpg_vikit.git
 ```
 
 Thanks to the following repositories for the code reference:
@@ -123,7 +123,7 @@ source ~/fast_ws/install/setup.bash
 
 ## 4. Run our examples
 
-Download our collected rosbag files via OneDrive ([**FAST-LIVO2-Dataset**](https://connecthkuhk-my.sharepoint.com/:f:/g/personal/zhengcr_connect_hku_hk/ErdFNQtjMxZOorYKDTtK4ugBkogXfq1OfDm90GECouuIQA?e=KngY9Z)). 
+Download our collected rosbag files via OneDrive ([**FAST-LIVO2-Dataset**](https://connecthkuhk-my.sharepoint.com/:f:/g/personal/zhengcr_connect_hku_hk/ErdFNQtjMxZOorYKDTtK4ugBkogXfq1OfDm90GECouuIQA?e=KngY9Z)).
 
 ### convert rosbag
 
@@ -137,7 +137,7 @@ rosbags-convert --src Retail_Street.bag --dst Retail_Street
 
 ### change the msg type on rosbag
 
-Such as dataset `Retail_Street.db3`, because we use `livox_ros2_driver2`'s `CustomMsg`, we need to change the msg type in the rosbag file. 
+Such as dataset `Retail_Street.db3`, because we use `livox_ros2_driver2`'s `CustomMsg`, we need to change the msg type in the rosbag file.
 1. use `rosbags-convert` to convert rosbag from ROS1 to ROS2.
 2. change the msg type of msg type in **metadata.yaml** as follows:
 
@@ -171,7 +171,7 @@ rosbag2_bagfile_information:
 Do not forget to `source` your ROS2 workspace before running the following command.
 
 ```bash
-ros2 launch fast_livo mapping_aviz.launch.py use_rviz:=True
+ros2 launch cake_slam mapping_aviz.launch.py use_rviz:=True
 ros2 bag play -p Retail_Street  # space bar controls play/pause
 ```
 

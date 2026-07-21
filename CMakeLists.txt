@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.0.2)
-project(fast_livo)
+project(cake_slam)
 
 set(CMAKE_BUILD_TYPE Release)
 set(CMAKE_CXX_STANDARD 17)
@@ -65,9 +65,9 @@ find_package(Sophus REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Boost REQUIRED COMPONENTS thread)
 
-set(FAST_LIVO_SOPHUS_LIBS ${Sophus_LIBRARIES})
+set(cake_slam_SOPHUS_LIBS ${Sophus_LIBRARIES})
 if(TARGET Sophus::Sophus)
-  set(FAST_LIVO_SOPHUS_LIBS Sophus::Sophus)
+  set(cake_slam_SOPHUS_LIBS Sophus::Sophus)
 endif()
 
 catkin_package(
@@ -107,7 +107,7 @@ add_library(vikit_common_vendor SHARED
 )
 target_link_libraries(vikit_common_vendor
   ${OpenCV_LIBRARIES}
-  ${FAST_LIVO_SOPHUS_LIBS}
+  ${cake_slam_SOPHUS_LIBS}
   fmt::fmt
 )
 
@@ -117,7 +117,7 @@ add_library(vikit_ros_vendor SHARED
 target_link_libraries(vikit_ros_vendor
   vikit_common_vendor
   ${catkin_LIBRARIES}
-  ${FAST_LIVO_SOPHUS_LIBS}
+  ${cake_slam_SOPHUS_LIBS}
 )
 
 add_library(utils src/utils.cpp)
@@ -146,7 +146,7 @@ set(COMMON_LIBS
   vikit_ros_vendor
   ${PCL_LIBRARIES}
   ${OpenCV_LIBRARIES}
-  ${FAST_LIVO_SOPHUS_LIBS}
+  ${cake_slam_SOPHUS_LIBS}
   ${Boost_LIBRARIES}
 )
 if(OpenMP_CXX_FOUND)
@@ -167,15 +167,15 @@ target_link_libraries(laser_mapping_multi_cam
   ${COMMON_LIBS}
 )
 
-add_executable(fastlivo_mapping_multi_cam src/main_multi_cam.cpp)
-add_dependencies(fastlivo_mapping_multi_cam ${catkin_EXPORTED_TARGETS})
-target_link_libraries(fastlivo_mapping_multi_cam
+add_executable(cake_slam_mapping_multi_cam src/main_multi_cam.cpp)
+add_dependencies(cake_slam_mapping_multi_cam ${catkin_EXPORTED_TARGETS})
+target_link_libraries(cake_slam_mapping_multi_cam
   laser_mapping_multi_cam
   ${COMMON_LIBS}
 )
 
 if(mimalloc_FOUND)
-  target_link_libraries(fastlivo_mapping_multi_cam mimalloc)
+  target_link_libraries(cake_slam_mapping_multi_cam mimalloc)
 endif()
 
 install(TARGETS
@@ -187,7 +187,7 @@ install(TARGETS
   pre_multi_cam
   imu_proc_multi_cam
   laser_mapping_multi_cam
-  fastlivo_mapping_multi_cam
+  cake_slam_mapping_multi_cam
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

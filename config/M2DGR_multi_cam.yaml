@@ -271,8 +271,8 @@ vio:
     f_threshold: 0.5
     min_track_len_for_triangulation: 3
     track_history_size: 20
-    feature_image_topic: "/fast_livo/feature_image"
-    triangulated_points_topic: "/fast_livo/triangulated_points"
+    feature_image_topic: "/cake_slam/feature_image"
+    triangulated_points_topic: "/cake_slam/triangulated_points"
 
 imu:
   imu_en: true
