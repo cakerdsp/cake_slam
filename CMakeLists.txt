@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(fast_livo)
+project(cake_slam)
 
 set(CMAKE_BUILD_TYPE "Release")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
@@ -180,14 +180,14 @@ target_link_libraries(pre_multi_cam ${COMMON_DEPENDENCIES})
 target_link_libraries(imu_proc_multi_cam ${COMMON_DEPENDENCIES})
 
 # Add the main executable
-add_executable(fastlivo_mapping src/main.cpp)
-add_executable(fastlivo_mapping_multi_cam src/main_multi_cam.cpp)
+add_executable(cake_slam_mapping src/main.cpp)
+add_executable(cake_slam_mapping_multi_cam src/main_multi_cam.cpp)
 
-ament_target_dependencies(fastlivo_mapping ${dependencies})
-ament_target_dependencies(fastlivo_mapping_multi_cam ${dependencies})
+ament_target_dependencies(cake_slam_mapping ${dependencies})
+ament_target_dependencies(cake_slam_mapping_multi_cam ${dependencies})
 
 # Link libraries to the executable
-target_link_libraries(fastlivo_mapping
+target_link_libraries(cake_slam_mapping
   laser_mapping
   vio
   lio
@@ -199,7 +199,7 @@ target_link_libraries(fastlivo_mapping
   ${Boost_LIBRARIES}
 )
 
-target_link_libraries(fastlivo_mapping_multi_cam
+target_link_libraries(cake_slam_mapping_multi_cam
   laser_mapping_multi_cam
   vio_multi_cam
   lio_multi_cam
@@ -213,14 +213,14 @@ target_link_libraries(fastlivo_mapping_multi_cam
 
 # Link mimalloc if found
 if(mimalloc_FOUND)
-  target_link_libraries(fastlivo_mapping mimalloc)
-  target_link_libraries(fastlivo_mapping_multi_cam mimalloc)
+  target_link_libraries(cake_slam_mapping mimalloc)
+  target_link_libraries(cake_slam_mapping_multi_cam mimalloc)
 endif()
 
 # Install the executable
 install(TARGETS
-  fastlivo_mapping
-  fastlivo_mapping_multi_cam
+  cake_slam_mapping
+  cake_slam_mapping_multi_cam
   DESTINATION lib/${PROJECT_NAME}
 )
 

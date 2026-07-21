@@ -158,7 +158,10 @@ LIVMapper::LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name, const
   path.header.frame_id = "camera_init";
 }
 
-LIVMapper::~LIVMapper() {}
+LIVMapper::~LIVMapper()
+{
+  savePCD();
+}
 
 void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
 {
@@ -292,8 +295,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<double>("vio.opticalflow.quality_level", 0.01);
   try_declare.template operator()<double>("vio.opticalflow.f_threshold", 0.5);
   try_declare.template operator()<bool>("vio.opticalflow.flow_back", true);
-  try_declare.template operator()<std::string>("vio.opticalflow.feature_image_topic", "/fast_livo/feature_image");
-  try_declare.template operator()<std::string>("vio.opticalflow.triangulated_points_topic", "/fast_livo/triangulated_points");
+  try_declare.template operator()<std::string>("vio.opticalflow.feature_image_topic", "/cake_slam/feature_image");
+  try_declare.template operator()<std::string>("vio.opticalflow.triangulated_points_topic", "/cake_slam/triangulated_points");
   try_declare.template operator()<double>("time_offset.exposure_time_init", 0.0);
   try_declare.template operator()<double>("time_offset.img_time_offset", 0.0);
   try_declare.template operator()<std::vector<double>>("time_offset.img_time_offset_groups", std::vector<double>{});
@@ -1244,6 +1247,10 @@ void LIVMapper::handleLIO()
 
 void LIVMapper::savePCD() 
 {
+  if (pcd_saved) return;
+  pcd_saved = true;
+  std::filesystem::create_directories(std::string(ROOT_DIR) + "Log/PCD");
+
   if (pcd_save_en && (pcl_wait_save->points.size() > 0 || pcl_wait_save_intensity->points.size() > 0) && pcd_save_interval < 0) 
   {
     const bool has_rgb = !pcl_wait_save->empty();
@@ -1295,26 +1302,66 @@ void LIVMapper::savePCD()
                 << " with point count: " << pcl_wait_save_intensity->points.size() << RESET << std::endl;
     }
   }
+  else if (pcd_save_en && (pcl_wait_save->points.size() > 0 || pcl_wait_save_intensity->points.size() > 0) && pcd_save_interval > 0)
+  {
+    ++pcd_index;
+    const std::string all_points_base = std::string(ROOT_DIR) + "Log/PCD/" + std::to_string(pcd_index);
+    pcl::PCDWriter pcd_writer;
+    const bool has_rgb = !pcl_wait_save->empty();
+    const bool has_intensity = !pcl_wait_save_intensity->empty();
+    if (has_rgb)
+    {
+      const std::string rgb_path = all_points_base + (has_intensity ? "_rgb.pcd" : ".pcd");
+      pcd_writer.writeBinary(rgb_path, *pcl_wait_save);
+      std::cout << GREEN << "Final RGB point cloud data saved to: " << rgb_path
+                << " with point count: " << pcl_wait_save->points.size() << RESET << std::endl;
+    }
+    if (has_intensity)
+    {
+      const std::string intensity_path = all_points_base + (has_rgb ? "_intensity.pcd" : ".pcd");
+      pcd_writer.writeBinary(intensity_path, *pcl_wait_save_intensity);
+      std::cout << GREEN << "Final intensity point cloud data saved to: " << intensity_path
+                << " with point count: " << pcl_wait_save_intensity->points.size() << RESET << std::endl;
+    }
+    if (fout_pcd_pos.is_open())
+    {
+      Eigen::Quaterniond q(_state.rot_end);
+      fout_pcd_pos << _state.pos_end.transpose() << " " << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << endl;
+    }
+  }
 }
 
 void LIVMapper::run(rclcpp::Node::SharedPtr &node) 
 {
-  rclcpp::Rate rate(5000);
-  while (rclcpp::ok()) 
+  try
   {
-    rclcpp::spin_some(this->node);
-    if (!sync_packages(LidarMeasures)) 
+    rclcpp::Rate rate(5000);
+    while (rclcpp::ok())
     {
-      rate.sleep();
-      continue;
+      rclcpp::spin_some(this->node);
+      if (!rclcpp::ok()) break;
+      if (!sync_packages(LidarMeasures))
+      {
+        rate.sleep();
+        continue;
+      }
+      if (!rclcpp::ok()) break;
+      handleFirstFrame();
+
+      if (!rclcpp::ok()) break;
+      processImu();
+
+      // if (!p_imu->imu_time_init) continue;
+
+      if (!rclcpp::ok()) break;
+      stateEstimationAndMapping();
     }
-    handleFirstFrame();
-
-    processImu();
-
-    // if (!p_imu->imu_time_init) continue;
-
-    stateEstimationAndMapping();
+  }
+  catch (const std::exception &e)
+  {
+    savePCD();
+    if (rclcpp::ok()) throw;
+    std::cerr << "Shutdown interrupted ROS work after saving PCD: " << e.what() << std::endl;
   }
   savePCD();
 }

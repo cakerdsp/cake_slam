@@ -8,9 +8,9 @@
       multi_cam_sync_tolerance_ms: 40.0
       # Prior-normalized directional filtering for both sequential LIO and VIO updates.
       # false preserves the original estimator path exactly.
-      directional_update_en: false
+      directional_update_en: true
       directional_drop_variance_reduction: 0.05
-      directional_full_variance_reduction: 0.50
+      directional_full_variance_reduction: 0.40
       lid_topic: "/livox/lidar"
       imu_topic: "/livox/imu"
       img_en: 1
@@ -23,10 +23,15 @@
         camera_ns: "camera0"
         image_undistort_en: false
         raw_camera_ns: "camera0"
-        Rcl: [0.71787, -0.69617, -0.00210,
-              -0.02115, -0.01878, -0.99960,
-               0.69585,  0.71763, -0.02821]
-        Pcl: [-0.01710, 0.11155, -0.01546]
+        # Rcl: [0.71787, -0.69617, -0.00210,
+        #       -0.02115, -0.01878, -0.99960,
+        #        0.69585,  0.71763, -0.02821]
+        # Pcl: [-0.01710, 0.11155, -0.01546]
+
+        Rcl: [  0.675951,  -0.713331,  -0.185065,
+              -0.276306,  -0.012511,  -0.960988,
+                0.683187,   0.700715,  -0.205555]
+        Pcl: [  0.021730,   0.051802,  -0.020456]
         online_extrinsic_en: true
         time_offset_group: 0
         online_time_offset_en: true
@@ -35,10 +40,15 @@
         camera_ns: "camera1"
         image_undistort_en: false
         raw_camera_ns: "camera1"
-        Rcl: [-0.6996424752, -0.7128739047,  0.0480331004,
-              -0.0343341177, -0.0335986769, -0.9988454714,
-               0.7136620048, -0.7004856166, -0.0009589922]
-        Pcl: [-0.0189238408, 0.1110594056, -0.0498532729]
+        # Rcl: [-0.6996424752, -0.7128739047,  0.0480331004,
+        #       -0.0343341177, -0.0335986769, -0.9988454714,
+        #        0.7136620048, -0.7004856166, -0.0009589922]
+        # Pcl: [-0.0189238408, 0.1110594056, -0.0498532729]
+
+        Rcl: [ -0.682758,  -0.698383,   0.214718,
+              -0.283641,  -0.017479,  -0.958772,
+                0.673343,  -0.715511,  -0.186156]
+        Pcl: [  0.011663,   0.045931,  -0.027709]
         online_extrinsic_en: true
         time_offset_group: 1
         online_time_offset_en: true
@@ -59,7 +69,7 @@
       exposure_time_init: 0.0
 
     preprocess:
-      image_downclock_en: true
+      image_downclock_en: false
       image_downclock_factor: 2
       point_filter_num: 1
       filter_size_surf: 0.1
@@ -73,14 +83,14 @@
       # 0: direct; 1: optical_flow; 2: color_only.
       # Virtual fisheye patch logic is used by the direct/fisheye frontend.
       frontend_mode: 0
-      cross_camera_reference_en: false
-      cross_camera_current_residual_en: false
+      cross_camera_reference_en: true
+      cross_camera_current_residual_en: true
       max_iterations: 5
       outlier_threshold: 1000
       ncc_en: true
       ncc_thre: 0.7
       # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
-      ncc_thre_by_level: [0.7, 0.7]
+      ncc_thre_by_level: [0.5, 0.4]
       usage_stats_en: true
       usage_stats_window: 100
       img_point_cov: 1000
@@ -92,7 +102,7 @@
       # Adapted from the original cam0 virtual-patch values:
       # virtual_width/height and sphere LUT fields are not read by this project;
       # ax/ay=120 maps to the current virtual_focal_length parameter.
-      virtual_fisheye_patch_en: false
+      virtual_fisheye_patch_en: true
       raw_camera_model_jacobian_en: true
       virtual_s2_optimize_en: false
       virtual_sparse_patch_en: false
@@ -127,12 +137,13 @@
       visual_point_information_retain: 0.90
       visual_point_suspect_reject_count: 8
       visual_point_stale_frames: 200
-      virtual_focal_length: 800.0
+      virtual_focal_length: 300.0
       virtual_patch_margin: 4
       virtual_max_search_level: 0
       # virtual_patch_resampling_mode: "forward_splat"
       virtual_patch_resampling_mode: "pull_exact"
-      virtual_interp_mode: "bilinear"
+      # virtual_interp_mode: "bilinear"
+      virtual_interp_mode: "bicubic"
       virtual_raw_window_half_size: 96
       virtual_splat_min_weight: 1.0e-6
       virtual_splat_require_full_core_coverage: true
@@ -158,7 +169,7 @@
       raycast_en: false
       inverse_composition_en: false
       exposure_estimate_en: true
-      online_extrinsic_en: false
+      online_extrinsic_en: true
       online_extrinsic_rot_en: true
       online_extrinsic_trans_en: true
       online_extrinsic_prior_factor_en: false
@@ -169,17 +180,17 @@
       online_extrinsic_min_tracks: 20
       online_extrinsic_prior_rot_std_deg: 0.5
       online_extrinsic_prior_trans_std_m: 0.02
-      online_extrinsic_max_rot_update_deg: 0.02
-      online_extrinsic_max_trans_update_m: 0.0001
-      online_time_offset_en: false
+      online_extrinsic_max_rot_update_deg: 0.1
+      online_extrinsic_max_trans_update_m: 0.1
+      online_time_offset_en: true
       # online_time_offset_group_mask: []
       online_time_offset_start_frame: 100
       online_time_offset_min_tracks: 30
       online_time_offset_min_pixel_velocity: 15.0
       online_time_offset_prior_std_ms: 5.0
       online_time_offset_process_noise_ms_sqrt_s: 0.0
-      online_time_offset_max_update_ms: 0.2
-      online_time_offset_max_abs_ms: 50.0
+      online_time_offset_max_update_ms: 1000.0
+      online_time_offset_max_abs_ms: 100.0
       online_time_offset_min_update_interval: 5
       inv_expo_time_init: 1.0
       inv_expo_cov: 0.1
@@ -192,14 +203,14 @@
         f_threshold: 0.5
         min_track_len_for_triangulation: 3
         track_history_size: 20
-        feature_image_topic: "/fast_livo/feature_image"
-        triangulated_points_topic: "/fast_livo/triangulated_points"
+        feature_image_topic: "/cake_slam/feature_image"
+        triangulated_points_topic: "/cake_slam/triangulated_points"
 
     imu:
       imu_en: true
       imu_int_frame: 30
-      acc_cov: 0.5
-      gyr_cov: 0.3
+      acc_cov: 1.0
+      gyr_cov: 0.8
       gravity_est_en: true
       ba_bg_est_en: true
 
@@ -237,10 +248,10 @@
 
     evo:
       seq_name: "CBD_Building_01"
-      pose_output_en: false
+      pose_output_en: true
 
     pcd_save:
-      pcd_save_en: false
+      pcd_save_en: true
       type: 0
       colmap_output_en: false
       filter_size_pcd: 0.15

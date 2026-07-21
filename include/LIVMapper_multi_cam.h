@@ -151,7 +151,7 @@ public:
   double _first_lidar_time = 0.0;
   double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 
-  bool lidar_map_inited = false, pcd_save_en = false, pub_effect_point_en = false, pose_output_en = false, ros_driver_fix_en = false;
+  bool lidar_map_inited = false, pcd_save_en = false, pcd_saved = false, pub_effect_point_en = false, pose_output_en = false, ros_driver_fix_en = false;
   int pcd_save_interval = -1, pcd_index = 0;
   int pub_scan_num = 1;
 
@@ -280,8 +280,8 @@ public:
   double optical_flow_quality_level = 0.01;
   double optical_flow_f_threshold = 0.5;
   bool optical_flow_flow_back = true;
-  std::string optical_flow_feature_image_topic = "/fast_livo/feature_image";
-  std::string optical_flow_triangulated_points_topic = "/fast_livo/triangulated_points";
+  std::string optical_flow_feature_image_topic = "/cake_slam/feature_image";
+  std::string optical_flow_triangulated_points_topic = "/cake_slam/triangulated_points";
   int outlier_threshold;
   double plot_time;
   int frame_cnt;

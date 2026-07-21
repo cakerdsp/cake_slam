@@ -16,7 +16,7 @@
       p2: -0.001028
 
       # Downsampled alternative. Use only if the incoming image topic is resized
-      # to 544x640 before fast_livo consumes it.
+      # to 544x640 before cake_slam consumes it.
       # width: 1088
       # height: 1280
       # scale: 0.5

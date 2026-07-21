@@ -116,7 +116,10 @@ LIVMapper::LIVMapper(rclcpp::Node::SharedPtr &node, std::string node_name, const
   path.header.frame_id = "camera_init";
 }
 
-LIVMapper::~LIVMapper() {}
+LIVMapper::~LIVMapper()
+{
+  savePCD();
+}
 
 void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
 {
@@ -176,8 +179,8 @@ void LIVMapper::readParameters(rclcpp::Node::SharedPtr &node)
   try_declare.template operator()<double>("vio.opticalflow.quality_level", 0.01);
   try_declare.template operator()<double>("vio.opticalflow.f_threshold", 0.5);
   try_declare.template operator()<bool>("vio.opticalflow.flow_back", true);
-  try_declare.template operator()<std::string>("vio.opticalflow.feature_image_topic", "/fast_livo/feature_image");
-  try_declare.template operator()<std::string>("vio.opticalflow.triangulated_points_topic", "/fast_livo/triangulated_points");
+  try_declare.template operator()<std::string>("vio.opticalflow.feature_image_topic", "/cake_slam/feature_image");
+  try_declare.template operator()<std::string>("vio.opticalflow.triangulated_points_topic", "/cake_slam/triangulated_points");
   try_declare.template operator()<double>("time_offset.exposure_time_init", 0.0);
   try_declare.template operator()<double>("time_offset.img_time_offset", 0.0);
   try_declare.template operator()<bool>("uav.imu_rate_odom", false);
@@ -766,6 +769,10 @@ void LIVMapper::handleLIO()
 
 void LIVMapper::savePCD() 
 {
+  if (pcd_saved) return;
+  pcd_saved = true;
+  std::filesystem::create_directories(std::string(ROOT_DIR) + "Log/PCD");
+
   if (pcd_save_en && (pcl_wait_save->points.size() > 0 || pcl_wait_save_intensity->points.size() > 0) && pcd_save_interval < 0) 
   {
     std::string raw_points_dir = std::string(ROOT_DIR) + "Log/PCD/all_raw_points.pcd";
@@ -812,26 +819,63 @@ void LIVMapper::savePCD()
                 << " with point count: " << pcl_wait_save_intensity->points.size() << RESET << std::endl;
     }
   }
+  else if (pcd_save_en && (pcl_wait_save->points.size() > 0 || pcl_wait_save_intensity->points.size() > 0) && pcd_save_interval > 0)
+  {
+    pcd_index++;
+    std::string all_points_dir(std::string(ROOT_DIR) + "Log/PCD/" + std::to_string(pcd_index) + ".pcd");
+    pcl::PCDWriter pcd_writer;
+    if (img_en && !pcl_wait_save->empty())
+    {
+      pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
+      std::cout << GREEN << "Final point cloud data saved to: " << all_points_dir
+                << " with point count: " << pcl_wait_save->points.size() << RESET << std::endl;
+    }
+    else if (!pcl_wait_save_intensity->empty())
+    {
+      pcd_writer.writeBinary(all_points_dir, *pcl_wait_save_intensity);
+      std::cout << GREEN << "Final point cloud data saved to: " << all_points_dir
+                << " with point count: " << pcl_wait_save_intensity->points.size() << RESET << std::endl;
+    }
+    if (fout_pcd_pos.is_open())
+    {
+      Eigen::Quaterniond q(_state.rot_end);
+      fout_pcd_pos << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " "
+                   << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " " << endl;
+    }
+  }
 }
 
 void LIVMapper::run(rclcpp::Node::SharedPtr &node) 
 {
-  rclcpp::Rate rate(5000);
-  while (rclcpp::ok()) 
+  try
   {
-    rclcpp::spin_some(this->node);
-    if (!sync_packages(LidarMeasures)) 
+    rclcpp::Rate rate(5000);
+    while (rclcpp::ok())
     {
-      rate.sleep();
-      continue;
+      rclcpp::spin_some(this->node);
+      if (!rclcpp::ok()) break;
+      if (!sync_packages(LidarMeasures))
+      {
+        rate.sleep();
+        continue;
+      }
+      if (!rclcpp::ok()) break;
+      handleFirstFrame();
+
+      if (!rclcpp::ok()) break;
+      processImu();
+
+      // if (!p_imu->imu_time_init) continue;
+
+      if (!rclcpp::ok()) break;
+      stateEstimationAndMapping();
     }
-    handleFirstFrame();
-
-    processImu();
-
-    // if (!p_imu->imu_time_init) continue;
-
-    stateEstimationAndMapping();
+  }
+  catch (const std::exception &e)
+  {
+    savePCD();
+    if (rclcpp::ok()) throw;
+    std::cerr << "Shutdown interrupted ROS work after saving PCD: " << e.what() << std::endl;
   }
   savePCD();
 }
