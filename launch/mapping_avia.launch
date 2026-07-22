@@ -1,0 +1,28 @@
+<launch>
+  <arg name="use_rviz" default="false" />
+  <arg name="use_respawn" default="true" />
+  <arg name="avia_params_file" default="$(find cake_slam)/config/avia.yaml" />
+  <arg name="camera_params_file" default="$(find cake_slam)/config/camera_pinhole.yaml" />
+  <arg name="rviz_config_file" default="$(find cake_slam)/rviz_cfg/cake_slam_ros1.rviz" />
+
+  <node pkg="image_transport" type="republish" name="republish" output="screen"
+        respawn="$(arg use_respawn)"
+        args="compressed in:=/left_camera/image raw out:=/left_camera/image" />
+
+  <node pkg="cake_slam" type="cake_slam_mapping_multi_cam" name="laserMapping" output="screen">
+    <rosparam command="load" file="$(arg avia_params_file)" />
+    <rosparam command="load" file="$(arg camera_params_file)" />
+    <param name="common/num_cameras" value="1" />
+    <param name="cameras/camera0/img_topic" value="/left_camera/image" />
+    <param name="cameras/camera0/camera_ns" value="camera" />
+    <param name="cameras/camera0/image_undistort_en" value="false" />
+    <param name="cameras/camera0/raw_camera_ns" value="camera" />
+    <rosparam param="cameras/camera0/Rcl">[0.00610193, -0.999863, -0.0154172, -0.00615449, 0.0153796, -0.999863, 0.999962, 0.00619598, -0.0060598]</rosparam>
+    <rosparam param="cameras/camera0/Pcl">[0.0194384, 0.104689, -0.0251952]</rosparam>
+    <param name="cameras/camera0/online_extrinsic_en" value="false" />
+    <param name="cameras/camera0/time_offset_group" value="0" />
+    <param name="cameras/camera0/online_time_offset_en" value="false" />
+  </node>
+
+  <node if="$(arg use_rviz)" pkg="rviz" type="rviz" name="rviz" args="-d $(arg rviz_config_file)" />
+</launch>

@@ -67,17 +67,17 @@ vio:
   virtual_splat_min_weight: 1.0e-6
   virtual_splat_require_full_core_coverage: true
   virtual_splat_debug_compare_pull_exact: false
-  # /rgb_img 上的拒绝点颜色图例：
-  #   range_reject：紫色
-  #   support_build：黄色
-  #   warp_ref：橘黄色
-  #   affine_matrix：深红色
-  #   photometric：红色
-  #   ncc：紫罗兰色
-  #   current_z/current_core：浅粉色/玫红色
-  #   close_view：橙色
-  #   ref_missing/ref_invalid：青色/天蓝色
-  #   normal_uninit/rotation：白色/棕色
+  # /rgb_img 
+  #   range_reject
+  #   support_build
+  #   warp_ref
+  #   affine_matrix
+  #   photometric
+  #   ncc
+  #   current_z/current_core/
+  #   close_view
+  #   ref_missing/ref_invalid/
+  #   normal_uninit/rotation/
   draw_rejected_points_en: false
 
   normal_en: true

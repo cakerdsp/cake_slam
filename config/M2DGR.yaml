@@ -11,15 +11,15 @@ common:
   ros_driver_bug_fix: false
 
 extrin_calib:
-  # extrinsic_T：从 LiDAR 坐标系到 IMU (Handsfree) 坐标系的平移向量
-  # extrinsic_R：从 LiDAR 坐标系到 IMU (Handsfree) 坐标系的旋转矩阵
+  # extrinsic_T LiDAR  IMU (Handsfree) 
+  # extrinsic_R LiDAR  IMU (Handsfree) 
   extrinsic_T: [0.27255, -0.00053, 0.17954]
   extrinsic_R: [1.0, 0.0, 0.0,
                 0.0, 1.0, 0.0,
                 0.0, 0.0, 1.0]
 
-  # Rcl 和 Pcl 是 LiDAR -> Camera (正前方鱼眼相机 Cam-left 8823) 的外参
-  # 用于将 LiDAR 特征点投影到相机坐标系
+  # Rcl  Pcl  LiDAR -> Camera ( Cam-left 8823) 
+  #  LiDAR 
   Rcl: [ 0.0, -1.0,  0.0,
         0.0,  0.0, -1.0,
         1.0,  0.0,  0.0]
@@ -38,7 +38,7 @@ preprocess:
   lidar_type: 2 # 2 represents Velodyne in FAST-LIO2/FAST-LIVO
   scan_line: 32
   scan_rate: 10
-  blind: 0.6 # 根据 M2DGR 车体大小，可能需要调整为 1.0 左右以过滤车身点云
+  blind: 0.6 #  M2DGR  1.0 
   feature_extract_enabled: false
 
 vio:
@@ -66,17 +66,17 @@ vio:
   virtual_splat_min_weight: 1.0e-6
   virtual_splat_require_full_core_coverage: true
   virtual_splat_debug_compare_pull_exact: false
-  # /rgb_img 上的拒绝点颜色图例：
-  #   range_reject：紫色
-  #   support_build：黄色
-  #   warp_ref：橘黄色
-  #   affine_matrix：深红色
-  #   photometric：红色
-  #   ncc：紫罗兰色
-  #   current_z/current_core：浅粉色/玫红色
-  #   close_view：橙色
-  #   ref_missing/ref_invalid：青色/天蓝色
-  #   normal_uninit/rotation：白色/棕色
+  # /rgb_img 
+  #   range_reject
+  #   support_build
+  #   warp_ref
+  #   affine_matrix
+  #   photometric
+  #   ncc
+  #   current_z/current_core/
+  #   close_view
+  #   ref_missing/ref_invalid/
+  #   normal_uninit/rotation/
   draw_rejected_points_en: false
 
   normal_en: true

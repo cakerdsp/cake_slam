@@ -26,10 +26,15 @@ cameras:
     #        0.69585,  0.71763, -0.02821]
     # Pcl: [-0.01710, 0.11155, -0.01546]
 
-    Rcl: [  0.675951,  -0.713331,  -0.185065,
-          -0.276306,  -0.012511,  -0.960988,
-            0.683187,   0.700715,  -0.205555]
-    Pcl: [  0.021730,   0.051802,  -0.020456]
+    # Rcl: [  0.675951,  -0.713331,  -0.185065,
+    #       -0.276306,  -0.012511,  -0.960988,
+    #         0.683187,   0.700715,  -0.205555]
+    # Pcl: [  0.021730,   0.051802,  -0.020456]
+    # Rcl: [0.676006, -0.713365, -0.184733, -0.276253, -0.012926,-0.960998, 0.683155, 0.700673, -0.205808] 
+    # Pcl: [0.023117, 0.052262, -0.019891] 
+
+    Rcl: [0.675523, -0.713530, -0.185861,  -0.276416,  -0.011378,  -0.960971,  0.683566,  0.700533,  -0.204917] 
+    Pcl: [0.024515,  0.051542,  -0.019792]
     online_extrinsic_en: true
     time_offset_group: 0
     online_time_offset_en: true
@@ -71,7 +76,7 @@ preprocess:
   image_downclock_factor: 2
   point_filter_num: 1
   filter_size_surf: 0.1
-  lidar_type: 1
+  lidar_type: 7
   scan_line: 4
   scan_rate: 10
   blind: 0.8
@@ -131,17 +136,17 @@ vio:
   visual_ref_nis_max_per_dof: 3.0
   visual_point_seed_min_tests: 3
   visual_point_seed_min_ratio: 0.67
-  visual_point_footprint_iou: 0.60
+  visual_point_footprint_iou: 0.80
   visual_point_information_retain: 0.90
   visual_point_suspect_reject_count: 8
   visual_point_stale_frames: 200
-  virtual_focal_length: 300.0
+  virtual_focal_length: 800.0
   virtual_patch_margin: 4
   virtual_max_search_level: 0
   # virtual_patch_resampling_mode: "forward_splat"
   virtual_patch_resampling_mode: "pull_exact"
-  # virtual_interp_mode: "bilinear"
-  virtual_interp_mode: "bicubic"
+  virtual_interp_mode: "bilinear"
+  # virtual_interp_mode: "bicubic"
   virtual_raw_window_half_size: 96
   virtual_splat_min_weight: 1.0e-6
   virtual_splat_require_full_core_coverage: true

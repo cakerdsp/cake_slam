@@ -28,27 +28,27 @@ time_offset:
   imu_time_offset: 0.0
   img_time_offset: -0.1
   exposure_time_init: 0.0
-# ╔═══════════════════════════════════════════════════════════════════════════════════════╗
-# ║                     Configuration Settings                                            ║
-# ╠═══════════════════════════════════════════════════════════════════════════════════════╣
-# ║    Series   │      ID     │ img_time_offset │ exposure_time_init │  -s (start hover)  ║
-# ╠═══════════════════════════════════════════════════════════════════════════════════════╣
-# ║  HKairport  │ HKairport01 │       0.1       │         0.0        │         75         ║
-# ║             │ HKairport02 │      -0.1       │         0.0        │         60         ║
-# ║             │ HKairport03 │      -0.1       │         0.0        │         62         ║
-# ╠═══════════════════════════════════════════════════════════════════════════════════════╣
-# ║  HKisland   │ HKisland01  │       0.0       │         0.0        │        118         ║
-# ║             │ HKisland02  │       0.1       │         0.0        │         80         ║
-# ║             │ HKisland03  │      -0.1       │         0.0        │         72         ║
-# ╠═══════════════════════════════════════════════════════════════════════════════════════╣
-# ║  AMtown     │ AMtown01    │      -0.1       │       0.0285       │         75         ║
-# ║             │ AMtown02    │      -0.1       │       0.0285       │         50         ║
-# ║             │ AMtown03    │      -0.1       │       0.0285       │        106         ║
-# ╠═══════════════════════════════════════════════════════════════════════════════════════╣
-# ║  AMvalley   │ AMvalley01  │      -0.1       │       0.0132       │         70         ║
-# ║             │ AMvalley02  │      -0.1       │       0.0132       │         65         ║
-# ║             │ AMvalley03  │      -0.1       │       0.0132       │         68         ║
-# ╚═══════════════════════════════════════════════════════════════════════════════════════╝
+# XTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT[
+# U                     Configuration Settings                                            U
+# dTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTg
+# U    Series         ID      img_time_offset  exposure_time_init   -s (start hover)  U
+# dTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTg
+# U  HKairport   HKairport01        0.1                0.0                 75         U
+# U              HKairport02       -0.1                0.0                 60         U
+# U              HKairport03       -0.1                0.0                 62         U
+# dTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTg
+# U  HKisland    HKisland01         0.0                0.0                118         U
+# U              HKisland02         0.1                0.0                 80         U
+# U              HKisland03        -0.1                0.0                 72         U
+# dTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTg
+# U  AMtown      AMtown01          -0.1              0.0285                75         U
+# U              AMtown02          -0.1              0.0285                50         U
+# U              AMtown03          -0.1              0.0285               106         U
+# dTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTg
+# U  AMvalley    AMvalley01        -0.1              0.0132                70         U
+# U              AMvalley02        -0.1              0.0132                65         U
+# U              AMvalley03        -0.1              0.0132                68         U
+# ^TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTa
 preprocess:
   point_filter_num: 1
   filter_size_surf: 0.1
@@ -72,17 +72,17 @@ vio:
   virtual_splat_min_weight: 1.0e-6
   virtual_splat_require_full_core_coverage: true
   virtual_splat_debug_compare_pull_exact: false
-  # /rgb_img 上的拒绝点颜色图例：
-  #   range_reject：紫色
-  #   support_build：黄色
-  #   warp_ref：橘黄色
-  #   affine_matrix：深红色
-  #   photometric：红色
-  #   ncc：紫罗兰色
-  #   current_z/current_core：浅粉色/玫红色
-  #   close_view：橙色
-  #   ref_missing/ref_invalid：青色/天蓝色
-  #   normal_uninit/rotation：白色/棕色
+  # /rgb_img 
+  #   range_reject
+  #   support_build
+  #   warp_ref
+  #   affine_matrix
+  #   photometric
+  #   ncc
+  #   current_z/current_core/
+  #   close_view
+  #   ref_missing/ref_invalid/
+  #   normal_uninit/rotation/
   draw_rejected_points_en: false
   normal_en: true
   raycast_en: false

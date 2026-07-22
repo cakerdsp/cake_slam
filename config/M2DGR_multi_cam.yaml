@@ -141,7 +141,7 @@ time_offset:
 preprocess:
   image_downclock_en: false
   image_downclock_factor: 1
-  point_filter_num: 70
+  point_filter_num: 5
   filter_size_surf: 0.1
   lidar_type: 2
   scan_line: 32
