@@ -1,11 +1,11 @@
 <launch>
   <arg name="use_rviz" default="true" />
-  <arg name="m2dgr_params_file" default="$(find cake_slam)/config/M2DGR_multi_cam.yaml" />
-  <arg name="camera_params_file" default="$(find cake_slam)/config/camera_M2DGR_multi_cam.yaml" />
+  <arg name="mid360_params_file" default="$(find cake_slam)/config/mid360_mei_multi_cam.yaml" />
+  <arg name="camera_params_file" default="$(find cake_slam)/config/camera_mei_multi_cam.yaml" />
   <arg name="rviz_config_file" default="$(find cake_slam)/rviz_cfg/cake_slam_ros1.rviz" />
 
   <node pkg="cake_slam" type="cake_slam_mapping_multi_cam" name="laserMapping" output="screen">
-    <rosparam command="load" file="$(arg m2dgr_params_file)" />
+    <rosparam command="load" file="$(arg mid360_params_file)" />
     <rosparam command="load" file="$(arg camera_params_file)" />
   </node>
 

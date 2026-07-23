@@ -16,7 +16,7 @@ Panels:
         - /Image1
         - /Axes1
       Splitter Ratio: 0.550000011920929
-    Tree Height: 743
+    Tree Height: 459
   - Class: rviz/Selection
     Name: Selection
   - Class: rviz/Tool Properties
@@ -33,7 +33,7 @@ Panels:
   - Class: rviz/Time
     Name: Time
     SyncMode: 0
-    SyncSource: Registered Cloud
+    SyncSource: Effect Points
 Preferences:
   PromptSaveOnExit: true
 Toolbars:
@@ -45,7 +45,7 @@ Visualization Manager:
       Cell Size: 1
       Class: rviz/Grid
       Color: 160; 160; 164
-      Enabled: true
+      Enabled: false
       Line Style:
         Line Width: 0.029999999329447746
         Value: Lines
@@ -58,7 +58,7 @@ Visualization Manager:
       Plane: XY
       Plane Cell Count: 80
       Reference Frame: <Fixed Frame>
-      Value: true
+      Value: false
     - Class: rviz/TF
       Enabled: false
       Frame Timeout: 15
@@ -76,7 +76,7 @@ Visualization Manager:
       Value: false
     - Class: rviz/Group
       Displays:
-        - Alpha: 1
+        - Alpha: 0.5
           Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
             Max Value: 20
@@ -96,7 +96,7 @@ Visualization Manager:
           Position Transformer: XYZ
           Queue Size: 10
           Selectable: true
-          Size (Pixels): 2
+          Size (Pixels): 1
           Size (m): 0.019999999552965164
           Style: Points
           Topic: /cloud_registered
@@ -202,7 +202,7 @@ Visualization Manager:
         - Alpha: 1
           Buffer Length: 1
           Class: rviz/Path
-          Color: 63; 249; 253
+          Color: 239; 41; 41
           Enabled: true
           Head Diameter: 0.30000001192092896
           Head Length: 0.20000000298023224
@@ -248,7 +248,7 @@ Visualization Manager:
       Value: true
   Enabled: true
   Global Options:
-    Background Color: 48; 48; 48
+    Background Color: 255; 255; 255
     Default Light: true
     Fixed Frame: camera_init
     Frame Rate: 30
@@ -274,7 +274,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 11.225503921508789
+      Distance: 28.34219741821289
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -282,17 +282,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 5.2668986320495605
-        Y: -0.6076583862304688
-        Z: 4.291384696960449
+        X: -3.3309478759765625
+        Y: -1.1951552629470825
+        Z: 1.2613471746444702
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.5697963237762451
+      Pitch: 1.544796347618103
       Target Frame: <Fixed Frame>
-      Yaw: 3.5150022506713867
+      Yaw: 2.824985980987549
     Saved: ~
 Window Geometry:
   Displays:
@@ -302,7 +302,7 @@ Window Geometry:
   Hide Right Dock: false
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000001000000000000041800000506fc0200000007fb000000100044006900730070006c006100790073010000003d0000036a000000c900fffffffb0000000a0049006d00610067006501000003ad000001570000001600fffffffb0000000a0049006d00610067006501000003a7000000e40000000000000000fb0000001200530065006c0065006300740069006f006e00000001ea000000cc0000005c00fffffffb0000001e0054006f006f006c002000500072006f0070006500720074006900650073000000031b000001630000005c00fffffffb0000000a00560069006500770073000000033b0000017d000000a400fffffffb0000000800540069006d0065010000050a000000390000003900ffffff0000059a0000050600000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000001000000000000041800000506fc0200000007fb000000100044006900730070006c006100790073010000003d0000024e000000c900fffffffb0000000a0049006d00610067006501000002910000025d0000001600fffffffb0000000a0049006d00610067006501000003a7000000e40000000000000000fb0000001200530065006c0065006300740069006f006e00000001ea000000cc0000005c00fffffffb0000001e0054006f006f006c002000500072006f0070006500720074006900650073000000031b000001630000005c00fffffffb0000000a00560069006500770073000000033b0000017d000000a400fffffffb0000000800540069006d006501000004f40000004f0000003900ffffff0000059a0000050600000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Time:

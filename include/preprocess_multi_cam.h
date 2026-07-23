@@ -14,7 +14,7 @@ which is included as part of this source code package.
 #define PREPROCESS_MULTI_CAM_H_
 
 #include "common_lib_multi_cam.h"
-#include <livox_ros_driver/CustomMsg.h>
+#include <livox_ros_driver2/CustomMsg.h>
 #include <pcl_conversions/pcl_conversions.h>
 
 using namespace std;
@@ -138,7 +138,7 @@ public:
   Preprocess();
   ~Preprocess();
 
-  void process(const livox_ros_driver::CustomMsg::Ptr &msg, PointCloudXYZI::Ptr &pcl_out);
+  void process(const livox_ros_driver2::CustomMsg::Ptr &msg, PointCloudXYZI::Ptr &pcl_out);
   void process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out);
   void set(bool feat_en, int lid_type, double bld, int pfilt_num);
 
@@ -155,8 +155,9 @@ public:
   ros::Publisher pub_corn;
 
 private:
-  void avia_handler(const livox_ros_driver::CustomMsg::Ptr &msg);
+  void avia_handler(const livox_ros_driver2::CustomMsg::Ptr &msg);
   void oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
+  void livox_pointcloud2_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void xt32_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void Pandar128_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);

@@ -100,7 +100,7 @@ public:
 
   void RGBpointBodyToWorld(PointType const *const pi, PointType *const po);
   void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg);
-  void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg_in);
+  void livox_pcl_cbk(const livox_ros_driver2::CustomMsg::ConstPtr &msg_in);
   void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in);
   void img_cbk(int camera_id, const sensor_msgs::Image::ConstPtr &msg_in);
   void compressed_img_cbk(int camera_id, const sensor_msgs::CompressedImage::ConstPtr &msg_in);
@@ -197,6 +197,10 @@ public:
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
   bool virtual_s2_optimize_en = false;
+  bool virtual_raw_score_select_en = false;
+  int max_total_points = 150;
+  int points_per_camera_min = 50;
+  int points_per_camera_max = 150;
   bool visual_ref_post_ekf_build_en = false;
   bool visual_map_manage_en = false;
   bool visual_map_manage_log_en = true;

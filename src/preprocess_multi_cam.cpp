@@ -12,8 +12,116 @@ which is included as part of this source code package.
 
 #include "preprocess_multi_cam.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <vector>
+
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
+
+namespace
+{
+const sensor_msgs::PointField *findField(const sensor_msgs::PointCloud2 &msg, const std::vector<std::string> &names)
+{
+  for (const std::string &name : names)
+  {
+    for (const auto &field : msg.fields)
+    {
+      if (field.name == name) return &field;
+    }
+  }
+  return nullptr;
+}
+
+bool readFieldAsDouble(const uint8_t *point_data, const sensor_msgs::PointField &field, double &value)
+{
+  const uint8_t *ptr = point_data + field.offset;
+  switch (field.datatype)
+  {
+  case sensor_msgs::PointField::INT8:
+  {
+    int8_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::UINT8:
+  {
+    uint8_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::INT16:
+  {
+    int16_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::UINT16:
+  {
+    uint16_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::INT32:
+  {
+    int32_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::UINT32:
+  {
+    uint32_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::FLOAT32:
+  {
+    float v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::FLOAT64:
+  {
+    double v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  default:
+    return false;
+  }
+}
+
+struct LivoxPointCloud2Point
+{
+  PointType point;
+  int line = 0;
+  double raw_time = 0.0;
+};
+
+double normalizeLivoxPointTimeMs(double raw_time, double min_time, double max_time, size_t index, size_t count, int scan_rate)
+{
+  const double fallback_scan_ms = scan_rate > 0 ? 1000.0 / scan_rate : 100.0;
+  if (!std::isfinite(raw_time) || max_time <= min_time)
+    return count > 1 ? fallback_scan_ms * static_cast<double>(index) / static_cast<double>(count - 1) : 0.0;
+
+  const double rel = raw_time - min_time;
+  const double span = max_time - min_time;
+  if (span > 1.0e6) return rel / 1.0e6;
+  if (span > 1.0e3) return rel / 1.0e3;
+  if (span <= 1.0) return rel * 1.0e3;
+  return rel;
+}
+} // namespace
 
 Preprocess::Preprocess() : feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
 {
@@ -53,7 +161,7 @@ void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
   point_filter_num = pfilt_num;
 }
 
-void Preprocess::process(const livox_ros_driver::CustomMsg::Ptr &msg, PointCloudXYZI::Ptr &pcl_out)
+void Preprocess::process(const livox_ros_driver2::CustomMsg::Ptr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
   avia_handler(msg);
   *pcl_out = pl_surf;
@@ -82,6 +190,9 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
   case PANDAR128:
     Pandar128_handler(msg);
     break;
+  case LIVOX_POINTCLOUD2:
+    livox_pointcloud2_handler(msg);
+    break;
   default:
     printf("Error LiDAR Type: %d \n", lidar_type);
     break;
@@ -89,7 +200,7 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
   *pcl_out = pl_surf;
 }
 
-void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::Ptr &msg)
+void Preprocess::avia_handler(const livox_ros_driver2::CustomMsg::Ptr &msg)
 {
   pl_surf.clear();
   pl_corn.clear();
@@ -197,6 +308,137 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::Ptr &msg)
     }
   }
   printf("[ Preprocess ] Output point number: %zu \n", pl_surf.points.size());
+}
+
+void Preprocess::livox_pointcloud2_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
+{
+  pl_surf.clear();
+  pl_corn.clear();
+  pl_full.clear();
+
+  const auto *x_field = findField(*msg, {"x"});
+  const auto *y_field = findField(*msg, {"y"});
+  const auto *z_field = findField(*msg, {"z"});
+  if (x_field == nullptr || y_field == nullptr || z_field == nullptr)
+  {
+    printf("[ Preprocess ] Livox PointCloud2 missing x/y/z fields\n");
+    return;
+  }
+
+  const auto *intensity_field = findField(*msg, {"intensity", "reflectivity"});
+  const auto *time_field = findField(*msg, {"offset_time", "timestamp", "time", "t"});
+  const auto *line_field = findField(*msg, {"line", "ring"});
+  const size_t point_count = static_cast<size_t>(msg->width) * static_cast<size_t>(msg->height);
+  std::vector<LivoxPointCloud2Point> points;
+  points.reserve(point_count);
+
+  double min_time = std::numeric_limits<double>::infinity();
+  double max_time = -std::numeric_limits<double>::infinity();
+  const bool has_time = time_field != nullptr;
+  static bool warned_no_time = false;
+  static bool warned_feature_without_line = false;
+
+  for (uint32_t row = 0; row < msg->height; ++row)
+  {
+    const size_t row_offset = static_cast<size_t>(row) * msg->row_step;
+    for (uint32_t col = 0; col < msg->width; ++col)
+    {
+      const size_t offset = row_offset + static_cast<size_t>(col) * msg->point_step;
+      if (offset + msg->point_step > msg->data.size()) continue;
+      const uint8_t *point_data = msg->data.data() + offset;
+
+      double x = 0.0, y = 0.0, z = 0.0;
+      if (!readFieldAsDouble(point_data, *x_field, x) || !readFieldAsDouble(point_data, *y_field, y) ||
+          !readFieldAsDouble(point_data, *z_field, z))
+        continue;
+      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+      if (x * x + y * y + z * z < blind_sqr) continue;
+
+      LivoxPointCloud2Point item;
+      item.point.x = x;
+      item.point.y = y;
+      item.point.z = z;
+      item.point.normal_x = 0;
+      item.point.normal_y = 0;
+      item.point.normal_z = 0;
+      if (intensity_field != nullptr)
+      {
+        double intensity = 0.0;
+        if (readFieldAsDouble(point_data, *intensity_field, intensity)) item.point.intensity = intensity;
+      }
+      if (line_field != nullptr)
+      {
+        double line = 0.0;
+        if (readFieldAsDouble(point_data, *line_field, line)) item.line = static_cast<int>(line);
+      }
+      if (has_time)
+      {
+        readFieldAsDouble(point_data, *time_field, item.raw_time);
+        if (std::isfinite(item.raw_time))
+        {
+          min_time = std::min(min_time, item.raw_time);
+          max_time = std::max(max_time, item.raw_time);
+        }
+      }
+      points.push_back(item);
+    }
+  }
+
+  if (!has_time && !warned_no_time)
+  {
+    printf("[ Preprocess ] Livox PointCloud2 has no time field; using scan_rate-based synthetic offset time\n");
+    warned_no_time = true;
+  }
+  if (feature_enabled && line_field == nullptr && !warned_feature_without_line)
+  {
+    printf("[ Preprocess ] Livox PointCloud2 has no line/ring field; feature extraction is skipped\n");
+    warned_feature_without_line = true;
+  }
+
+  for (size_t i = 0; i < points.size(); ++i)
+    points[i].point.curvature = normalizeLivoxPointTimeMs(points[i].raw_time, min_time, max_time, i, points.size(), SCAN_RATE);
+
+  if (feature_enabled && line_field != nullptr)
+  {
+    for (int i = 0; i < N_SCANS; i++)
+    {
+      pl_buff[i].clear();
+      pl_buff[i].reserve(points.size());
+    }
+    for (const auto &item : points)
+    {
+      if (item.line >= 0 && item.line < N_SCANS) pl_buff[item.line].push_back(item.point);
+    }
+    for (int j = 0; j < N_SCANS; j++)
+    {
+      PointCloudXYZI &pl = pl_buff[j];
+      int linesize = pl.size();
+      if (linesize <= 5) continue;
+      vector<orgtype> &types = typess[j];
+      types.clear();
+      types.resize(linesize);
+      linesize--;
+      for (uint i = 0; i < linesize; i++)
+      {
+        types[i].range = pl[i].x * pl[i].x + pl[i].y * pl[i].y;
+        vx = pl[i].x - pl[i + 1].x;
+        vy = pl[i].y - pl[i + 1].y;
+        vz = pl[i].z - pl[i + 1].z;
+        types[i].dista = vx * vx + vy * vy + vz * vz;
+      }
+      types[linesize].range = pl[linesize].x * pl[linesize].x + pl[linesize].y * pl[linesize].y;
+      give_feature(pl, types);
+    }
+  }
+  else
+  {
+    pl_surf.reserve(points.size());
+    for (size_t i = 0; i < points.size(); ++i)
+    {
+      if (i % point_filter_num == 0) pl_surf.push_back(points[i].point);
+    }
+  }
+  printf("[ Preprocess ] Livox PointCloud2 output point number: %zu \n", pl_surf.points.size());
 }
 
 void Preprocess::l515_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)

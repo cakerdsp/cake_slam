@@ -318,6 +318,7 @@ struct PerCameraData
   std::vector<float> map_dist;
   std::vector<float> scan_value;
   std::vector<VisualPoint *> retrieve_voxel_points;
+  std::vector<std::vector<VisualPoint *>> retrieve_voxel_point_candidates;
   std::vector<pointWithVar> append_voxel_points;
   std::vector<int> append_voxel_source_type;
   std::vector<int> append_voxel_source_index;
@@ -448,6 +449,10 @@ public:
   double virtual_focal_length = 300.0;
   int virtual_patch_margin = 4;
   int virtual_max_search_level = 1;
+  bool virtual_raw_score_select_en = false;
+  int max_total_points = 150;
+  int points_per_camera_min = 50;
+  int points_per_camera_max = 150;
   double virtual_min_z = 1.0e-6;
   std::string virtual_patch_resampling_mode = "forward_splat";
   VirtualPatchResamplingMode virtual_patch_resampling_mode_enum = VirtualPatchResamplingMode::FORWARD_SPLAT;
@@ -852,7 +857,8 @@ public:
   void drawOpticalFlowDebugImage(const std::vector<cv::Point2f> &rejected_pts, int prev, int tracked, int flow_back_pass,
                                  int border_pass, int mask_reject, int new_points, int final_points, int triangulated);
   void retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
-                                   const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+                                   const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+                                   int raw_score_point_quota = -1);
   void generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
                                const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void setImuToLidarExtrinsic(const V3D &transl, const M3D &rot);
@@ -990,7 +996,8 @@ public:
                                 const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
                                 VisualGeomRejectReason &reject_reason) const;
   void retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
-                                          const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+                                          const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+                                          int raw_score_point_quota = -1);
   void generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
                                       const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img);

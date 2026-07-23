@@ -54,7 +54,7 @@ find_package(catkin REQUIRED COMPONENTS
   tf2
   tf2_ros
   tf2_geometry_msgs
-  livox_ros_driver
+  livox_ros_driver2
   cv_bridge
   image_transport
 )
@@ -75,7 +75,7 @@ catkin_package(
   CATKIN_DEPENDS
     roscpp sensor_msgs geometry_msgs nav_msgs visualization_msgs
     pcl_ros pcl_conversions tf2 tf2_ros tf2_geometry_msgs
-    livox_ros_driver cv_bridge image_transport
+    livox_ros_driver2 cv_bridge image_transport
   DEPENDS Eigen3 PCL OpenCV Sophus fmt Boost
 )
 
