@@ -42,6 +42,97 @@ constexpr double kInterpPi = 3.14159265358979323846;
 constexpr int kRuntimeRawSupportDumpSize = 45;
 constexpr int kLegacyFixedStateDim = 19;
 
+bool normalizePatchValues(const float *values, int count, double min_std,
+                          Eigen::VectorXd &normalized, double *stddev = nullptr)
+{
+  if (values == nullptr || count <= 0 || !std::isfinite(min_std) || min_std <= 0.0) return false;
+  normalized.resize(count);
+  double mean = 0.0;
+  for (int i = 0; i < count; ++i)
+  {
+    if (!std::isfinite(values[i])) return false;
+    mean += values[i];
+  }
+  mean /= static_cast<double>(count);
+  double squared_norm = 0.0;
+  for (int i = 0; i < count; ++i)
+  {
+    normalized[i] = static_cast<double>(values[i]) - mean;
+    squared_norm += normalized[i] * normalized[i];
+  }
+  const double sigma = std::sqrt(squared_norm / static_cast<double>(count));
+  if (!std::isfinite(sigma) || sigma < min_std) return false;
+  normalized /= sigma;
+  if (stddev != nullptr) *stddev = sigma;
+  return normalized.array().isFinite().all();
+}
+
+bool normalizePatchValues(const std::vector<double> &values, double min_std,
+                          Eigen::VectorXd &normalized, double *stddev = nullptr)
+{
+  if (values.empty() || !std::isfinite(min_std) || min_std <= 0.0) return false;
+  normalized = Eigen::Map<const Eigen::VectorXd>(values.data(), static_cast<Eigen::Index>(values.size()));
+  if (!normalized.array().isFinite().all()) return false;
+  const double mean = normalized.mean();
+  normalized.array() -= mean;
+  const double sigma = std::sqrt(normalized.squaredNorm() / static_cast<double>(values.size()));
+  if (!std::isfinite(sigma) || sigma < min_std) return false;
+  normalized /= sigma;
+  if (stddev != nullptr) *stddev = sigma;
+  return normalized.array().isFinite().all();
+}
+
+bool normalizePatchWithJacobian(const std::vector<double> &values,
+                                const Eigen::MatrixXd &raw_jacobian,
+                                double min_std,
+                                Eigen::VectorXd &normalized,
+                                Eigen::MatrixXd &normalized_jacobian)
+{
+  if (values.empty() || raw_jacobian.rows() != static_cast<Eigen::Index>(values.size())) return false;
+  double sigma = 0.0;
+  if (!normalizePatchValues(values, min_std, normalized, &sigma)) return false;
+
+  const Eigen::Map<const Eigen::VectorXd> values_map(
+      values.data(), static_cast<Eigen::Index>(values.size()));
+  const Eigen::VectorXd centered =
+      values_map - Eigen::VectorXd::Constant(values_map.size(), values_map.mean());
+  const Eigen::RowVectorXd row_mean = raw_jacobian.colwise().mean();
+  normalized_jacobian = raw_jacobian.rowwise() - row_mean;
+  const Eigen::RowVectorXd projected = centered.transpose() * raw_jacobian;
+  const double count = static_cast<double>(values.size());
+  // q = C p / sigma, sigma^2 = (p^T C p) / N:
+  // dq/dx = C J / sigma - (C p) ((C p)^T J) / (N sigma^3).
+  // Evaluate the two rank-one operations directly; never materialize the N x N centering matrix.
+  normalized_jacobian =
+      normalized_jacobian / sigma -
+      centered * projected / (count * sigma * sigma * sigma);
+  return normalized_jacobian.array().isFinite().all();
+}
+
+bool normalizedPatchMetrics(const float *reference, const float *current, int count,
+                            double min_std, double &sse, double &ncc)
+{
+  Eigen::VectorXd normalized_reference;
+  Eigen::VectorXd normalized_current;
+  if (!normalizePatchValues(reference, count, min_std, normalized_reference) ||
+      !normalizePatchValues(current, count, min_std, normalized_current))
+    return false;
+  const Eigen::VectorXd residual = normalized_current - normalized_reference;
+  sse = residual.squaredNorm();
+  ncc = normalized_reference.dot(normalized_current) / static_cast<double>(count);
+  return std::isfinite(sse) && std::isfinite(ncc);
+}
+
+double normalizedPatchRobustSqrtWeight(const Eigen::VectorXd &residual,
+                                       bool robust_enabled, double huber_delta)
+{
+  if (!robust_enabled || residual.size() == 0) return 1.0;
+  const double patch_rmse =
+      std::sqrt(residual.squaredNorm() / static_cast<double>(residual.size()));
+  if (!std::isfinite(patch_rmse) || patch_rmse <= huber_delta || patch_rmse <= 1.0e-12) return 1.0;
+  return std::sqrt(huber_delta / patch_rmse);
+}
+
 std::string normalizeVirtualInterpMode(std::string mode)
 {
   for (char &ch : mode) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
@@ -560,8 +651,9 @@ void VIOManager::applyOnlineExtrinsicPriors(Eigen::MatrixXd &hessian, Eigen::Vec
   const double rot_std = online_extrinsic_prior_rot_std_deg * kDegToRad;
   const double trans_std = online_extrinsic_prior_trans_std_m;
   if (rot_std <= 0.0 || trans_std <= 0.0) return;
-  const double rot_info = img_point_cov / (rot_std * rot_std);
-  const double trans_info = img_point_cov / (trans_std * trans_std);
+  const double measurement_cov = photometricNoiseCovariance();
+  const double rot_info = measurement_cov / (rot_std * rot_std);
+  const double trans_info = measurement_cov / (trans_std * trans_std);
 
   for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
   {
@@ -593,7 +685,7 @@ void VIOManager::applyOnlineTimeOffsetPriors(Eigen::MatrixXd &hessian, Eigen::Ve
   if (state == nullptr || !online_time_offset_en) return;
   const double std_s = online_time_offset_prior_std_ms * 1.0e-3;
   if (!std::isfinite(std_s) || std_s <= 0.0) return;
-  const double info = img_point_cov / (std_s * std_s);
+  const double info = photometricNoiseCovariance() / (std_s * std_s);
   for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
   {
     if (group_id >= static_cast<int>(active_groups.size()) || active_groups[group_id] == 0) continue;
@@ -772,6 +864,23 @@ void VIOManager::initializeVIO()
   patch_buffer.resize(patch_size_total);
   warp_len = patch_size_total * patch_pyrimid_level;
   border = (patch_size_half + 1) * (1 << patch_pyrimid_level);
+  if (zncc_residual_en)
+  {
+    if (inverse_composition_en)
+      throw std::runtime_error("zncc_residual_en does not support inverse_composition_en");
+    if (virtual_s2_optimize_en)
+      throw std::runtime_error("zncc_residual_en does not support virtual_s2_optimize_en");
+    if (!std::isfinite(zncc_min_std) || zncc_min_std <= 0.0)
+      throw std::runtime_error("zncc_min_std must be finite and positive");
+    if (!std::isfinite(zncc_residual_cov) || zncc_residual_cov <= 0.0)
+      throw std::runtime_error("zncc_residual_cov must be finite and positive");
+    if (!std::isfinite(zncc_huber_delta) || zncc_huber_delta <= 0.0)
+      throw std::runtime_error("zncc_huber_delta must be finite and positive");
+    if (exposure_estimate_en)
+      throw std::runtime_error("zncc_residual_en requires exposure_estimate_en=false");
+    printf("[ VIO ZNCC Residual ] enabled for all same-camera and cross-camera patches: min_std=%.3f cov=%.6f robust=%d huber_delta=%.3f\n",
+           zncc_min_std, zncc_residual_cov, zncc_robust_en ? 1 : 0, zncc_huber_delta);
+  }
   runtime_support_dump_initialized_ = false;
   runtime_support_dump_next_point_id_ = 0;
   runtime_support_dump_best_track_count_ = 0;
@@ -4071,7 +4180,10 @@ void VIOManager::recordUsagePoseFrameInfo(const Eigen::MatrixXd &prior_cov, cons
     prior_spd.diagonal().array() += 1.0e-12;
     const Eigen::LDLT<Eigen::MatrixXd> prior_ldlt(prior_spd);
     if (prior_ldlt.info() != Eigen::Success) return empty;
-    const double inv_noise = (std::isfinite(img_point_cov) && img_point_cov > 1.0e-12) ? 1.0 / img_point_cov : 1.0;
+    const double measurement_cov = photometricNoiseCovariance();
+    const double inv_noise = (std::isfinite(measurement_cov) && measurement_cov > 1.0e-12)
+                                 ? 1.0 / measurement_cov
+                                 : 1.0;
     Eigen::MatrixXd information =
         prior_ldlt.solve(Eigen::MatrixXd::Identity(prior_spd.rows(), prior_spd.cols())) + inv_noise * symmetrize(hessian);
     information = symmetrize(information);
@@ -5444,7 +5556,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
 
     const double current_core_start = omp_get_wtime();
     const int usage_levels = std::max(1, patch_pyrimid_level);
-    const bool evaluate_all_levels = ncc_en || usage_stats_en;
+    const bool evaluate_all_levels = zncc_residual_en || ncc_en || usage_stats_en;
     vector<float> current_core_all(evaluate_all_levels ? warp_len : patch_size_total, 0.0f);
     result.level_sse.assign(usage_levels, std::numeric_limits<double>::quiet_NaN());
     result.level_ncc.assign(usage_levels, std::numeric_limits<double>::quiet_NaN());
@@ -5484,49 +5596,87 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       }
     }
 
-    double level0_error = 0.0;
-    for (int k = 0; k < patch_size_total; ++k)
+    if (zncc_residual_en)
     {
-      const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[k] -
-                              state->inv_expo_time[ctx.camera_id] * current_core_all[k];
-      level0_error += residual * residual;
-    }
-    result.error = static_cast<float>(level0_error);
-    result.level_sse[0] = level0_error;
-    if (evaluate_all_levels)
-    {
-      for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+      for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
       {
         if (result.level_valid[pyramid_level] == 0) continue;
-        double level_error = 0.0;
         const int offset = patch_size_total * pyramid_level;
-        for (int k = 0; k < patch_size_total; ++k)
+        if (!normalizedPatchMetrics(result.warped_reference.data() + offset,
+                                    current_core_all.data() + offset,
+                                    patch_size_total, zncc_min_std,
+                                    result.level_sse[pyramid_level],
+                                    result.level_ncc[pyramid_level]))
         {
-          const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[offset + k] -
-                                  state->inv_expo_time[ctx.camera_id] * current_core_all[offset + k];
-          level_error += residual * residual;
+          result.level_valid[pyramid_level] = 0;
         }
-        result.level_sse[pyramid_level] = level_error;
       }
+      if (result.level_valid[0] == 0)
+      {
+        result.current_core_time = omp_get_wtime() - current_core_start;
+        result.rejection = VIRTUAL_REJECT_PHOTOMETRIC;
+        continue;
+      }
+      result.error = static_cast<float>(result.level_sse[0]);
     }
-    if (ncc_en || usage_stats_en)
+    else
     {
-      result.level_ncc[0] = calculateNCC(result.warped_reference.data(), current_core_all.data(), patch_size_total);
-      result.ncc = result.level_ncc[0];
+      double level0_error = 0.0;
+      for (int k = 0; k < patch_size_total; ++k)
+      {
+        const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[k] -
+                                state->inv_expo_time[ctx.camera_id] * current_core_all[k];
+        level0_error += residual * residual;
+      }
+      result.error = static_cast<float>(level0_error);
+      result.level_sse[0] = level0_error;
       if (evaluate_all_levels)
       {
         for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
         {
           if (result.level_valid[pyramid_level] == 0) continue;
           const int offset = patch_size_total * pyramid_level;
-          result.level_ncc[pyramid_level] =
-              calculateNCC(result.warped_reference.data() + offset, current_core_all.data() + offset, patch_size_total);
+          double level_error = 0.0;
+          for (int k = 0; k < patch_size_total; ++k)
+          {
+            const double residual = ref_ftr->inv_expo_time_ * result.warped_reference[offset + k] -
+                                    state->inv_expo_time[ctx.camera_id] * current_core_all[offset + k];
+            level_error += residual * residual;
+          }
+          result.level_sse[pyramid_level] = level_error;
+        }
+      }
+      if (ncc_en || usage_stats_en)
+      {
+        result.level_ncc[0] = calculateNCC(result.warped_reference.data(), current_core_all.data(), patch_size_total);
+        if (evaluate_all_levels)
+        {
+          for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+          {
+            if (result.level_valid[pyramid_level] == 0) continue;
+            const int offset = patch_size_total * pyramid_level;
+            result.level_ncc[pyramid_level] =
+                calculateNCC(result.warped_reference.data() + offset, current_core_all.data() + offset, patch_size_total);
+          }
         }
       }
     }
+    result.ncc = result.level_ncc[0];
     bool any_level_active = false;
     bool any_photometric_reject = false;
-    if (ncc_en)
+    if (zncc_residual_en)
+    {
+      for (int level = 0; level < usage_levels; ++level)
+      {
+        if (result.level_valid[level] == 0 || !std::isfinite(result.level_ncc[level]) ||
+            !std::isfinite(result.level_sse[level]))
+          continue;
+        if (ncc_en && result.level_ncc[level] < nccThresholdForLevel(level)) continue;
+        result.level_active[level] = 1;
+        any_level_active = true;
+      }
+    }
+    else if (ncc_en)
     {
       for (int level = 0; level < usage_levels; ++level)
       {
@@ -6259,18 +6409,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       usage_level_valid[0] = 1;
 
       float error = 0.0;
-      double level0_error = 0.0;
-      for (int ind = 0; ind < patch_size_total; ind++)
-      {
-        level0_error += (ref_ftr->inv_expo_time_ * patch_wrap[ind] -
-                         state->inv_expo_time[ctx.camera_id] * patch_buffer[ind]) *
-                        (ref_ftr->inv_expo_time_ * patch_wrap[ind] -
-                         state->inv_expo_time[ctx.camera_id] * patch_buffer[ind]);
-      }
-      error = static_cast<float>(level0_error);
-      usage_sse_levels[0] = level0_error;
-
-      const bool evaluate_all_levels = ncc_en || usage_stats_en;
+      const bool evaluate_all_levels = zncc_residual_en || ncc_en || usage_stats_en;
       std::vector<float> current_patch_all;
       if (evaluate_all_levels)
       {
@@ -6280,21 +6419,53 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
         {
           getImagePatch(ctx, img, pc, current_patch_all.data(), pyramid_level);
           usage_level_valid[pyramid_level] = 1;
-          double level_error = 0.0;
-          const int offset = patch_size_total * pyramid_level;
-          for (int ind = 0; ind < patch_size_total; ind++)
-          {
-            level_error += (ref_ftr->inv_expo_time_ * patch_wrap[offset + ind] -
-                            state->inv_expo_time[ctx.camera_id] * current_patch_all[offset + ind]) *
-                           (ref_ftr->inv_expo_time_ * patch_wrap[offset + ind] -
-                            state->inv_expo_time[ctx.camera_id] * current_patch_all[offset + ind]);
-          }
-          usage_sse_levels[pyramid_level] = level_error;
         }
       }
 
       double usage_ncc = std::numeric_limits<double>::quiet_NaN();
-      if (ncc_en || usage_stats_en)
+      if (zncc_residual_en)
+      {
+        for (int pyramid_level = 0; pyramid_level < std::max(1, patch_pyrimid_level); ++pyramid_level)
+        {
+          const int offset = patch_size_total * pyramid_level;
+          const float *current_level = pyramid_level == 0
+                                           ? patch_buffer.data()
+                                           : current_patch_all.data() + offset;
+          if (!normalizedPatchMetrics(patch_wrap.data() + offset, current_level,
+                                      patch_size_total, zncc_min_std,
+                                      usage_sse_levels[pyramid_level],
+                                      usage_ncc_levels[pyramid_level]))
+            usage_level_valid[pyramid_level] = 0;
+        }
+        if (usage_level_valid[0] == 0)
+        {
+          recordManagedReferenceRejection(*pt, *ref_ftr, ctx.new_frame->id_, ctx.camera_id);
+          continue;
+        }
+        error = static_cast<float>(usage_sse_levels[0]);
+        usage_ncc = usage_ncc_levels[0];
+      }
+      else
+      {
+        for (int pyramid_level = 0; pyramid_level < std::max(1, patch_pyrimid_level); ++pyramid_level)
+        {
+          if (pyramid_level > 0 && !evaluate_all_levels) break;
+          const int offset = patch_size_total * pyramid_level;
+          const float *current_level = pyramid_level == 0
+                                           ? patch_buffer.data()
+                                           : current_patch_all.data() + offset;
+          double level_error = 0.0;
+          for (int ind = 0; ind < patch_size_total; ++ind)
+          {
+            const double residual = ref_ftr->inv_expo_time_ * patch_wrap[offset + ind] -
+                                    state->inv_expo_time[ctx.camera_id] * current_level[ind];
+            level_error += residual * residual;
+          }
+          usage_sse_levels[pyramid_level] = level_error;
+        }
+        error = static_cast<float>(usage_sse_levels[0]);
+      }
+      if (!zncc_residual_en && (ncc_en || usage_stats_en))
       {
         usage_ncc_levels[0] = calculateNCC(patch_wrap.data(), patch_buffer.data(), patch_size_total);
         usage_ncc = usage_ncc_levels[0];
@@ -6311,7 +6482,19 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       if (usage_stats_en) recordUsagePreGateMetrics(ctx, *ref_ftr, *pt, pc, A_cur_ref_zero,
                                                      usage_sse_levels, usage_ncc_levels, usage_level_valid);
       bool any_level_active = false;
-      if (ncc_en)
+      if (zncc_residual_en)
+      {
+        for (int level = 0; level < std::max(1, patch_pyrimid_level); ++level)
+        {
+          if (usage_level_valid[level] == 0 || !std::isfinite(usage_ncc_levels[level]) ||
+              !std::isfinite(usage_sse_levels[level]))
+            continue;
+          if (ncc_en && usage_ncc_levels[level] < nccThresholdForLevel(level)) continue;
+          level_active[level] = 1;
+          any_level_active = true;
+        }
+      }
+      else if (ncc_en)
       {
         for (int level = 0; level < std::max(1, patch_pyrimid_level); ++level)
         {
@@ -6649,20 +6832,44 @@ void VIOManager::buildCurrentCrossCameraPairs()
               if (!level_ok) break;
               source_patch[patch_index] = source_value;
               target_patch[patch_index] = target_value;
-              const double residual = state->inv_expo_time[source.camera_id] * source_value -
-                                      state->inv_expo_time[target.camera_id] * target_value;
-              sse += residual * residual;
+              if (!zncc_residual_en)
+              {
+                const double residual = state->inv_expo_time[source.camera_id] * source_value -
+                                        state->inv_expo_time[target.camera_id] * target_value;
+                sse += residual * residual;
+              }
             }
             if (!level_ok) continue;
+            double ncc = std::numeric_limits<double>::quiet_NaN();
+            if (zncc_residual_en &&
+                !normalizedPatchMetrics(source_patch.data(), target_patch.data(), patch_size_total,
+                                        zncc_min_std, sse, ncc))
+              continue;
             pair.level_valid[level] = 1;
             pair.sse_levels[level] = sse;
-            pair.ncc_levels[level] = calculateNCC(source_patch.data(), target_patch.data(), patch_size_total);
+            pair.ncc_levels[level] = zncc_residual_en
+                                         ? ncc
+                                         : calculateNCC(source_patch.data(), target_patch.data(), patch_size_total);
           }
         }
 
         recordCurrentCrossCameraUsage(pair, kUsagePreGateStage);
         bool any_level_active = false;
-        if (ncc_en)
+        if (zncc_residual_en)
+        {
+          for (int level = 0; level < metric_levels; ++level)
+          {
+            const bool valid = pair.level_valid[level] != 0 &&
+                               std::isfinite(pair.ncc_levels[level]) &&
+                               std::isfinite(pair.sse_levels[level]);
+            if (valid && (!ncc_en || pair.ncc_levels[level] >= nccThresholdForLevel(level)))
+            {
+              pair.level_active[level] = 1;
+              any_level_active = true;
+            }
+          }
+        }
+        else if (ncc_en)
         {
           for (int level = 0; level < metric_levels; ++level)
           {
@@ -6705,6 +6912,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
   int total_observations = 0;
   for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
   if (total_observations == 0) return;
+  const double measurement_cov = photometricNoiseCovariance();
+  if (!std::isfinite(measurement_cov) || measurement_cov <= 0.0)
+    throw std::runtime_error("photometric residual covariance must be finite and positive");
   ++online_calib_visual_update_count_;
   online_calib_last_total_observations_ = total_observations;
   const int calib_camera_count = std::max(0, state->num_cameras);
@@ -6967,6 +7177,26 @@ void VIOManager::computeJacobianAndUpdateEKF()
             }
             patch_error += residual * residual;
           };
+          auto accumulateNormalizedReferencePatch =
+              [&](const std::vector<double> &current_values,
+                  const Eigen::MatrixXd &raw_current_jacobian) -> bool {
+            Eigen::VectorXd normalized_current;
+            Eigen::MatrixXd normalized_current_jacobian;
+            Eigen::VectorXd normalized_reference;
+            if (!normalizePatchWithJacobian(current_values, raw_current_jacobian, zncc_min_std,
+                                            normalized_current, normalized_current_jacobian) ||
+                !normalizePatchValues(reference_patch.data() + patch_size_total * level,
+                                      patch_size_total, zncc_min_std, normalized_reference))
+              return false;
+            Eigen::VectorXd residual = normalized_current - normalized_reference;
+            const double sqrt_robust_weight =
+                normalizedPatchRobustSqrtWeight(residual, zncc_robust_en, zncc_huber_delta);
+            residual *= sqrt_robust_weight;
+            normalized_current_jacobian *= sqrt_robust_weight;
+            for (int row = 0; row < patch_size_total; ++row)
+              accumulateObservation(normalized_current_jacobian.row(row).transpose(), residual[row]);
+            return true;
+          };
           auto addMotionTimeJacobian = [&](Eigen::VectorXd &jacobian, const MD(1, 3) &J_photo_center) {
             jacobian.segment<3>(state->velocityIndex()) = (J_photo_center * ctx.dpc_dvel).transpose();
             const int group_id = ctx.time_offset_group;
@@ -7064,6 +7294,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
               computeVirtualProjectionJacobian(point_v, Jdpi);
               M3D point_c_hat;
               point_c_hat << SKEW_SYM_MATRX(point_c);
+              std::vector<double> normalized_current_values;
+              Eigen::MatrixXd normalized_current_jacobian;
+              bool normalized_patch_complete = true;
+              if (zncc_residual_en)
+              {
+                normalized_current_values.resize(patch_size_total);
+                normalized_current_jacobian = Eigen::MatrixXd::Zero(patch_size_total, state_dim);
+              }
               for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
               {
                 const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
@@ -7091,22 +7329,29 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                                             current_value, image_gradient)
                       : sampleVirtualValueAndGradient(track.cur_support, center + offset.cast<double>(), scale,
                                                       current_value, image_gradient);
-                  if (!current_gradient_ok) continue;
+                  if (!current_gradient_ok)
+                  {
+                    if (zncc_residual_en)
+                    {
+                      normalized_patch_complete = false;
+                      break;
+                    }
+                    continue;
+                  }
                   Jimg << image_gradient[0], image_gradient[1];
-                  Jimg *= current_exposure * inv_scale;
+                  Jimg *= (zncc_residual_en ? 1.0 : current_exposure) * inv_scale;
                 }
                 const MD(1, 3) Jimg_Jpi_R = Jimg * Jdpi * track.R_vcur_from_ccur_seed;
                 const MD(1, 3) Jdphi = Jimg_Jpi_R * point_c_hat;
                 const MD(1, 3) Jdp = -Jimg_Jpi_R;
                 const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
                 const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
-                const double residual = current_exposure * current_value -
-                                        reference_exposure * reference_patch[patch_size_total * level + patch_index];
                 Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
                 jacobian.segment<3>(0) = JdR.transpose();
                 jacobian.segment<3>(3) = Jdt.transpose();
                 addMotionTimeJacobian(jacobian, Jimg_Jpi_R);
-                if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
+                if (!zncc_residual_en && exposure_estimate_en)
+                  jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
                 if (estimate_extrinsic)
                 {
                   if (active_extrinsic_rot[ctx.camera_id] != 0)
@@ -7115,8 +7360,22 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   if (active_extrinsic_trans[ctx.camera_id] != 0)
                     jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = Jimg_Jpi_R.transpose();
                 }
-                accumulateObservation(jacobian, residual);
+                if (zncc_residual_en)
+                {
+                  normalized_current_values[patch_index] = current_value;
+                  normalized_current_jacobian.row(patch_index) = jacobian.transpose();
+                }
+                else
+                {
+                  const double residual = current_exposure * current_value -
+                                          reference_exposure * reference_patch[patch_size_total * level + patch_index];
+                  accumulateObservation(jacobian, residual);
+                }
               }
+              if (zncc_residual_en &&
+                  (!normalized_patch_complete ||
+                   !accumulateNormalizedReferencePatch(normalized_current_values, normalized_current_jacobian)))
+                continue;
             }
           }
           else
@@ -7147,6 +7406,13 @@ void VIOManager::computeJacobianAndUpdateEKF()
             const double w_tr = du * (1.0 - dv);
             const double w_bl = (1.0 - du) * dv;
             const double w_br = du * dv;
+            std::vector<double> normalized_current_values;
+            Eigen::MatrixXd normalized_current_jacobian;
+            if (zncc_residual_en)
+            {
+              normalized_current_values.resize(patch_size_total);
+              normalized_current_jacobian = Eigen::MatrixXd::Zero(patch_size_total, state_dim);
+            }
             for (int x = 0; x < patch_size; ++x)
             {
               const uint8_t *img_ptr = img.data +
@@ -7178,20 +7444,19 @@ void VIOManager::computeJacobianAndUpdateEKF()
                        (w_tl * img_ptr[-ctx.width * scale] + w_tr * img_ptr[-ctx.width * scale + scale] +
                         w_bl * img_ptr[0] + w_br * img_ptr[scale]));
                   Jimg << grad_u, grad_v;
-                  Jimg *= current_exposure * inv_scale;
+                  Jimg *= (zncc_residual_en ? 1.0 : current_exposure) * inv_scale;
                 }
                 const MD(1, 3) Jimg_Jpi = Jimg * Jdpi;
                 const MD(1, 3) Jdphi = Jimg_Jpi * point_hat;
                 const MD(1, 3) Jdp = -Jimg_Jpi;
                 const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
                 const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
-                const double residual = current_exposure * current_value -
-                                        reference_exposure * reference_patch[patch_size_total * level + patch_index];
                 Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
                 jacobian.segment<3>(0) = JdR.transpose();
                 jacobian.segment<3>(3) = Jdt.transpose();
                 addMotionTimeJacobian(jacobian, Jimg_Jpi);
-                if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
+                if (!zncc_residual_en && exposure_estimate_en)
+                  jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
                 if (estimate_extrinsic)
                 {
                   if (active_extrinsic_rot[ctx.camera_id] != 0)
@@ -7200,9 +7465,22 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   if (active_extrinsic_trans[ctx.camera_id] != 0)
                     jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = Jimg_Jpi.transpose();
                 }
-                accumulateObservation(jacobian, residual);
+                if (zncc_residual_en)
+                {
+                  normalized_current_values[patch_index] = current_value;
+                  normalized_current_jacobian.row(patch_index) = jacobian.transpose();
+                }
+                else
+                {
+                  const double residual = current_exposure * current_value -
+                                          reference_exposure * reference_patch[patch_size_total * level + patch_index];
+                  accumulateObservation(jacobian, residual);
+                }
               }
             }
+            if (zncc_residual_en &&
+                !accumulateNormalizedReferencePatch(normalized_current_values, normalized_current_jacobian))
+              continue;
           }
           ctx.visual_submap->errors[point_index] = patch_error;
           if (!visual_map_manage_en)
@@ -7240,9 +7518,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
           }
           else if (iteration > 0 && point_index < static_cast<int>(ctx.visual_submap->observation_nis.size()))
             nis = ctx.visual_submap->observation_nis[point_index];
-          else if (local_dof > 0 && std::isfinite(img_point_cov) && img_point_cov > 0.0)
+          else if (local_dof > 0)
           {
-            const double inv_r = 1.0 / img_point_cov;
+            const double inv_r = 1.0 / measurement_cov;
             const Eigen::MatrixXd A = inv_r * local_hessian;
             const Eigen::VectorXd b = inv_r * local_gradient;
             const double c = inv_r * local_squared_error;
@@ -7355,7 +7633,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
         auto linearizeCurrentSample = [&](PerCameraData &ctx, const VirtualTrackPatch *track,
                                           const V2D &offset, float &value, Eigen::VectorXd &jacobian) -> bool {
           jacobian = Eigen::VectorXd::Zero(state_dim);
-          const double exposure = state->inv_expo_time[ctx.camera_id];
+          const double exposure = zncc_residual_en ? 1.0 : state->inv_expo_time[ctx.camera_id];
           const V3D point_c = ctx.Rcw * point_w + ctx.Pcw;
           if (!point_c.array().isFinite().all()) return false;
           const bool estimate_extrinsic =
@@ -7434,7 +7712,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 ctx.Rci * (point_i_time_hat * ctx.gyro_i - ctx.Rwi.transpose() * ctx.Vwi);
             jacobian[state->timeOffsetIndex(group_id)] = (J_photo_center * dpc_dtd)(0, 0);
           }
-          if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = value;
+          if (!zncc_residual_en && exposure_estimate_en)
+            jacobian[state->exposureIndex(ctx.camera_id)] = value;
           if (estimate_extrinsic)
           {
             if (active_extrinsic_rot[ctx.camera_id] != 0)
@@ -7448,6 +7727,18 @@ void VIOManager::computeJacobianAndUpdateEKF()
         Eigen::MatrixXd pair_hessian = Eigen::MatrixXd::Zero(state_dim, state_dim);
         int pair_residuals = 0;
         double pair_error = 0.0;
+        std::vector<double> source_values;
+        std::vector<double> target_values;
+        Eigen::MatrixXd source_jacobians;
+        Eigen::MatrixXd target_jacobians;
+        bool complete_pair_patch = true;
+        if (zncc_residual_en)
+        {
+          source_values.resize(patch_size_total);
+          target_values.resize(patch_size_total);
+          source_jacobians = Eigen::MatrixXd::Zero(patch_size_total, state_dim);
+          target_jacobians = Eigen::MatrixXd::Zero(patch_size_total, state_dim);
+        }
         for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
         {
           const V2D target_offset = (core_patch_offsets_[patch_index] * static_cast<float>(scale)).cast<double>();
@@ -7458,7 +7749,22 @@ void VIOManager::computeJacobianAndUpdateEKF()
           Eigen::VectorXd target_jacobian;
           if (!linearizeCurrentSample(source, source_track, source_offset, source_value, source_jacobian) ||
               !linearizeCurrentSample(target, target_track, target_offset, target_value, target_jacobian))
+          {
+            if (zncc_residual_en)
+            {
+              complete_pair_patch = false;
+              break;
+            }
             continue;
+          }
+          if (zncc_residual_en)
+          {
+            source_values[patch_index] = source_value;
+            target_values[patch_index] = target_value;
+            source_jacobians.row(patch_index) = source_jacobian.transpose();
+            target_jacobians.row(patch_index) = target_jacobian.transpose();
+            continue;
+          }
           const double residual = sqrt_weight *
               (state->inv_expo_time[source.camera_id] * source_value -
                state->inv_expo_time[target.camera_id] * target_value);
@@ -7469,6 +7775,36 @@ void VIOManager::computeJacobianAndUpdateEKF()
           pair_error += residual * residual;
           ++pair_residuals;
           ++measurement_count;
+        }
+        if (zncc_residual_en)
+        {
+          if (!complete_pair_patch) continue;
+          Eigen::VectorXd normalized_source;
+          Eigen::VectorXd normalized_target;
+          Eigen::MatrixXd normalized_source_jacobian;
+          Eigen::MatrixXd normalized_target_jacobian;
+          if (!normalizePatchWithJacobian(source_values, source_jacobians, zncc_min_std,
+                                          normalized_source, normalized_source_jacobian) ||
+              !normalizePatchWithJacobian(target_values, target_jacobians, zncc_min_std,
+                                          normalized_target, normalized_target_jacobian))
+            continue;
+          Eigen::VectorXd residuals = normalized_source - normalized_target;
+          Eigen::MatrixXd jacobians = normalized_source_jacobian - normalized_target_jacobian;
+          const double sqrt_robust_weight =
+              normalizedPatchRobustSqrtWeight(residuals, zncc_robust_en, zncc_huber_delta);
+          residuals *= sqrt_weight * sqrt_robust_weight;
+          jacobians *= sqrt_weight * sqrt_robust_weight;
+          for (int row = 0; row < patch_size_total; ++row)
+          {
+            const Eigen::VectorXd jacobian = jacobians.row(row).transpose();
+            const double residual = residuals[row];
+            hessian.noalias() += jacobian * jacobian.transpose();
+            gradient.noalias() += jacobian * residual;
+            pair_hessian.noalias() += jacobian * jacobian.transpose();
+            pair_error += residual * residual;
+            ++pair_residuals;
+            ++measurement_count;
+          }
         }
         if (pair_residuals <= 0) continue;
         error += pair_error;
@@ -7498,9 +7834,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
 
       if (measurement_count > 0 && directional_update_en)
       {
-        if (!std::isfinite(img_point_cov) || img_point_cov <= 0.0 ||
-            !directional_update::filterInformation(
-                state->cov, hessian / img_point_cov, gradient / img_point_cov,
+        if (!directional_update::filterInformation(
+                state->cov, hessian / measurement_cov, gradient / measurement_cov,
                 directional_drop_variance_reduction,
                 directional_full_variance_reduction,
                 iteration_directional_result))
@@ -7509,13 +7844,13 @@ void VIOManager::computeJacobianAndUpdateEKF()
           G.setZero();
           syncCameraExtrinsicsFromState(*state);
           const std::string reason = iteration_directional_result.error.empty()
-              ? "img_point_cov must be finite and positive"
+              ? "photometric residual covariance must be finite and positive"
               : iteration_directional_result.error;
           std::cerr << "[ Directional VIO ] update rejected: " << reason << std::endl;
           return;
         }
-        hessian = iteration_directional_result.information * img_point_cov;
-        gradient = iteration_directional_result.information_vector * img_point_cov;
+        hessian = iteration_directional_result.information * measurement_cov;
+        gradient = iteration_directional_result.information_vector * measurement_cov;
 
         if (usage_stats_en)
         {
@@ -7647,14 +7982,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
         if (directional_update_en)
         {
           if (!directional_update::posteriorCovariance(
-                  state->cov, solve_hessian / img_point_cov,
+                  state->cov, solve_hessian / measurement_cov,
                   solve_posterior_covariance, solve_error))
             return false;
-          K1 = solve_posterior_covariance / img_point_cov;
+          K1 = solve_posterior_covariance / measurement_cov;
         }
         else
         {
-          K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
+          K1 = (solve_hessian + (state->cov / measurement_cov).inverse()).inverse();
         }
         return true;
       };
@@ -8701,7 +9036,8 @@ void VIOManager::updateManagedObservationEvidence(PerCameraData &ctx)
     const bool accepted = visual_ref_nis_en
                               ? std::isfinite(normalized_nis) && normalized_nis <= visual_ref_nis_max_per_dof
                               : std::isfinite(ctx.visual_submap->errors[i]) &&
-                                    ctx.visual_submap->errors[i] <= outlier_threshold * patch_size_total;
+                                    (zncc_residual_en ||
+                                     ctx.visual_submap->errors[i] <= outlier_threshold * patch_size_total);
 
     reference->last_test_frame_id_ = ctx.new_frame->id_;
     reference->last_test_camera_id_ = ctx.camera_id;

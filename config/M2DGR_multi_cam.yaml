@@ -159,6 +159,13 @@ vio:
   # ncc_thre: 0.7
   # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
   ncc_thre_by_level: [0.7, 0.4]
+  # Standardize every same-camera and cross-camera patch before EKF linearization.
+  # Enabling this disables exposure estimation and is incompatible with IC/S2.
+  zncc_residual_en: false
+  zncc_min_std: 5.0
+  zncc_residual_cov: 1.0
+  zncc_robust_en: false
+  zncc_huber_delta: 0.5
   usage_stats_en: true
   usage_stats_window: 100
   img_point_cov: 1000

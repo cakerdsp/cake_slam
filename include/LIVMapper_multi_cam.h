@@ -181,6 +181,11 @@ public:
   bool ncc_en = false;
   double ncc_thre = 0.8;
   std::vector<double> ncc_thre_by_level;
+  bool zncc_residual_en = false;
+  double zncc_min_std = 5.0;
+  double zncc_residual_cov = 1.0;
+  bool zncc_robust_en = false;
+  double zncc_huber_delta = 0.5;
   bool usage_stats_en = false;
   int usage_stats_window = 100;
   bool directional_update_en = false;

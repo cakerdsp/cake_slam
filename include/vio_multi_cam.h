@@ -349,6 +349,11 @@ public:
   vector<float> patch_buffer;
   bool normal_en, inverse_composition_en, exposure_estimate_en, raycast_en;
   bool ncc_en = false, colmap_output_en = false;
+  bool zncc_residual_en = false;
+  double zncc_min_std = 5.0;
+  double zncc_residual_cov = 1.0;
+  bool zncc_robust_en = false;
+  double zncc_huber_delta = 0.5;
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
   bool virtual_s2_optimize_en = false;
@@ -424,6 +429,10 @@ public:
     return level >= 0 && level < static_cast<int>(ncc_thre_by_level.size())
                ? ncc_thre_by_level[level]
                : ncc_thre;
+  }
+  double photometricNoiseCovariance() const
+  {
+    return zncc_residual_en ? zncc_residual_cov : img_point_cov;
   }
   bool allPyramidLevelsActive(const SubSparseMap &submap, int point_index) const
   {

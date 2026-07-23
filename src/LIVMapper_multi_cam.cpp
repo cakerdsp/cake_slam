@@ -250,6 +250,11 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<bool>("vio.ncc_en", false);
   try_declare.template operator()<double>("vio.ncc_thre", 0.8);
   try_declare.template operator()<std::vector<double>>("vio.ncc_thre_by_level", std::vector<double>{});
+  try_declare.template operator()<bool>("vio.zncc_residual_en", false);
+  try_declare.template operator()<double>("vio.zncc_min_std", 5.0);
+  try_declare.template operator()<double>("vio.zncc_residual_cov", 1.0);
+  try_declare.template operator()<bool>("vio.zncc_robust_en", false);
+  try_declare.template operator()<double>("vio.zncc_huber_delta", 0.5);
   try_declare.template operator()<bool>("vio.usage_stats_en", false);
   try_declare.template operator()<int>("vio.usage_stats_window", 100);
   try_declare.template operator()<bool>("vio.cross_camera_reference_en", false);
@@ -492,6 +497,11 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "vio.ncc_en", ncc_en);
   getRosParam(this->node, "vio.ncc_thre", ncc_thre);
   getRosParam(this->node, "vio.ncc_thre_by_level", ncc_thre_by_level);
+  getRosParam(this->node, "vio.zncc_residual_en", zncc_residual_en);
+  getRosParam(this->node, "vio.zncc_min_std", zncc_min_std);
+  getRosParam(this->node, "vio.zncc_residual_cov", zncc_residual_cov);
+  getRosParam(this->node, "vio.zncc_robust_en", zncc_robust_en);
+  getRosParam(this->node, "vio.zncc_huber_delta", zncc_huber_delta);
   getRosParam(this->node, "vio.usage_stats_en", usage_stats_en);
   getRosParam(this->node, "vio.usage_stats_window", usage_stats_window);
   getRosParam(this->node, "vio.cross_camera_reference_en", cross_camera_reference_en);
@@ -586,6 +596,21 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   for (double threshold : ncc_thre_by_level)
     if (!std::isfinite(threshold) || threshold < -1.0 || threshold > 1.0)
       throw std::runtime_error("every vio.ncc_thre_by_level value must be finite and in [-1, 1]");
+  if (!std::isfinite(zncc_min_std) || zncc_min_std <= 0.0)
+    throw std::runtime_error("vio.zncc_min_std must be finite and positive");
+  if (!std::isfinite(zncc_residual_cov) || zncc_residual_cov <= 0.0)
+    throw std::runtime_error("vio.zncc_residual_cov must be finite and positive");
+  if (!std::isfinite(zncc_huber_delta) || zncc_huber_delta <= 0.0)
+    throw std::runtime_error("vio.zncc_huber_delta must be finite and positive");
+  if (zncc_residual_en && inverse_composition_en)
+    throw std::runtime_error("vio.zncc_residual_en does not support vio.inverse_composition_en");
+  if (zncc_residual_en && virtual_s2_optimize_en)
+    throw std::runtime_error("vio.zncc_residual_en does not support vio.virtual_s2_optimize_en");
+  if (zncc_residual_en && exposure_estimate_en)
+  {
+    ROS_WARN("vio.zncc_residual_en makes affine exposure states unobservable; disabling vio.exposure_estimate_en");
+    exposure_estimate_en = false;
+  }
   if (usage_stats_window <= 0) throw std::runtime_error("vio.usage_stats_window must be positive");
 
   if (num_cameras > 1 && colmap_output_en)
@@ -805,6 +830,11 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->ncc_en = ncc_en;
   vio_manager->ncc_thre = ncc_thre;
   vio_manager->ncc_thre_by_level = ncc_thre_by_level;
+  vio_manager->zncc_residual_en = zncc_residual_en;
+  vio_manager->zncc_min_std = zncc_min_std;
+  vio_manager->zncc_residual_cov = zncc_residual_cov;
+  vio_manager->zncc_robust_en = zncc_robust_en;
+  vio_manager->zncc_huber_delta = zncc_huber_delta;
   vio_manager->usage_stats_en = usage_stats_en;
   vio_manager->usage_stats_window = usage_stats_window;
   vio_manager->ref_patch_dump_en = ref_patch_dump_en;
