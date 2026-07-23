@@ -197,6 +197,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<bool>("vio.virtual_fisheye_patch_en", false);
   try_declare.template operator()<bool>("vio.virtual_sparse_patch_en", false);
   try_declare.template operator()<bool>("vio.virtual_s2_optimize_en", false);
+  try_declare.template operator()<bool>("vio.virtual_raw_score_select_en", false);
+  try_declare.template operator()<int>("vio.max_total_points", 150);
+  try_declare.template operator()<int>("vio.points_per_camera_min", 50);
+  try_declare.template operator()<int>("vio.points_per_camera_max", 150);
   try_declare.template operator()<bool>("vio.visual_ref_post_ekf_build_en", false);
   try_declare.template operator()<bool>("vio.visual_map_manage_en", false);
   try_declare.template operator()<bool>("vio.visual_map_manage_log_en", true);
@@ -439,6 +443,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "vio.virtual_fisheye_patch_en", virtual_fisheye_patch_en);
   getRosParam(this->node, "vio.virtual_sparse_patch_en", virtual_sparse_patch_en);
   getRosParam(this->node, "vio.virtual_s2_optimize_en", virtual_s2_optimize_en);
+  getRosParam(this->node, "vio.virtual_raw_score_select_en", virtual_raw_score_select_en);
+  getRosParam(this->node, "vio.max_total_points", max_total_points);
+  getRosParam(this->node, "vio.points_per_camera_min", points_per_camera_min);
+  getRosParam(this->node, "vio.points_per_camera_max", points_per_camera_max);
   getRosParam(this->node, "vio.visual_ref_post_ekf_build_en", visual_ref_post_ekf_build_en);
   getRosParam(this->node, "vio.visual_map_manage_en", visual_map_manage_en);
   getRosParam(this->node, "vio.visual_map_manage_log_en", visual_map_manage_log_en);
@@ -727,6 +735,10 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->virtual_fisheye_patch_en = virtual_fisheye_patch_en;
   vio_manager->virtual_sparse_patch_en = virtual_sparse_patch_en;
   vio_manager->virtual_s2_optimize_en = virtual_s2_optimize_en;
+  vio_manager->virtual_raw_score_select_en = virtual_raw_score_select_en;
+  vio_manager->max_total_points = max_total_points;
+  vio_manager->points_per_camera_min = points_per_camera_min;
+  vio_manager->points_per_camera_max = points_per_camera_max;
   vio_manager->visual_ref_post_ekf_build_en = visual_ref_post_ekf_build_en;
   vio_manager->visual_map_manage_en = visual_map_manage_en;
   vio_manager->visual_map_manage_log_en = visual_map_manage_log_en;

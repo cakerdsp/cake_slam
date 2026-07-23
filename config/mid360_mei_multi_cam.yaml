@@ -33,8 +33,14 @@ cameras:
     # Rcl: [0.676006, -0.713365, -0.184733, -0.276253, -0.012926,-0.960998, 0.683155, 0.700673, -0.205808] 
     # Pcl: [0.023117, 0.052262, -0.019891] 
 
-    Rcl: [0.675523, -0.713530, -0.185861,  -0.276416,  -0.011378,  -0.960971,  0.683566,  0.700533,  -0.204917] 
-    Pcl: [0.024515,  0.051542,  -0.019792]
+    # Rcl: [0.675523, -0.713530, -0.185861,  -0.276416,  -0.011378,  -0.960971,  0.683566,  0.700533,  -0.204917] 
+    # Pcl: [0.024515,  0.051542,  -0.019792]
+
+
+    # Rcl: [0.675277, -0.713557, -0.186647, -0.276510, -0.010317, -0.960956, 0.683771, 0.700521, -0.204272] 
+    # Pcl: [0.024890, 0.050587, -0.019539]
+    Rcl: [0.675289, -0.713609, -0.186407, -0.276497, -0.010631, -0.960956, 0.683765, 0.700464, -0.204490] 
+    Pcl: [0.026449, 0.051634, -0.018751]
     online_extrinsic_en: true
     time_offset_group: 0
     online_time_offset_en: true
@@ -72,7 +78,7 @@ time_offset:
   exposure_time_init: 0.0
 
 preprocess:
-  image_downclock_en: false
+  image_downclock_en: true
   image_downclock_factor: 2
   point_filter_num: 1
   filter_size_surf: 0.1
@@ -93,12 +99,12 @@ vio:
   ncc_en: true
   ncc_thre: 0.7
   # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
-  ncc_thre_by_level: [0.5, 0.4]
+  ncc_thre_by_level: [0.7, 0.4]
   usage_stats_en: true
   usage_stats_window: 100
   img_point_cov: 1000
   grid_size: 5
-  grid_n_height: 20
+  grid_n_height: 17
   patch_size: 8
   patch_pyrimid_level: 2
 
@@ -109,6 +115,10 @@ vio:
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
+  virtual_raw_score_select_en: true
+  max_total_points: 150
+  points_per_camera_min: 50
+  points_per_camera_max: 150
   # Advanced visual reference/landmark management. Start MEI in shadow mode:
   # collect decisions and diagnostics without changing EKF admission,
   # reference selection, or deleting map objects while the raw-path abort is traced.
@@ -125,7 +135,7 @@ vio:
   visual_point_footprint_redundancy_en: true
   visual_point_information_prune_en: true
   visual_point_replacement_en: true
-  visual_map_retirement_apply_en: false
+  visual_map_retirement_apply_en: true
   visual_ref_max_candidates: 2
   visual_ref_validate_min_tests: 3
   visual_ref_validate_min_ratio: 0.67
@@ -140,7 +150,7 @@ vio:
   visual_point_information_retain: 0.90
   visual_point_suspect_reject_count: 8
   visual_point_stale_frames: 200
-  virtual_focal_length: 800.0
+  virtual_focal_length: 1000.0
   virtual_patch_margin: 4
   virtual_max_search_level: 0
   # virtual_patch_resampling_mode: "forward_splat"
@@ -153,7 +163,7 @@ vio:
   virtual_splat_debug_compare_pull_exact: false
   # Keep the strong insertion filter disabled during diagnosis. Its lookup
   # scale matches mid360 lio.voxel_size so footprint association stays coherent.
-  visual_geom_filter_en: false
+  visual_geom_filter_en: true
   visual_geom_filter_log_en: true
   visual_geom_filter_require_point_cov: true
   visual_geom_filter_voxel_size: 0.5

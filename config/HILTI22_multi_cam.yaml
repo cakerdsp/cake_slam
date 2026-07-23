@@ -133,6 +133,10 @@ vio:
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
+  virtual_raw_score_select_en: false
+  max_total_points: 150
+  points_per_camera_min: 50
+  points_per_camera_max: 150
   # Advanced visual reference/landmark management. Start HILTI22 in shadow
   # mode: collect decisions and diagnostics without changing EKF admission,
   # reference selection, or deleting map objects while the raw-path abort is traced.

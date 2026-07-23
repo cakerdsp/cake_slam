@@ -1049,6 +1049,7 @@ void VIOManager::resetGrid(PerCameraData &ctx)
   fill(ctx.update_flag.begin(), ctx.update_flag.end(), 0);
   fill(ctx.scan_value.begin(), ctx.scan_value.end(), 0.0f);
   ctx.retrieve_voxel_points.assign(ctx.length, nullptr);
+  ctx.retrieve_voxel_point_candidates.assign(ctx.length, std::vector<VisualPoint *>());
   ctx.append_voxel_points.assign(ctx.length, pointWithVar());
   ctx.append_voxel_source_type.assign(ctx.length, SOURCE_UNKNOWN);
   ctx.append_voxel_source_index.assign(ctx.length, -1);
@@ -4852,7 +4853,7 @@ void VIOManager::printOnlineCalibrationStatsTable(int frame_id) const
       {
         const M3D &Rcl = state->Rcl[camera_id];
         const V3D &Pcl = state->Pcl[camera_id];
-        printf("\033[1;35m|   Rcl=[%.6f %.6f %.6f; %.6f %.6f %.6f; %.6f %.6f %.6f] Pcl=[%.6f %.6f %.6f] last=(%.6fdeg %.6fcm) |\033[0m\n",
+        printf("\033[1;35m|   Rcl: [%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f] Pcl: [%.6f, %.6f, %.6f] last=(%.6fdeg %.6fcm) |\033[0m\n",
                Rcl(0, 0), Rcl(0, 1), Rcl(0, 2),
                Rcl(1, 0), Rcl(1, 1), Rcl(1, 2),
                Rcl(2, 0), Rcl(2, 1), Rcl(2, 2),
@@ -4908,7 +4909,8 @@ void VIOManager::printOnlineCalibrationStatsTable(int frame_id) const
 }
 
 void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
-                                                    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
+                                                    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+                                                    int raw_score_point_quota)
 {
   ctx.visual_submap->reset();
   ctx.total_points = 0;
@@ -4986,6 +4988,22 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     ref_patch_dump_range_pose_valid_ = true;
   }
 
+  auto addRetrieveCandidate = [&](int index, VisualPoint *pt, float cur_dist) {
+    if (index < 0 || index >= ctx.length || pt == nullptr) return;
+    ctx.grid_num[index] = TYPE_MAP;
+    if (virtual_raw_score_select_en)
+    {
+      std::vector<VisualPoint *> &grid_candidates = ctx.retrieve_voxel_point_candidates[index];
+      if (std::find(grid_candidates.begin(), grid_candidates.end(), pt) == grid_candidates.end())
+        grid_candidates.push_back(pt);
+    }
+    if (cur_dist <= ctx.map_dist[index])
+    {
+      ctx.map_dist[index] = cur_dist;
+      ctx.retrieve_voxel_points[index] = pt;
+    }
+  };
+
   vector<VOXEL_LOCATION> delete_keys;
   for (auto &sub_voxel : ctx.sub_feat_map)
   {
@@ -5003,13 +5021,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       if (grid_col < 0 || grid_col >= ctx.grid_n_width || grid_row < 0 || grid_row >= ctx.grid_n_height) continue;
       const int index = grid_row * ctx.grid_n_width + grid_col;
       voxel_in_fov = true;
-      ctx.grid_num[index] = TYPE_MAP;
       const float cur_dist = static_cast<float>((ctx.new_frame->pos() - pt->pos_).norm());
-      if (cur_dist <= ctx.map_dist[index])
-      {
-        ctx.map_dist[index] = cur_dist;
-        ctx.retrieve_voxel_points[index] = pt;
-      }
+      addRetrieveCandidate(index, pt, cur_dist);
     }
     if (!voxel_in_fov) delete_keys.push_back(sub_voxel.first);
   }
@@ -5039,13 +5052,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
             const int grid_row = static_cast<int>(raw_px[1] / ctx.grid_size);
             if (grid_col < 0 || grid_col >= ctx.grid_n_width || grid_row < 0 || grid_row >= ctx.grid_n_height) continue;
             const int index = grid_row * ctx.grid_n_width + grid_col;
-            ctx.grid_num[index] = TYPE_MAP;
             const float cur_dist = static_cast<float>((ctx.new_frame->pos() - pt->pos_).norm());
-            if (cur_dist <= ctx.map_dist[index])
-            {
-              ctx.map_dist[index] = cur_dist;
-              ctx.retrieve_voxel_points[index] = pt;
-            }
+            addRetrieveCandidate(index, pt, cur_dist);
             found = true;
           }
           if (found) ctx.sub_feat_map[sample_pos] = 0;
@@ -5077,6 +5085,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     Feature *reference = nullptr;
     V3D point_c_seed = V3D::Zero();
     V2D current_raw_center_px = V2D::Zero();
+    double raw_score = 0.0;
     int reference_rank = 0;
   };
   enum VirtualRejectReason
@@ -5148,6 +5157,23 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       return VIOManager::REJECT_DRAW_RANGE;
     }
   };
+  auto computeRawCandidateScore = [&](const VisualPoint &pt, const V3D &pt_c_seed, const V2D &raw_px) {
+    const double border_margin = std::min(std::min(raw_px[0], raw_px[1]),
+                                          std::min(static_cast<double>(ctx.width - 1) - raw_px[0],
+                                                   static_cast<double>(ctx.height - 1) - raw_px[1]));
+    const double border_score = std::max(0.0, std::min(1.0, border_margin / std::max(1, 2 * patch_size_half + 1)));
+
+    double view_score = 0.0;
+    const double point_range = pt_c_seed.norm();
+    const double normal_norm = pt.normal_.norm();
+    if (point_range > 1.0e-9 && normal_norm > 1.0e-9 && pt.normal_.array().isFinite().all())
+    {
+      const V3D view_dir_w = (ctx.new_frame->pos() - pt.pos_).normalized();
+      view_score = std::max(0.0, std::min(1.0, std::fabs((pt.normal_ / normal_norm).dot(view_dir_w))));
+    }
+
+    return 50.0 * view_score + 25.0 * border_score;
+  };
 
   vector<VirtualCandidate> candidates;
   candidates.reserve(ctx.length);
@@ -5155,7 +5181,15 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
   {
     if (ctx.grid_num[i] != TYPE_MAP) continue;
     ++virtual_map_grid_count_;
-    VisualPoint *pt = ctx.retrieve_voxel_points[i];
+    const std::vector<VisualPoint *> &grid_candidates = ctx.retrieve_voxel_point_candidates[i];
+    const int grid_candidate_count = virtual_raw_score_select_en && !grid_candidates.empty()
+                                         ? static_cast<int>(grid_candidates.size())
+                                         : 1;
+    for (int grid_candidate_index = 0; grid_candidate_index < grid_candidate_count; ++grid_candidate_index)
+    {
+    VisualPoint *pt = virtual_raw_score_select_en && !grid_candidates.empty()
+                          ? grid_candidates[grid_candidate_index]
+                          : ctx.retrieve_voxel_points[i];
     if (pt == nullptr)
     {
       ++virtual_candidate_null_count_;
@@ -5233,6 +5267,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
         candidate.reference = managed_ref;
         candidate.point_c_seed = pt_c_seed;
         candidate.current_raw_center_px = raw_px;
+        candidate.raw_score = computeRawCandidateScore(*pt, pt_c_seed, raw_px);
         candidate.reference_rank = rank;
         candidates.push_back(candidate);
       }
@@ -5316,7 +5351,31 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     candidate.reference = ref_ftr;
     candidate.point_c_seed = pt_c_seed;
     candidate.current_raw_center_px = raw_px;
+    candidate.raw_score = computeRawCandidateScore(*pt, pt_c_seed, raw_px);
     candidates.push_back(candidate);
+    }
+  }
+
+  if (virtual_raw_score_select_en && raw_score_point_quota >= 0)
+  {
+    std::vector<int> primary_indices;
+    primary_indices.reserve(candidates.size());
+    for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
+      if (candidates[i].reference_rank == 0) primary_indices.push_back(i);
+
+    const int keep_points = std::min(raw_score_point_quota, static_cast<int>(primary_indices.size()));
+    if (keep_points < static_cast<int>(primary_indices.size()))
+      std::partial_sort(primary_indices.begin(), primary_indices.begin() + keep_points, primary_indices.end(),
+                        [&](int lhs, int rhs) { return candidates[lhs].raw_score > candidates[rhs].raw_score; });
+
+    std::set<VisualPoint *> selected_points;
+    for (int i = 0; i < keep_points; ++i) selected_points.insert(candidates[primary_indices[i]].point);
+
+    vector<VirtualCandidate> selected_candidates;
+    selected_candidates.reserve(candidates.size());
+    for (const VirtualCandidate &candidate : candidates)
+      if (selected_points.count(candidate.point) != 0) selected_candidates.push_back(candidate);
+    candidates.swap(selected_candidates);
   }
   virtual_candidate_select_time_ = omp_get_wtime() - candidate_select_start;
   virtual_candidate_count_ = static_cast<int>(candidates.size());
@@ -5749,11 +5808,12 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
 }
 
 void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
-                                             const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
+                                             const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+                                             int raw_score_point_quota)
 {
   if (virtual_fisheye_patch_en)
   {
-    retrieveFromVisualSparseMapVirtual(ctx, img, pg, plane_map);
+    retrieveFromVisualSparseMapVirtual(ctx, img, pg, plane_map, raw_score_point_quota);
     return;
   }
   if (feat_map.size() <= 0)
@@ -5853,6 +5913,21 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
 
   // double t1 = omp_get_wtime();
   vector<VOXEL_LOCATION> DeleteKeyList;
+  auto addRetrieveCandidate = [&](int index, VisualPoint *pt, float cur_dist) {
+    if (index < 0 || index >= ctx.length || pt == nullptr) return;
+    ctx.grid_num[index] = TYPE_MAP;
+    if (virtual_raw_score_select_en)
+    {
+      std::vector<VisualPoint *> &grid_candidates = ctx.retrieve_voxel_point_candidates[index];
+      if (std::find(grid_candidates.begin(), grid_candidates.end(), pt) == grid_candidates.end())
+        grid_candidates.push_back(pt);
+    }
+    if (cur_dist <= ctx.map_dist[index])
+    {
+      ctx.map_dist[index] = cur_dist;
+      ctx.retrieve_voxel_points[index] = pt;
+    }
+  };
 
   for (auto &iter : ctx.sub_feat_map)
   {
@@ -5885,14 +5960,9 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
           // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(0, 255, 255), -1, 8);
           voxel_in_fov = true;
           int index = static_cast<int>(pc[1] / ctx.grid_size) * ctx.grid_n_width + static_cast<int>(pc[0] / ctx.grid_size);
-          ctx.grid_num[index] = TYPE_MAP;
           Vector3d obs_vec(ctx.new_frame->pos() - pt->pos_);
           float cur_dist = obs_vec.norm();
-          if (cur_dist <= ctx.map_dist[index])
-          {
-            ctx.map_dist[index] = cur_dist;
-            ctx.retrieve_voxel_points[index] = pt;
-          }
+          addRetrieveCandidate(index, pt, cur_dist);
         }
       }
       if (!voxel_in_fov) { DeleteKeyList.push_back(position); }
@@ -5964,16 +6034,11 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
 
               voxel_in_fov = true;
               int index = static_cast<int>(pc[1] / ctx.grid_size) * ctx.grid_n_width + static_cast<int>(pc[0] / ctx.grid_size);
-              ctx.grid_num[index] = TYPE_MAP;
               Vector3d obs_vec(ctx.new_frame->pos() - pt->pos_);
 
               float cur_dist = obs_vec.norm();
 
-              if (cur_dist <= ctx.map_dist[index])
-              {
-                ctx.map_dist[index] = cur_dist;
-                ctx.retrieve_voxel_points[index] = pt;
-              }
+              addRetrieveCandidate(index, pt, cur_dist);
             }
           }
 
@@ -6031,10 +6096,19 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
   {
     if (ctx.grid_num[i] == TYPE_MAP)
     {
+      const std::vector<VisualPoint *> &grid_candidates = ctx.retrieve_voxel_point_candidates[i];
+      const int grid_candidate_count = virtual_raw_score_select_en && !grid_candidates.empty()
+                                           ? static_cast<int>(grid_candidates.size())
+                                           : 1;
+      for (int grid_candidate_index = 0; grid_candidate_index < grid_candidate_count; ++grid_candidate_index)
+      {
       ++debug_grid_candidates;
       // double t_1 = omp_get_wtime();
 
-      VisualPoint *pt = ctx.retrieve_voxel_points[i];
+      VisualPoint *pt = virtual_raw_score_select_en && !grid_candidates.empty()
+                            ? grid_candidates[grid_candidate_index]
+                            : ctx.retrieve_voxel_points[i];
+      if (pt == nullptr) continue;
       // visual_sub_map_cur.push_back(pt); // before
 
       V2D pc(ctx.new_frame->w2c(pt->pos_));
@@ -6387,9 +6461,53 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
 
       // t_5 += omp_get_wtime() - t_1;
       }
+      }
     }
   }
   ctx.total_points = ctx.visual_submap->voxel_points.size();
+  if (virtual_raw_score_select_en && raw_score_point_quota >= 0 && ctx.total_points > raw_score_point_quota)
+  {
+    std::vector<int> selected_indices(ctx.total_points);
+    std::iota(selected_indices.begin(), selected_indices.end(), 0);
+    std::partial_sort(selected_indices.begin(), selected_indices.begin() + raw_score_point_quota, selected_indices.end(),
+                      [&](int lhs, int rhs) {
+                        const float lhs_error = lhs < static_cast<int>(ctx.visual_submap->errors.size())
+                                                    ? ctx.visual_submap->errors[lhs]
+                                                    : std::numeric_limits<float>::max();
+                        const float rhs_error = rhs < static_cast<int>(ctx.visual_submap->errors.size())
+                                                    ? ctx.visual_submap->errors[rhs]
+                                                    : std::numeric_limits<float>::max();
+                        return lhs_error < rhs_error;
+                      });
+    selected_indices.resize(raw_score_point_quota);
+    std::sort(selected_indices.begin(), selected_indices.end());
+
+    auto pruneVector = [&](auto &values) {
+      using VectorType = std::decay_t<decltype(values)>;
+      VectorType pruned;
+      pruned.reserve(selected_indices.size());
+      for (int index : selected_indices)
+        if (index >= 0 && index < static_cast<int>(values.size())) pruned.push_back(std::move(values[index]));
+      values.swap(pruned);
+    };
+
+    pruneVector(ctx.visual_submap->propa_errors);
+    pruneVector(ctx.visual_submap->errors);
+    pruneVector(ctx.visual_submap->warp_patch);
+    pruneVector(ctx.visual_submap->search_levels);
+    pruneVector(ctx.visual_submap->warp_affines);
+    pruneVector(ctx.visual_submap->voxel_points);
+    pruneVector(ctx.visual_submap->reference_features);
+    pruneVector(ctx.visual_submap->inv_expo_list);
+    pruneVector(ctx.visual_submap->level_active);
+    if (usage_stats_en)
+    {
+      pruneVector(ctx.visual_submap->usage_ncc_levels);
+      pruneVector(ctx.visual_submap->usage_sse_levels);
+      pruneVector(ctx.visual_submap->usage_level_valid);
+    }
+    ctx.total_points = static_cast<int>(ctx.visual_submap->voxel_points.size());
+  }
 
   // double t3 = omp_get_wtime();
   // cout<<"C. addSubSparseMap: "<<t3-t2<<endl;
@@ -11308,11 +11426,25 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   flushVisualMapRetirements();
   const double frame_setup_end = omp_get_wtime();
 
+  int raw_score_remaining_total = max_total_points;
   for (PerCameraData &ctx : cameras_)
   {
+    int raw_score_point_quota = -1;
+    if (virtual_raw_score_select_en)
+    {
+      const int camera_id = std::max(0, ctx.camera_id);
+      const int cameras_left = std::max(0, numCameras() - camera_id - 1);
+      const int min_per_camera = std::max(0, points_per_camera_min);
+      const int max_per_camera = std::max(min_per_camera, points_per_camera_max);
+      const int reserved_for_later = std::min(raw_score_remaining_total, min_per_camera * cameras_left);
+      raw_score_point_quota = std::max(0, raw_score_remaining_total - reserved_for_later);
+      raw_score_point_quota = std::min(raw_score_point_quota, max_per_camera);
+    }
     // printf("[ VIO Debug ] retrieve begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
     // fflush(stdout);
-    retrieveFromVisualSparseMap(ctx, ctx.new_frame->img_, pg, plane_map);
+    retrieveFromVisualSparseMap(ctx, ctx.new_frame->img_, pg, plane_map, raw_score_point_quota);
+    if (virtual_raw_score_select_en)
+      raw_score_remaining_total = std::max(0, raw_score_remaining_total - ctx.total_points);
     // printf("[ VIO Debug ] retrieve end camera_id=%d frame=%d total_points=%d\n",
     //        ctx.camera_id, mf.frame_id, ctx.total_points);
     // fflush(stdout);

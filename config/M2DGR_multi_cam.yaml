@@ -141,7 +141,7 @@ time_offset:
 preprocess:
   image_downclock_en: false
   image_downclock_factor: 1
-  point_filter_num: 5
+  point_filter_num: 10
   filter_size_surf: 0.1
   lidar_type: 2
   scan_line: 32
@@ -158,7 +158,7 @@ vio:
   ncc_en: true
   # ncc_thre: 0.7
   # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
-  ncc_thre_by_level: [0.7, 0.4]
+  ncc_thre_by_level: [0.4, 0.4]
   usage_stats_en: true
   usage_stats_window: 100
   img_point_cov: 1000
@@ -173,6 +173,10 @@ vio:
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
+  virtual_raw_score_select_en: false
+  max_total_points: 150
+  points_per_camera_min: 50
+  points_per_camera_max: 150
   # Build new VisualPoint references from the current frame's post-EKF pose.
   # This timing switch is independent of visual map management.
   visual_ref_post_ekf_build_en: true
@@ -201,7 +205,7 @@ vio:
   visual_ref_nis_max_per_dof: 3.0
   visual_point_seed_min_tests: 3
   visual_point_seed_min_ratio: 0.67
-  visual_point_footprint_iou: 0.60
+  visual_point_footprint_iou: 0.80
   visual_point_information_retain: 0.90
   visual_point_suspect_reject_count: 8
   visual_point_stale_frames: 200
@@ -296,7 +300,7 @@ lio:
   layer_init_num: [5, 5, 5, 5, 5]
 
 local_map:
-  map_sliding_en: false
+  map_sliding_en: true
   half_map_size: 100
   sliding_thresh: 8.0
 
@@ -312,7 +316,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "m2dgr"
+  seq_name: "m2dgr2"
   pose_output_en: true
 
 pcd_save:
@@ -339,5 +343,5 @@ debug:
   # Runtime support dump is independent from ref_patch_dump_en. It writes accepted
   # raw or virtual support evidence used by the runtime optimization path under
   # Log/result/patchs/<runtime_support_dump_folder>.
-  runtime_support_dump_en: true
+  runtime_support_dump_en: false
   runtime_support_dump_folder: "m2dgr_runtime_support4"
