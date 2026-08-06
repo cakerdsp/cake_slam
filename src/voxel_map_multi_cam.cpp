@@ -393,10 +393,33 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   pv_list_.resize(feats_down_size_);
 
   int rematch_num = 0;
-  const int state_dim = state_.stateDim();
-  Eigen::MatrixXd G = Eigen::MatrixXd::Zero(state_dim, state_dim);
-  Eigen::MatrixXd H_T_H = Eigen::MatrixXd::Zero(state_dim, state_dim);
-  const Eigen::MatrixXd I_STATE = Eigen::MatrixXd::Identity(state_dim, state_dim);
+  const int full_state_dim = state_.stateDim();
+  const int lio_state_dim = BASE_STATE_DIM;
+  std::vector<int> lio_to_full;
+  lio_to_full.reserve(lio_state_dim);
+  auto addLioBlock = [&](int full_index, int size) {
+    for (int k = 0; k < size; ++k) lio_to_full.push_back(full_index + k);
+  };
+  addLioBlock(0, 6);
+  addLioBlock(state_.velocityIndex(), 3);
+  addLioBlock(state_.gyroBiasIndex(), 3);
+  addLioBlock(state_.accelBiasIndex(), 3);
+  addLioBlock(state_.gravityIndex(), 3);
+  auto fullVectorToLio = [&](const Eigen::VectorXd &full_vector) {
+    Eigen::VectorXd reduced(lio_state_dim);
+    for (int k = 0; k < lio_state_dim; ++k) reduced[k] = full_vector[lio_to_full[k]];
+    return reduced;
+  };
+  auto fullCovToLio = [&](const Eigen::MatrixXd &full_cov) {
+    Eigen::MatrixXd reduced(lio_state_dim, lio_state_dim);
+    for (int r = 0; r < lio_state_dim; ++r)
+      for (int c = 0; c < lio_state_dim; ++c)
+        reduced(r, c) = full_cov(lio_to_full[r], lio_to_full[c]);
+    return reduced;
+  };
+  Eigen::MatrixXd G = Eigen::MatrixXd::Zero(full_state_dim, full_state_dim);
+  Eigen::MatrixXd H_T_H = Eigen::MatrixXd::Zero(lio_state_dim, lio_state_dim);
+  const Eigen::MatrixXd I_LIO = Eigen::MatrixXd::Identity(lio_state_dim, lio_state_dim);
   directional_update::Result final_directional_result;
   Eigen::MatrixXd final_directional_posterior_covariance;
 
@@ -497,13 +520,14 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     if (config_setting_.directional_update_en) H_T_H.setZero();
     H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
     // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
-    Eigen::VectorXd information_vector = Eigen::VectorXd::Zero(state_dim);
+    Eigen::VectorXd information_vector = Eigen::VectorXd::Zero(lio_state_dim);
     information_vector.head<6>() = HTz;
+    const Eigen::MatrixXd lio_cov = fullCovToLio(state_.cov);
     if (config_setting_.directional_update_en)
     {
       directional_update::Result filtered;
       if (!directional_update::filterInformation(
-              state_.cov, H_T_H, information_vector,
+              lio_cov, H_T_H, information_vector,
               config_setting_.directional_drop_variance_reduction,
               config_setting_.directional_full_variance_reduction, filtered))
       {
@@ -520,7 +544,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     {
       std::string covariance_error;
       if (!directional_update::posteriorCovariance(
-              state_.cov, H_T_H, K_1, covariance_error))
+              lio_cov, H_T_H, K_1, covariance_error))
       {
         std::cerr << "[ Directional LIO ] system factorization rejected: "
                   << covariance_error << std::endl;
@@ -531,20 +555,26 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     }
     else
     {
-      K_1 = (H_T_H + state_.cov.inverse()).inverse();
+      K_1 = (H_T_H + lio_cov.inverse()).inverse();
     }
-    auto vec = state_propagat - state_;
-    Eigen::VectorXd solution;
+    Eigen::VectorXd vec = fullVectorToLio(state_propagat - state_);
+    Eigen::VectorXd solution_lio;
+    Eigen::MatrixXd G_lio = Eigen::MatrixXd::Zero(lio_state_dim, lio_state_dim);
     if (config_setting_.directional_update_en)
     {
-      G = K_1 * H_T_H;
-      solution = K_1 * information_vector + vec - G * vec;
+      G_lio = K_1 * H_T_H;
+      solution_lio = K_1 * information_vector + vec - G_lio * vec;
     }
     else
     {
-      G.leftCols(6) = K_1.leftCols(6) * H_T_H.topLeftCorner(6, 6);
-      solution = K_1.leftCols(6) * HTz + vec - G.leftCols(6) * vec.head(6);
+      G_lio.leftCols(6) = K_1.leftCols(6) * H_T_H.topLeftCorner(6, 6);
+      solution_lio = K_1.leftCols(6) * HTz + vec - G_lio.leftCols(6) * vec.head(6);
     }
+    for (int r = 0; r < lio_state_dim; ++r)
+      for (int c = 0; c < lio_state_dim; ++c)
+        G(lio_to_full[r], lio_to_full[c]) = G_lio(r, c);
+    Eigen::VectorXd solution = Eigen::VectorXd::Zero(full_state_dim);
+    for (int k = 0; k < lio_state_dim; ++k) solution[lio_to_full[k]] = solution_lio[k];
     int minRow, minCol;
     state_ += solution;
     auto rot_add = solution.block<3, 1>(0, 0);
@@ -563,25 +593,30 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       // _state.cov = (I_STATE - G) * _state.cov;
       if (config_setting_.directional_update_en)
       {
-        if (final_directional_posterior_covariance.rows() != state_dim ||
-            final_directional_posterior_covariance.cols() != state_dim)
+        if (final_directional_posterior_covariance.rows() != lio_state_dim ||
+            final_directional_posterior_covariance.cols() != lio_state_dim)
         {
           std::cerr << "[ Directional LIO ] covariance update rejected: missing final posterior"
                     << std::endl;
           state_ = state_propagat;
           return;
         }
-        state_.cov = final_directional_posterior_covariance;
+        for (int r = 0; r < lio_state_dim; ++r)
+          for (int c = 0; c < lio_state_dim; ++c)
+            state_.cov(lio_to_full[r], lio_to_full[c]) = final_directional_posterior_covariance(r, c);
         std::cout << "[ Directional LIO ] rho_max="
                   << final_directional_result.variance_reductions.maxCoeff()
                   << " rho_mean=" << final_directional_result.variance_reductions.mean()
                   << " active=" << final_directional_result.active_rank
                   << " full=" << final_directional_result.full_rank
-                  << " dim=" << state_dim << std::endl;
+                  << " dim=" << lio_state_dim << std::endl;
       }
       else
       {
-        state_.cov = (I_STATE - G) * state_.cov;
+        const Eigen::MatrixXd updated_lio_cov = (I_LIO - G_lio) * fullCovToLio(state_.cov);
+        for (int r = 0; r < lio_state_dim; ++r)
+          for (int c = 0; c < lio_state_dim; ++c)
+            state_.cov(lio_to_full[r], lio_to_full[c]) = updated_lio_cov(r, c);
       }
       // total_distance += (_state.pos_end - position_last).norm();
       position_last_ = state_.pos_end;

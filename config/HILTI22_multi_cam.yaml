@@ -113,11 +113,11 @@ preprocess:
 
 vio:
   frontend_mode: 0
-  cross_camera_reference_en: false
-  cross_camera_current_residual_en: false
+  cross_camera_reference_en: true
+  cross_camera_current_residual_en: true
   max_iterations: 5
   outlier_threshold: 1000
-  ncc_en: true
+  ncc_en: false
   ncc_thre: 0.7
   # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
   ncc_thre_by_level: [0.7, 0.7]
@@ -136,11 +136,11 @@ vio:
   patch_size: 8
   patch_pyrimid_level: 2
 
-  virtual_fisheye_patch_en: false
+  virtual_fisheye_patch_en: true
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
-  virtual_raw_score_select_en: false
+  virtual_raw_score_select_en: true
   max_total_points: 150
   points_per_camera_min: 50
   points_per_camera_max: 150
@@ -186,7 +186,7 @@ vio:
   virtual_splat_debug_compare_pull_exact: false
   # Keep the strong insertion filter disabled during diagnosis. Its lookup
   # scale still matches HILTI22 lio.voxel_size for footprint association.
-  visual_geom_filter_en: false
+  visual_geom_filter_en: true
   visual_geom_filter_log_en: true
   visual_geom_filter_require_point_cov: true
   visual_geom_filter_voxel_size: 0.4
@@ -276,7 +276,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "exp21"
+  seq_name: "exp03_cake"
   pose_output_en: true
 
 pcd_save:

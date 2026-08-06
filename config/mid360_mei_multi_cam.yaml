@@ -6,7 +6,7 @@ common:
   multi_cam_sync_tolerance_ms: 40.0
   # Prior-normalized directional filtering for both sequential LIO and VIO updates.
   # false preserves the original estimator path exactly.
-  directional_update_en: true
+  directional_update_en: false
   directional_drop_variance_reduction: 0.05
   directional_full_variance_reduction: 0.40
   lid_topic: "/livox/lidar"
@@ -39,8 +39,12 @@ cameras:
 
     # Rcl: [0.675277, -0.713557, -0.186647, -0.276510, -0.010317, -0.960956, 0.683771, 0.700521, -0.204272] 
     # Pcl: [0.024890, 0.050587, -0.019539]
-    Rcl: [0.675289, -0.713609, -0.186407, -0.276497, -0.010631, -0.960956, 0.683765, 0.700464, -0.204490] 
-    Pcl: [0.026449, 0.051634, -0.018751]
+    # Rcl: [0.675289, -0.713609, -0.186407, -0.276497, -0.010631, -0.960956, 0.683765, 0.700464, -0.204490] 
+    # Pcl: [0.026449, 0.051634, -0.018751]
+
+    # 取消15度倾斜
+    Rcl: [  0.703459,  -0.710716,  -0.005384, -0.006562,   0.001081,  -0.999978, 0.710706,   0.703478,  -0.003903]
+    Pcl: [  0.017582,   0.023607,  -0.037925]
     online_extrinsic_en: true
     time_offset_group: 0
     online_time_offset_en: true
@@ -54,10 +58,14 @@ cameras:
     #        0.7136620048, -0.7004856166, -0.0009589922]
     # Pcl: [-0.0189238408, 0.1110594056, -0.0498532729]
 
-    Rcl: [ -0.682758,  -0.698383,   0.214718,
-          -0.283641,  -0.017479,  -0.958772,
-            0.673343,  -0.715511,  -0.186156]
-    Pcl: [  0.011663,   0.045931,  -0.027709]
+    # Rcl: [ -0.682758,  -0.698383,   0.214718,
+    #       -0.283641,  -0.017479,  -0.958772,
+    #         0.673343,  -0.715511,  -0.186156]
+    # Pcl: [  0.011663,   0.045931,  -0.027709]
+
+    # 取消15度倾斜
+    Rcl: [ -0.717462,  -0.695831,   0.032667, -0.026026,  -0.020086,  -0.999459, 0.696111,  -0.717925,  -0.003699]
+    Pcl: [  0.017541,   0.039816,  -0.033913]
     online_extrinsic_en: true
     time_offset_group: 1
     online_time_offset_en: true
@@ -78,7 +86,7 @@ time_offset:
   exposure_time_init: 0.0
 
 preprocess:
-  image_downclock_en: true
+  image_downclock_en: false
   image_downclock_factor: 2
   point_filter_num: 1
   filter_size_surf: 0.1
@@ -99,15 +107,15 @@ vio:
   ncc_en: true
   ncc_thre: 0.7
   # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
-  ncc_thre_by_level: [0.7, 0.4]
+  ncc_thre_by_level: [0.4, 0.4]
   # Standardize every same-camera and cross-camera patch before EKF linearization.
   # Enabling this disables exposure estimation and is incompatible with IC/S2.
-  zncc_residual_en: false
-  zncc_min_std: 5.0
+  zncc_residual_en: true
+  zncc_min_std: 1.0
   zncc_residual_cov: 1.0
-  zncc_robust_en: false
+  zncc_robust_en: true
   zncc_huber_delta: 0.5
-  usage_stats_en: true
+  usage_stats_en: false
   usage_stats_window: 100
   img_point_cov: 1000
   grid_size: 5
@@ -189,7 +197,8 @@ vio:
   raycast_en: false
   inverse_composition_en: false
   exposure_estimate_en: true
-  online_extrinsic_en: true
+
+  online_extrinsic_en: false
   online_extrinsic_rot_en: true
   online_extrinsic_trans_en: true
   online_extrinsic_prior_factor_en: false
@@ -202,7 +211,7 @@ vio:
   online_extrinsic_prior_trans_std_m: 0.02
   online_extrinsic_max_rot_update_deg: 0.1
   online_extrinsic_max_trans_update_m: 0.1
-  online_time_offset_en: true
+  online_time_offset_en: false
   # online_time_offset_group_mask: []
   online_time_offset_start_frame: 100
   online_time_offset_min_tracks: 30
@@ -267,7 +276,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "CBD_Building_01"
+  seq_name: "lidar"
   pose_output_en: true
 
 pcd_save:
