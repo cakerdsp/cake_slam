@@ -5197,7 +5197,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     Feature *reference = nullptr;
     V3D point_c_seed = V3D::Zero();
     V2D current_raw_center_px = V2D::Zero();
-    double raw_score = 0.0;
+    double shi_tomasi_score = 0.0;
     int reference_rank = 0;
   };
   enum VirtualRejectReason
@@ -5269,22 +5269,9 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       return VIOManager::REJECT_DRAW_RANGE;
     }
   };
-  auto computeRawCandidateScore = [&](const VisualPoint &pt, const V3D &pt_c_seed, const V2D &raw_px) {
-    const double border_margin = std::min(std::min(raw_px[0], raw_px[1]),
-                                          std::min(static_cast<double>(ctx.width - 1) - raw_px[0],
-                                                   static_cast<double>(ctx.height - 1) - raw_px[1]));
-    const double border_score = std::max(0.0, std::min(1.0, border_margin / std::max(1, 2 * patch_size_half + 1)));
-
-    double view_score = 0.0;
-    const double point_range = pt_c_seed.norm();
-    const double normal_norm = pt.normal_.norm();
-    if (point_range > 1.0e-9 && normal_norm > 1.0e-9 && pt.normal_.array().isFinite().all())
-    {
-      const V3D view_dir_w = (ctx.new_frame->pos() - pt.pos_).normalized();
-      view_score = std::max(0.0, std::min(1.0, std::fabs((pt.normal_ / normal_norm).dot(view_dir_w))));
-    }
-
-    return 50.0 * view_score + 25.0 * border_score;
+  auto computeShiTomasiCandidateScore = [&](const V2D &raw_px) {
+    const float score = vk::shiTomasiScore(img, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]));
+    return std::isfinite(score) ? static_cast<double>(score) : 0.0;
   };
 
   vector<VirtualCandidate> candidates;
@@ -5379,7 +5366,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
         candidate.reference = managed_ref;
         candidate.point_c_seed = pt_c_seed;
         candidate.current_raw_center_px = raw_px;
-        candidate.raw_score = computeRawCandidateScore(*pt, pt_c_seed, raw_px);
+        candidate.shi_tomasi_score = computeShiTomasiCandidateScore(raw_px);
         candidate.reference_rank = rank;
         candidates.push_back(candidate);
       }
@@ -5463,7 +5450,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     candidate.reference = ref_ftr;
     candidate.point_c_seed = pt_c_seed;
     candidate.current_raw_center_px = raw_px;
-    candidate.raw_score = computeRawCandidateScore(*pt, pt_c_seed, raw_px);
+    candidate.shi_tomasi_score = computeShiTomasiCandidateScore(raw_px);
     candidates.push_back(candidate);
     }
   }
@@ -5478,7 +5465,9 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     const int keep_points = std::min(raw_score_point_quota, static_cast<int>(primary_indices.size()));
     if (keep_points < static_cast<int>(primary_indices.size()))
       std::partial_sort(primary_indices.begin(), primary_indices.begin() + keep_points, primary_indices.end(),
-                        [&](int lhs, int rhs) { return candidates[lhs].raw_score > candidates[rhs].raw_score; });
+                        [&](int lhs, int rhs) {
+                          return candidates[lhs].shi_tomasi_score > candidates[rhs].shi_tomasi_score;
+                        });
 
     std::set<VisualPoint *> selected_points;
     for (int i = 0; i < keep_points; ++i) selected_points.insert(candidates[primary_indices[i]].point);
