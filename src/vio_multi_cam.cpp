@@ -133,6 +133,14 @@ double normalizedPatchRobustSqrtWeight(const Eigen::VectorXd &residual,
   return std::sqrt(huber_delta / patch_rmse);
 }
 
+double tukeySqrtWeight(double residual, double cutoff)
+{
+  if (!std::isfinite(residual) || !std::isfinite(cutoff) || cutoff <= 0.0) return 0.0;
+  const double normalized_abs_residual = std::abs(residual) / cutoff;
+  if (normalized_abs_residual >= 1.0) return 0.0;
+  return 1.0 - normalized_abs_residual * normalized_abs_residual;
+}
+
 std::string normalizeVirtualInterpMode(std::string mode)
 {
   for (char &ch : mode) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
@@ -879,7 +887,16 @@ void VIOManager::initializeVIO()
     if (exposure_estimate_en)
       throw std::runtime_error("zncc_residual_en requires exposure_estimate_en=false");
     printf("[ VIO ZNCC Residual ] enabled for all same-camera and cross-camera patches: min_std=%.3f cov=%.6f robust=%d huber_delta=%.3f\n",
-           zncc_min_std, zncc_residual_cov, zncc_robust_en ? 1 : 0, zncc_huber_delta);
+           zncc_min_std, zncc_residual_cov, (zncc_robust_en && !tukey_robust_en) ? 1 : 0, zncc_huber_delta);
+  }
+  if (tukey_robust_en)
+  {
+    if (!std::isfinite(outlier_threshold) || outlier_threshold <= 0.0)
+      throw std::runtime_error("tukey_robust_en requires outlier_threshold to be finite and positive");
+    printf("[ VIO Tukey Robust ] enabled for every active visual residual: cutoff=outlier_threshold=%.3f\n",
+           outlier_threshold);
+    if (zncc_residual_en && zncc_robust_en)
+      printf("[ VIO Tukey Robust ] overriding ZNCC patch Huber weighting.\n");
   }
   runtime_support_dump_initialized_ = false;
   runtime_support_dump_next_point_id_ = 0;
@@ -7330,7 +7347,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
           }
           double local_squared_error = 0.0;
           int local_dof = 0;
-          auto accumulateObservation = [&](const Eigen::VectorXd &jacobian, double residual) {
+          auto accumulateObservation = [&](const Eigen::VectorXd &raw_jacobian, double raw_residual) {
+            const double sqrt_robust_weight =
+                tukey_robust_en ? tukeySqrtWeight(raw_residual, outlier_threshold) : 1.0;
+            const Eigen::VectorXd jacobian = sqrt_robust_weight * raw_jacobian;
+            const double residual = sqrt_robust_weight * raw_residual;
             if (visual_map_manage_en)
             {
               if (iteration == 0 && jacobian.size() >= 6)
@@ -7372,7 +7393,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
               return false;
             Eigen::VectorXd residual = normalized_current - normalized_reference;
             const double sqrt_robust_weight =
-                normalizedPatchRobustSqrtWeight(residual, zncc_robust_en, zncc_huber_delta);
+                normalizedPatchRobustSqrtWeight(residual, zncc_robust_en && !tukey_robust_en,
+                                                zncc_huber_delta);
             residual *= sqrt_robust_weight;
             normalized_current_jacobian *= sqrt_robust_weight;
             for (int row = 0; row < patch_size_total; ++row)
@@ -7949,10 +7971,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
             target_jacobians.row(patch_index) = target_jacobian.transpose();
             continue;
           }
-          const double residual = sqrt_weight *
-              (state->inv_expo_time[source.camera_id] * source_value -
-               state->inv_expo_time[target.camera_id] * target_value);
-          const Eigen::VectorXd jacobian = sqrt_weight * (source_jacobian - target_jacobian);
+          const double raw_residual =
+              state->inv_expo_time[source.camera_id] * source_value -
+              state->inv_expo_time[target.camera_id] * target_value;
+          const double sqrt_robust_weight =
+              tukey_robust_en ? tukeySqrtWeight(raw_residual, outlier_threshold) : 1.0;
+          const double residual = sqrt_weight * sqrt_robust_weight * raw_residual;
+          const Eigen::VectorXd jacobian =
+              sqrt_weight * sqrt_robust_weight * (source_jacobian - target_jacobian);
           hessian.noalias() += jacobian * jacobian.transpose();
           gradient.noalias() += jacobian * residual;
           pair_hessian.noalias() += jacobian * jacobian.transpose();
@@ -7975,13 +8001,18 @@ void VIOManager::computeJacobianAndUpdateEKF()
           Eigen::VectorXd residuals = normalized_source - normalized_target;
           Eigen::MatrixXd jacobians = normalized_source_jacobian - normalized_target_jacobian;
           const double sqrt_robust_weight =
-              normalizedPatchRobustSqrtWeight(residuals, zncc_robust_en, zncc_huber_delta);
-          residuals *= sqrt_weight * sqrt_robust_weight;
-          jacobians *= sqrt_weight * sqrt_robust_weight;
+              normalizedPatchRobustSqrtWeight(residuals, zncc_robust_en && !tukey_robust_en,
+                                              zncc_huber_delta);
+          residuals *= sqrt_robust_weight;
+          jacobians *= sqrt_robust_weight;
           for (int row = 0; row < patch_size_total; ++row)
           {
-            const Eigen::VectorXd jacobian = jacobians.row(row).transpose();
-            const double residual = residuals[row];
+            const double tukey_sqrt_weight =
+                tukey_robust_en ? tukeySqrtWeight(residuals[row], outlier_threshold) : 1.0;
+            const double combined_sqrt_weight = sqrt_weight * tukey_sqrt_weight;
+            const Eigen::VectorXd jacobian =
+                combined_sqrt_weight * jacobians.row(row).transpose();
+            const double residual = combined_sqrt_weight * residuals[row];
             hessian.noalias() += jacobian * jacobian.transpose();
             gradient.noalias() += jacobian * residual;
             pair_hessian.noalias() += jacobian * jacobian.transpose();

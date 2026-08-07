@@ -355,6 +355,7 @@ public:
   double zncc_residual_cov = 1.0;
   bool zncc_robust_en = false;
   double zncc_huber_delta = 0.5;
+  bool tukey_robust_en = false;
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
   bool virtual_s2_optimize_en = false;

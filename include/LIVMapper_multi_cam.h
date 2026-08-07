@@ -186,6 +186,7 @@ public:
   double zncc_residual_cov = 1.0;
   bool zncc_robust_en = false;
   double zncc_huber_delta = 0.5;
+  bool tukey_robust_en = false;
   bool usage_stats_en = false;
   int usage_stats_window = 100;
   bool directional_update_en = false;

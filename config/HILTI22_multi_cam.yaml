@@ -128,6 +128,9 @@ vio:
   zncc_residual_cov: 1.0
   zncc_robust_en: false
   zncc_huber_delta: 0.5
+  # Omni-LIVO-style per-residual Tukey weighting; uses outlier_threshold as cutoff.
+  # When enabled, this overrides the ZNCC patch-level Huber weighting above.
+  tukey_robust_en: false
   usage_stats_en: true
   usage_stats_window: 100
   img_point_cov: 1000
