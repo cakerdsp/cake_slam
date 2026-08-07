@@ -259,6 +259,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<double>("vio.zncc_residual_cov", 1.0);
   try_declare.template operator()<bool>("vio.zncc_robust_en", false);
   try_declare.template operator()<double>("vio.zncc_huber_delta", 0.5);
+  try_declare.template operator()<bool>("vio.tukey_robust_en", false);
   try_declare.template operator()<bool>("vio.usage_stats_en", false);
   try_declare.template operator()<int>("vio.usage_stats_window", 100);
   try_declare.template operator()<bool>("vio.cross_camera_reference_en", false);
@@ -510,6 +511,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "vio.zncc_residual_cov", zncc_residual_cov);
   getRosParam(this->node, "vio.zncc_robust_en", zncc_robust_en);
   getRosParam(this->node, "vio.zncc_huber_delta", zncc_huber_delta);
+  getRosParam(this->node, "vio.tukey_robust_en", tukey_robust_en);
   getRosParam(this->node, "vio.usage_stats_en", usage_stats_en);
   getRosParam(this->node, "vio.usage_stats_window", usage_stats_window);
   getRosParam(this->node, "vio.cross_camera_reference_en", cross_camera_reference_en);
@@ -610,6 +612,8 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
     throw std::runtime_error("vio.zncc_residual_cov must be finite and positive");
   if (!std::isfinite(zncc_huber_delta) || zncc_huber_delta <= 0.0)
     throw std::runtime_error("vio.zncc_huber_delta must be finite and positive");
+  if (tukey_robust_en && outlier_threshold <= 0)
+    throw std::runtime_error("vio.tukey_robust_en requires vio.outlier_threshold to be positive");
   if (zncc_residual_en && inverse_composition_en)
     throw std::runtime_error("vio.zncc_residual_en does not support vio.inverse_composition_en");
   if (zncc_residual_en && virtual_s2_optimize_en)
@@ -847,6 +851,7 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->zncc_residual_cov = zncc_residual_cov;
   vio_manager->zncc_robust_en = zncc_robust_en;
   vio_manager->zncc_huber_delta = zncc_huber_delta;
+  vio_manager->tukey_robust_en = tukey_robust_en;
   vio_manager->usage_stats_en = usage_stats_en;
   vio_manager->usage_stats_window = usage_stats_window;
   vio_manager->ref_patch_dump_en = ref_patch_dump_en;
