@@ -141,7 +141,7 @@ time_offset:
 preprocess:
   image_downclock_en: false
   image_downclock_factor: 1
-  point_filter_num: 20
+  point_filter_num: 5
   filter_size_surf: 0.1
   lidar_type: 2
   scan_line: 32
@@ -154,7 +154,7 @@ vio:
   cross_camera_reference_en: true
   cross_camera_current_residual_en: true
   max_iterations: 5
-  outlier_threshold: 1000
+  outlier_threshold: 100
   ncc_en: false
   # ncc_thre: 0.7
   # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
@@ -168,7 +168,7 @@ vio:
   zncc_huber_delta: 0.5
   # Omni-LIVO-style per-residual Tukey weighting; uses outlier_threshold as cutoff.
   # When enabled, this overrides the ZNCC patch-level Huber weighting above.
-  tukey_robust_en: false
+  tukey_robust_en: true
   usage_stats_en: true
   usage_stats_window: 100
   img_point_cov: 1000
@@ -326,7 +326,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "room_01_cake"
+  seq_name: "gate_03_cake"
   pose_output_en: true
 
 pcd_save:
