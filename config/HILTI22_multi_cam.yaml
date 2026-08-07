@@ -1,7 +1,7 @@
 common:
   # This launch defaults to the single camera0 stream. Increase only after
   # validating the remaining camera intrinsics and enabling contiguous entries.
-  num_cameras: 1
+  num_cameras: 2
   require_all_cameras: true
   multi_cam_sync_queue_size: 5
   multi_cam_sync_tolerance_ms: 40.0
@@ -31,35 +31,35 @@ cameras:
     time_offset_group: 0
     online_time_offset_en: true
 
+  # camera1:
+  #   img_topic: "/alphasense/cam1/image_raw"
+  #   camera_ns: "camera1"
+  #   image_undistort_en: false
+  #   raw_camera_ns: "camera1"
+  #   # HILTI C1. imu_to_cam1 composed with extrin_calib imu<-lidar.
+  #   Rcl: [-0.9999840643, -0.001655612644, 0.005397233569,
+  #         -0.005395690615, -0.0009350089579, -0.999985006,
+  #          0.001660634281, -0.9999981924, 0.0009260608843]
+  #   Pcl: [0.05377943234, 0.0683868197, -0.05154509159]
+  #   online_extrinsic_en: true
+  #   time_offset_group: 1
+  #   online_time_offset_en: true
+
+  # camera2:
+  #   img_topic: "/alphasense/cam2/image_raw"
+  #   camera_ns: "camera2"
+  #   image_undistort_en: false
+  #   raw_camera_ns: "camera2"
+  #   # HILTI C2. imu_to_cam2 composed with extrin_calib imu<-lidar.
+  #   Rcl: [-0.004234051672, -0.9999897552, 0.00160069188,
+  #          0.9999871882, -0.004238470701, -0.002767461132,
+  #          0.002774217265, 0.001588953799, 0.9999948895]
+  #   Pcl: [-0.007986043407, 0.0007666033303, -0.08909935435]
+  #   online_extrinsic_en: true
+  #   time_offset_group: 2
+  #   online_time_offset_en: true
+
   camera1:
-    img_topic: "/alphasense/cam1/image_raw"
-    camera_ns: "camera1"
-    image_undistort_en: false
-    raw_camera_ns: "camera1"
-    # HILTI C1. imu_to_cam1 composed with extrin_calib imu<-lidar.
-    Rcl: [-0.9999840643, -0.001655612644, 0.005397233569,
-          -0.005395690615, -0.0009350089579, -0.999985006,
-           0.001660634281, -0.9999981924, 0.0009260608843]
-    Pcl: [0.05377943234, 0.0683868197, -0.05154509159]
-    online_extrinsic_en: true
-    time_offset_group: 1
-    online_time_offset_en: true
-
-  camera2:
-    img_topic: "/alphasense/cam2/image_raw"
-    camera_ns: "camera2"
-    image_undistort_en: false
-    raw_camera_ns: "camera2"
-    # HILTI C2. imu_to_cam2 composed with extrin_calib imu<-lidar.
-    Rcl: [-0.004234051672, -0.9999897552, 0.00160069188,
-           0.9999871882, -0.004238470701, -0.002767461132,
-           0.002774217265, 0.001588953799, 0.9999948895]
-    Pcl: [-0.007986043407, 0.0007666033303, -0.08909935435]
-    online_extrinsic_en: true
-    time_offset_group: 2
-    online_time_offset_en: true
-
-  camera3:
     img_topic: "/alphasense/cam3/image_raw"
     camera_ns: "camera3"
     image_undistort_en: false
@@ -73,7 +73,7 @@ cameras:
     time_offset_group: 3
     online_time_offset_en: true
 
-  camera4:
+  camera2:
     img_topic: "/alphasense/cam4/image_raw"
     camera_ns: "camera4"
     image_undistort_en: false
@@ -103,7 +103,7 @@ time_offset:
 preprocess:
   image_downclock_en: true
   image_downclock_factor: 4
-  point_filter_num: 1
+  point_filter_num: 5
   filter_size_surf: 0.1
   lidar_type: 5
   scan_line: 32
@@ -126,7 +126,7 @@ vio:
   zncc_residual_en: false
   zncc_min_std: 5.0
   zncc_residual_cov: 1.0
-  zncc_robust_en: false
+  zncc_robust_en: true
   zncc_huber_delta: 0.5
   usage_stats_en: true
   usage_stats_window: 100
@@ -136,19 +136,19 @@ vio:
   patch_size: 8
   patch_pyrimid_level: 2
 
-  virtual_fisheye_patch_en: true
+  virtual_fisheye_patch_en: false
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
   virtual_raw_score_select_en: true
-  max_total_points: 150
+  max_total_points: 300
   points_per_camera_min: 50
   points_per_camera_max: 150
   # Advanced visual reference/landmark management. Start HILTI22 in shadow
   # mode: collect decisions and diagnostics without changing EKF admission,
   # reference selection, or deleting map objects while the raw-path abort is traced.
   visual_ref_post_ekf_build_en: true
-  visual_map_manage_en: true
+  visual_map_manage_en: false
   visual_map_manage_log_en: true
   visual_map_manage_shadow_en: true
   visual_ref_current_select_en: true
@@ -175,7 +175,7 @@ vio:
   visual_point_information_retain: 0.90
   visual_point_suspect_reject_count: 8
   visual_point_stale_frames: 200
-  virtual_focal_length: 200.0
+  virtual_focal_length: 300.0
   virtual_patch_margin: 4
   virtual_max_search_level: 0
   virtual_patch_resampling_mode: "pull_exact"
@@ -276,7 +276,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "exp03_cake"
+  seq_name: "exp04_cake2w"
   pose_output_en: true
 
 pcd_save:

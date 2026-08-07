@@ -9,7 +9,7 @@ common:
   # false preserves the original estimator path exactly.
   directional_update_en: false
   directional_drop_variance_reduction: 0.05
-  directional_full_variance_reduction: 0.50
+  directional_full_variance_reduction: 1.00
   lid_topic: "/velodyne_points"
   imu_topic: "/handsfree/imu"
   img_en: 1
@@ -141,7 +141,7 @@ time_offset:
 preprocess:
   image_downclock_en: false
   image_downclock_factor: 1
-  point_filter_num: 10
+  point_filter_num: 20
   filter_size_surf: 0.1
   lidar_type: 2
   scan_line: 32
@@ -152,10 +152,10 @@ preprocess:
 vio:
   frontend_mode: 0
   cross_camera_reference_en: true
-  cross_camera_current_residual_en: false
+  cross_camera_current_residual_en: true
   max_iterations: 5
   outlier_threshold: 1000
-  ncc_en: true
+  ncc_en: false
   # ncc_thre: 0.7
   # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
   ncc_thre_by_level: [0.4, 0.4]
@@ -164,7 +164,7 @@ vio:
   zncc_residual_en: false
   zncc_min_std: 5.0
   zncc_residual_cov: 1.0
-  zncc_robust_en: false
+  zncc_robust_en: true
   zncc_huber_delta: 0.5
   usage_stats_en: true
   usage_stats_window: 100
@@ -180,7 +180,7 @@ vio:
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
-  virtual_raw_score_select_en: false
+  virtual_raw_score_select_en: true
   max_total_points: 150
   points_per_camera_min: 50
   points_per_camera_max: 150
@@ -216,7 +216,7 @@ vio:
   visual_point_information_retain: 0.90
   visual_point_suspect_reject_count: 8
   visual_point_stale_frames: 200
-  virtual_focal_length: 400.0
+  virtual_focal_length: 500.0
   virtual_patch_margin: 4
   virtual_max_search_level: 0
   virtual_patch_resampling_mode: "pull_exact"
@@ -259,7 +259,7 @@ vio:
   online_extrinsic_max_trans_update_m: 0.0001
 
 
-  online_time_offset_en: true
+  online_time_offset_en: false
   # Cameras with the same time_offset_group share one td state. By default
   # each camera has its own group; set equal group ids for hardware-triggered cameras.
   # Optional override: provide one entry per time-offset group.
@@ -323,7 +323,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "m2dgr2"
+  seq_name: "room_01_cake"
   pose_output_en: true
 
 pcd_save:
