@@ -139,7 +139,7 @@ vio:
   patch_size: 8
   patch_pyrimid_level: 2
 
-  virtual_fisheye_patch_en: true
+  virtual_fisheye_patch_en: false
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false

@@ -1797,13 +1797,17 @@ bool VIOManager::buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &
 
 bool VIOManager::projectRawFisheyeIfValid(const PerCameraData &ctx, const V3D &ray_or_point_in_raw_camera, int required_border, V2D &raw_px) const
 {
-  if (!ray_or_point_in_raw_camera.array().isFinite().all() || ray_or_point_in_raw_camera.norm() <= virtual_min_z) return false;
+  if (ctx.cam == nullptr || ctx.width <= 0 || ctx.height <= 0 ||
+      !ray_or_point_in_raw_camera.array().isFinite().all() ||
+      ray_or_point_in_raw_camera.norm() <= virtual_min_z)
+    return false;
+  const int border_req = std::max(0, required_border);
   raw_px = ctx.cam->world2cam(ray_or_point_in_raw_camera);
   if (!raw_px.array().isFinite().all()) return false;
-  if (raw_px[0] < required_border || raw_px[1] < required_border || raw_px[0] >= ctx.width - required_border - 1 ||
-      raw_px[1] >= ctx.height - required_border - 1)
+  if (raw_px[0] < border_req || raw_px[1] < border_req || raw_px[0] >= ctx.width - border_req - 1 ||
+      raw_px[1] >= ctx.height - border_req - 1)
     return false;
-  return ctx.cam->isInFrame(raw_px.cast<int>(), required_border);
+  return ctx.cam->isInFrame(raw_px.cast<int>(), border_req);
 }
 
 bool VIOManager::computeS2SamplePointAndJacobian(const V3D &point_c, const M3D &R_v_from_c,
@@ -6836,19 +6840,36 @@ void VIOManager::buildCurrentCrossCameraPairs()
         const AcceptedObservation source_observation = observations[source_i];
         const AcceptedObservation target_observation = observations[target_i];
         if (source_observation.camera_id == target_observation.camera_id) continue;
+        if (source_observation.camera_id < 0 || source_observation.camera_id >= numCameras() ||
+            target_observation.camera_id < 0 || target_observation.camera_id >= numCameras() ||
+            source_observation.camera_id >= state->num_cameras ||
+            target_observation.camera_id >= state->num_cameras ||
+            source_observation.submap_index < 0 || target_observation.submap_index < 0)
+          continue;
         PerCameraData &source = cameras_[source_observation.camera_id];
         PerCameraData &target = cameras_[target_observation.camera_id];
+        if (source.cam == nullptr || target.cam == nullptr || source.visual_submap == nullptr ||
+            target.visual_submap == nullptr || source.new_frame == nullptr || target.new_frame == nullptr ||
+            source.new_frame->img_.empty() || target.new_frame->img_.empty() ||
+            source.new_frame->img_.type() != CV_8UC1 || target.new_frame->img_.type() != CV_8UC1 ||
+            source_observation.submap_index >= static_cast<int>(source.visual_submap->voxel_points.size()) ||
+            target_observation.submap_index >= static_cast<int>(target.visual_submap->voxel_points.size()) ||
+            source_observation.submap_index >= static_cast<int>(source.visual_submap->search_levels.size()) ||
+            target_observation.submap_index >= static_cast<int>(target.visual_submap->search_levels.size()) ||
+            source.visual_submap->voxel_points[source_observation.submap_index] != point ||
+            target.visual_submap->voxel_points[target_observation.submap_index] != point)
+          continue;
         CurrentCrossCameraPair pair;
         pair.point = point;
         pair.source_camera_id = source.camera_id;
         pair.target_camera_id = target.camera_id;
         pair.source_submap_index = source_observation.submap_index;
         pair.target_submap_index = target_observation.submap_index;
-        const int source_search = source_observation.submap_index < static_cast<int>(source.visual_submap->search_levels.size())
-                                      ? source.visual_submap->search_levels[source_observation.submap_index] : 0;
-        const int target_search = target_observation.submap_index < static_cast<int>(target.visual_submap->search_levels.size())
-                                      ? target.visual_submap->search_levels[target_observation.submap_index] : 0;
+        const int source_search = source.visual_submap->search_levels[source_observation.submap_index];
+        const int target_search = target.visual_submap->search_levels[target_observation.submap_index];
         pair.search_level = std::max(0, std::max(source_search, target_search));
+        const int max_scale_exponent = pair.search_level + metric_levels - 1;
+        if (max_scale_exponent < 0 || max_scale_exponent >= 30) continue;
         pair.sse_levels.assign(metric_levels, std::numeric_limits<double>::quiet_NaN());
         pair.ncc_levels.assign(metric_levels, std::numeric_limits<double>::quiet_NaN());
         pair.level_valid.assign(metric_levels, 0);
@@ -6899,16 +6920,18 @@ void VIOManager::buildCurrentCrossCameraPairs()
           const V3D point_source = T_source_w * point->pos_;
           const V3D point_target = T_target_w * point->pos_;
           const V3D normal_source = T_source_w.rotationMatrix() * point->normal_;
+          const int interpolation_border = interpolationBorderMargin(virtual_interp_mode_enum);
           if (point_source.array().isFinite().all() && point_target.array().isFinite().all() &&
-              normal_source.array().isFinite().all() && normal_source.norm() > 1.0e-9)
+              normal_source.array().isFinite().all() && normal_source.norm() > 1.0e-9 &&
+              projectRawFisheyeIfValid(source, point_source, interpolation_border, source_center) &&
+              projectRawFisheyeIfValid(target, point_target, interpolation_border, target_center))
           {
-            source_center = source.cam->world2cam(point_source);
-            target_center = target.cam->world2cam(point_target);
             getWarpMatrixAffineHomography(source, target, source_center, point_source, normal_source.normalized(),
                                            T_target_w * T_source_w.inverse(), 0, pair.A_target_source);
-            affine_ok = source_center.array().isFinite().all() && target_center.array().isFinite().all() &&
-                        pair.A_target_source.array().isFinite().all() &&
-                        std::fabs(pair.A_target_source.determinant()) > 1.0e-9;
+            const double affine_det = pair.A_target_source.determinant();
+            affine_ok = pair.A_target_source.array().isFinite().all() && std::isfinite(affine_det) &&
+                        std::fabs(affine_det) > 1.0e-9 &&
+                        pair.A_target_source.inverse().array().isFinite().all();
           }
         }
 
@@ -6948,10 +6971,20 @@ void VIOManager::buildCurrentCrossCameraPairs()
               }
               else
               {
-                level_ok = interpolateRawVirtualImage(source.new_frame->img_, source_center[0] + source_offset[0],
-                                                      source_center[1] + source_offset[1], source_value) &&
-                           interpolateRawVirtualImage(target.new_frame->img_, target_center[0] + target_offset[0],
-                                                      target_center[1] + target_offset[1], target_value);
+                const V2D source_sample = source_center + source_offset;
+                const V2D target_sample = target_center + target_offset;
+                const int sample_border = interpolationBorderMargin(virtual_interp_mode_enum);
+                level_ok = source_sample.array().isFinite().all() && target_sample.array().isFinite().all() &&
+                           source_sample[0] >= sample_border && source_sample[1] >= sample_border &&
+                           source_sample[0] < source.new_frame->img_.cols - sample_border - 1 &&
+                           source_sample[1] < source.new_frame->img_.rows - sample_border - 1 &&
+                           target_sample[0] >= sample_border && target_sample[1] >= sample_border &&
+                           target_sample[0] < target.new_frame->img_.cols - sample_border - 1 &&
+                           target_sample[1] < target.new_frame->img_.rows - sample_border - 1 &&
+                           source.cam->isInFrame(source_sample.cast<int>(), sample_border) &&
+                           target.cam->isInFrame(target_sample.cast<int>(), sample_border) &&
+                           interpolateRawVirtualImage(source.new_frame->img_, source_sample[0], source_sample[1], source_value) &&
+                           interpolateRawVirtualImage(target.new_frame->img_, target_sample[0], target_sample[1], target_value);
               }
               if (!level_ok) break;
               source_patch[patch_index] = source_value;
@@ -7810,16 +7843,36 @@ void VIOManager::computeJacobianAndUpdateEKF()
         auto linearize_current_cross_camera = [&]() __attribute__((noinline)) {
           for (CurrentCrossCameraPair &pair : current_cross_camera_pairs_)
           {
-        if (!pair.accepted || pair.point == nullptr) continue;
+        if (!pair.accepted || pair.point == nullptr || pair.point->pending_delete_ ||
+            !pair.point->pos_.array().isFinite().all())
+          continue;
         if (level >= static_cast<int>(pair.level_active.size()) || pair.level_active[level] == 0) continue;
+        if (pair.source_camera_id < 0 || pair.source_camera_id >= numCameras() ||
+            pair.target_camera_id < 0 || pair.target_camera_id >= numCameras() ||
+            pair.source_camera_id == pair.target_camera_id ||
+            pair.source_submap_index < 0 || pair.target_submap_index < 0)
+          continue;
         PerCameraData &source = cameras_[pair.source_camera_id];
         PerCameraData &target = cameras_[pair.target_camera_id];
         if (source.new_frame == nullptr || target.new_frame == nullptr ||
             source.visual_submap == nullptr || target.visual_submap == nullptr)
           continue;
-        const int scale = 1 << (level + pair.search_level);
+        if (pair.source_submap_index >= static_cast<int>(source.visual_submap->voxel_points.size()) ||
+            pair.target_submap_index >= static_cast<int>(target.visual_submap->voxel_points.size()) ||
+            source.visual_submap->voxel_points[pair.source_submap_index] != pair.point ||
+            target.visual_submap->voxel_points[pair.target_submap_index] != pair.point)
+          continue;
+        const int scale_exponent = level + pair.search_level;
+        if (scale_exponent < 0 || scale_exponent >= 30) continue;
+        const int scale = 1 << scale_exponent;
+        if (!std::isfinite(pair.hessian_weight) || pair.hessian_weight < 0.0) continue;
         const double sqrt_weight = std::sqrt(std::max(0.0, pair.hessian_weight));
+        const double affine_det = pair.A_target_source.determinant();
+        if (!pair.A_target_source.array().isFinite().all() || !std::isfinite(affine_det) ||
+            std::fabs(affine_det) <= 1.0e-9)
+          continue;
         const Matrix2d A_source_target = pair.A_target_source.inverse();
+        if (!A_source_target.array().isFinite().all()) continue;
         const V3D point_w = pair.point->pos_;
         updateFrameState(source, *state);
         updateFrameState(target, *state);
@@ -7837,7 +7890,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
         auto linearizeCurrentSample = [&](PerCameraData &ctx, const VirtualTrackPatch *track,
                                           const V2D &offset, float &value, Eigen::VectorXd &jacobian) -> bool {
           jacobian = Eigen::VectorXd::Zero(solve_dim);
+          if (ctx.camera_id < 0 || ctx.camera_id >= state->num_cameras || ctx.cam == nullptr ||
+              ctx.new_frame == nullptr)
+            return false;
           const double exposure = zncc_residual_en ? 1.0 : state->inv_expo_time[ctx.camera_id];
+          if (!std::isfinite(exposure)) return false;
           const V3D point_c = ctx.Rcw * point_w + ctx.Pcw;
           if (!point_c.array().isFinite().all()) return false;
           const bool estimate_extrinsic =
@@ -7884,18 +7941,36 @@ void VIOManager::computeJacobianAndUpdateEKF()
           }
           else
           {
-            const V2D center = ctx.cam->world2cam(point_c);
-            if (!center.array().isFinite().all()) return false;
+            V2D center;
+            MD(2, 3) Jdpi;
+            const int center_border = interpolationBorderMargin(virtual_interp_mode_enum);
+            if (raw_camera_model_jacobian_en)
+            {
+              if (!projectRawCameraWithJacobian(ctx, point_c, center_border, center, Jdpi)) return false;
+            }
+            else
+            {
+              if (!projectRawFisheyeIfValid(ctx, point_c, center_border, center)) return false;
+              computeProjectionJacobian(ctx, point_c, Jdpi);
+              if (!Jdpi.array().isFinite().all()) return false;
+            }
+            const V2D sample_px = center + offset;
+            const int sample_border = scale + interpolationBorderMargin(virtual_interp_mode_enum);
+            if (!sample_px.array().isFinite().all() ||
+                sample_px[0] < sample_border || sample_px[1] < sample_border ||
+                sample_px[0] >= ctx.new_frame->img_.cols - sample_border - 1 ||
+                sample_px[1] >= ctx.new_frame->img_.rows - sample_border - 1 ||
+                !ctx.cam->isInFrame(sample_px.cast<int>(), sample_border))
+              return false;
             V2D gradient;
-            if (!sampleRawImageValueAndGradient(ctx.new_frame->img_, center + offset, scale, value, gradient))
+            if (!sampleRawImageValueAndGradient(ctx.new_frame->img_, sample_px, scale, value, gradient))
               return false;
             MD(1, 2) Jimg;
             Jimg << gradient[0], gradient[1];
             Jimg *= exposure / scale;
-            MD(2, 3) Jdpi;
-            computeProjectionJacobian(ctx, point_c, Jdpi);
             J_photo_center = Jimg * Jdpi;
           }
+          if (!J_photo_center.array().isFinite().all()) return false;
 
           M3D point_c_hat;
           point_c_hat << SKEW_SYM_MATRX(point_c);
