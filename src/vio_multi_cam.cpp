@@ -7066,6 +7066,7 @@ void VIOManager::buildCurrentCrossCameraPairs()
 void VIOManager::computeJacobianAndUpdateEKF()
 {
   compute_jacobian_time = update_ekf_time = 0.0;
+  vio_linearized_residual_count_ = 0;
   int total_observations = 0;
   for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
   if (total_observations == 0) return;
@@ -7381,6 +7382,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           double local_squared_error = 0.0;
           int local_dof = 0;
           auto accumulateObservation = [&](const Eigen::VectorXd &raw_jacobian, double raw_residual) {
+            ++vio_linearized_residual_count_;
             const double sqrt_robust_weight =
                 tukey_robust_en ? tukeySqrtWeight(raw_residual, outlier_threshold) : 1.0;
             const Eigen::VectorXd jacobian = sqrt_robust_weight * raw_jacobian;
@@ -8059,6 +8061,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           pair_hessian.noalias() += jacobian * jacobian.transpose();
           pair_error += residual * residual;
           ++pair_residuals;
+          ++vio_linearized_residual_count_;
           ++measurement_count;
         }
         if (zncc_residual_en)
@@ -8093,6 +8096,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
             pair_hessian.noalias() += jacobian * jacobian.transpose();
             pair_error += residual * residual;
             ++pair_residuals;
+            ++vio_linearized_residual_count_;
             ++measurement_count;
           }
         }
@@ -12127,6 +12131,12 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Joint EKF Update", ekf_end - retrieve_end);
   printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
   printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
+  printf("\033[1;32m| %-29s | %-27lld |\033[0m\n", "Linearized Residuals", vio_linearized_residual_count_);
+  const double avg_time_per_residual_us =
+      vio_linearized_residual_count_ > 0
+          ? compute_jacobian_time * 1.0e6 / static_cast<double>(vio_linearized_residual_count_)
+          : 0.0;
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Avg Time / Residual (us)", avg_time_per_residual_us);
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Update Visual Map", map_update_end - ekf_end);
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Commit New Points", commit_end - map_update_end);
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Reference + Debug", reference_end - commit_end);

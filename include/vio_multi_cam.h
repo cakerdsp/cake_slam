@@ -779,6 +779,7 @@ public:
     int reason = REJECT_DRAW_RANGE;
   };
   double compute_jacobian_time, update_ekf_time;
+  long long vio_linearized_residual_count_ = 0;
   double ave_total = 0;
   // double ave_build_residual_time = 0;
   // double ave_ekf_time = 0;
