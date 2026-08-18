@@ -12140,6 +12140,26 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     // printf("[ VIO Debug ] generate begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
     // fflush(stdout);
     generateVisualMapPoints(ctx, ctx.new_frame->img_, pg, plane_map);
+    if (ctx.visual_submap != nullptr && ctx.new_frame != nullptr)
+    {
+      for (VisualPoint *point : ctx.visual_submap->voxel_points)
+      {
+        if (point == nullptr || point->pending_delete_) continue;
+        if (point->reuse_last_selected_frame_id_ == ctx.new_frame->id_ &&
+            point->reuse_last_selected_camera_id_ == ctx.camera_id)
+          continue;
+        ++point->reuse_selected_count_;
+        point->reuse_last_selected_frame_id_ = ctx.new_frame->id_;
+        point->reuse_last_selected_camera_id_ = ctx.camera_id;
+        point->ensureCameraCount(numCameras());
+        if (ctx.camera_id >= 0 && ctx.camera_id < static_cast<int>(point->reuse_camera_observed_.size()) &&
+            point->reuse_camera_observed_[ctx.camera_id] == 0)
+        {
+          point->reuse_camera_observed_[ctx.camera_id] = 1;
+          ++point->reuse_camera_count_;
+        }
+      }
+    }
     // printf("[ VIO Debug ] generate end camera_id=%d frame=%d pending=%zu\n",
     //        ctx.camera_id, mf.frame_id, ctx.pending_new_points.size());
     // fflush(stdout);
@@ -12238,6 +12258,28 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   ++frame_count;
   const double elapsed = reference_end - frame_start;
   ave_total = ave_total * (frame_count - 1) / frame_count + elapsed / frame_count;
+  long long active_visual_point_count = 0;
+  long long active_visual_point_reuse_sum = 0;
+  long long active_visual_point_camera_reuse_sum = 0;
+  for (const auto &voxel : feat_map)
+  {
+    if (voxel.second == nullptr) continue;
+    for (const VisualPoint *point : voxel.second->voxel_points)
+    {
+      if (point == nullptr || point->pending_delete_) continue;
+      ++active_visual_point_count;
+      active_visual_point_reuse_sum += point->reuse_selected_count_;
+      active_visual_point_camera_reuse_sum += point->reuse_camera_count_;
+    }
+  }
+  const double mean_reuse_count =
+      active_visual_point_count > 0
+          ? static_cast<double>(active_visual_point_reuse_sum) / static_cast<double>(active_visual_point_count)
+          : 0.0;
+  const double mean_camera_count =
+      active_visual_point_count > 0
+          ? static_cast<double>(active_visual_point_camera_reuse_sum) / static_cast<double>(active_visual_point_count)
+          : 0.0;
   printf("[ VIO ] multi-camera frame=%d cameras=%d observations=%zu elapsed=%.6f s\n",
          mf.frame_id, numCameras(), feat_map.size(), elapsed);
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
@@ -12245,6 +12287,8 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
   printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Camera Count", numCameras());
+  printf("\033[1;34m| %-29s | %-27.3f |\033[0m\n", "Mean Reuse Count", mean_reuse_count);
+  printf("\033[1;34m| %-29s | %-27.3f |\033[0m\n", "Mean Camera Count", mean_camera_count);
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");

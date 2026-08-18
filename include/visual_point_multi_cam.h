@@ -48,6 +48,11 @@ public:
   std::vector<uint8_t> has_ref_patch_by_camera_;
   int runtime_support_track_count_ = 0;
   int runtime_support_dump_id_ = -1;
+  std::vector<uint8_t> reuse_camera_observed_;
+  int reuse_camera_count_;
+  int reuse_selected_count_;
+  int reuse_last_selected_frame_id_;
+  int reuse_last_selected_camera_id_;
   State state_;
   uint64_t point_id_;
   int64_t map_voxel_x_;

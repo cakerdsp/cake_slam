@@ -15,7 +15,9 @@ src/visual_point.cpp is intentionally unchanged.
 VisualPoint::VisualPoint(const Vector3d &pos)
     : pos_(pos), previous_normal_(Vector3d::Zero()), normal_(Vector3d::Zero()),
       is_converged_(false), is_normal_initialized_(false), has_ref_patch_(false), ref_patch(nullptr),
-      state_(State::CONFIRMED), point_id_(0), map_voxel_x_(0), map_voxel_y_(0), map_voxel_z_(0),
+      reuse_camera_count_(0), reuse_selected_count_(0), reuse_last_selected_frame_id_(-1),
+      reuse_last_selected_camera_id_(-1), state_(State::CONFIRMED), point_id_(0),
+      map_voxel_x_(0), map_voxel_y_(0), map_voxel_z_(0),
       surface_voxel_x_(0), surface_voxel_y_(0), surface_voxel_z_(0), surface_plane_id_(-1),
       surface_revision_(0), surface_valid_(false), geometry_chi2_(0.0),
       accumulated_pose_information_(Eigen::Matrix<double, 6, 6>::Zero()), last_visible_frame_(-1),
@@ -36,9 +38,12 @@ VisualPoint::~VisualPoint()
 void VisualPoint::ensureCameraCount(int num_cameras)
 {
   if (num_cameras < 1) throw std::invalid_argument("VisualPoint requires at least one camera");
-  if (static_cast<int>(ref_patch_by_camera_.size()) >= num_cameras) return;
-  ref_patch_by_camera_.resize(num_cameras, nullptr);
-  has_ref_patch_by_camera_.resize(num_cameras, 0);
+  if (static_cast<int>(ref_patch_by_camera_.size()) < num_cameras)
+    ref_patch_by_camera_.resize(num_cameras, nullptr);
+  if (static_cast<int>(has_ref_patch_by_camera_.size()) < num_cameras)
+    has_ref_patch_by_camera_.resize(num_cameras, 0);
+  if (static_cast<int>(reuse_camera_observed_.size()) < num_cameras)
+    reuse_camera_observed_.resize(num_cameras, 0);
 }
 
 Feature *VisualPoint::referencePatch(int camera_id, bool cross_camera_reference) const
