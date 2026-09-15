@@ -67,6 +67,7 @@ typedef struct PointToPlane
   double eigen_value_;
   bool is_valid_;
   float dis_to_plane_;
+  int plane_id_ = -1;
 } PointToPlane;
 
 typedef struct VoxelPlane
@@ -231,6 +232,8 @@ public:
   };
 
   void StateEstimation(StatesGroup &state_propagat);
+  void PrepareScanCovariances();
+  void RefreshWorldPoints();
   void TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
                       pcl::PointCloud<pcl::PointXYZI>::Ptr &trans_cloud);
 

@@ -239,6 +239,9 @@ vio:
     triangulated_points_topic: "/cake_slam/triangulated_points"
 
 imu:
+  # Variance of the effective midpoint sample; preserves the existing dt^2 convention.
+  # Use continuous only with calibrated PSD values (noise density squared).
+  noise_model: discrete
   imu_en: true
   imu_int_frame: 30
   acc_cov: 1.0

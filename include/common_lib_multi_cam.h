@@ -20,6 +20,8 @@ which is included as part of this source code package.
 #include <opencv2/opencv.hpp>
 #include <cstdint>
 #include <stdexcept>
+#include <memory>
+#include "estimator_covariance.h"
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/Image.h>
@@ -132,6 +134,12 @@ struct LidarMeasureGroup
   };
 };
 
+struct ScanPoseUncertainty
+{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  estimator_covariance::Matrix6 covariance = estimator_covariance::Matrix6::Zero();
+};
+
 typedef struct pointWithVar
 {
   Eigen::Vector3d point_b;     // point in the lidar body frame
@@ -142,6 +150,9 @@ typedef struct pointWithVar
   Eigen::Matrix3d var;
   Eigen::Matrix3d point_crossmat;
   Eigen::Vector3d normal;
+  // Points from one scan share the same pose error, not independent copies.
+  std::shared_ptr<const ScanPoseUncertainty> scan_uncertainty;
+  estimator_covariance::PointJacobian pose_jacobian = estimator_covariance::PointJacobian::Zero();
   pointWithVar()
   {
     var_nostate = Eigen::Matrix3d::Zero();
@@ -223,6 +234,25 @@ struct StatesGroup
   int extrinsicIndex(int camera_id) const { return extrinsicBaseIndex() + 6 * camera_id; }
   int extrinsicRotIndex(int camera_id) const { return extrinsicIndex(camera_id); }
   int extrinsicTransIndex(int camera_id) const { return extrinsicIndex(camera_id) + 3; }
+
+  std::vector<int> rotationIndices() const
+  {
+    std::vector<int> indices{0};
+    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+      indices.push_back(extrinsicRotIndex(camera_id));
+    return indices;
+  }
+
+  Eigen::MatrixXd covarianceAt(const StatesGroup &linearization) const
+  {
+    return estimator_covariance::transport(cov, linearization - *this, rotationIndices());
+  }
+
+  Eigen::MatrixXd resetCovariance(const Eigen::MatrixXd &local_cov,
+                                const Eigen::VectorXd &correction) const
+  {
+    return estimator_covariance::transport(local_cov, correction, rotationIndices());
+  }
 
   void configureCameras(int camera_count, double inv_expo_init = 1.0,
                         int time_offset_group_count = 1, double time_offset_init = 0.0)

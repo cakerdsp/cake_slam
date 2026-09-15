@@ -41,6 +41,7 @@ public:
   void set_acc_cov_scale(const V3D &scaler);
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
+  void set_noise_model(const std::string &model);
   void set_inv_expo_cov(const double &inv_expo);
   void set_time_offset_cov(const double &time_offset_cov);
   void set_imu_init_frame_num(const int &num);
@@ -89,6 +90,9 @@ private:
   bool gravity_est_en = true;
   bool ba_bg_est_en = true;
   bool exposure_estimate_en = true;
+  // discrete: midpoint-sample/rate variance, Q ~ dt^2;
+  // continuous: white-noise PSD, first-order Q ~ dt.
+  bool continuous_noise_ = false;
 };
 typedef std::shared_ptr<ImuProcess> ImuProcessPtr;
 #endif

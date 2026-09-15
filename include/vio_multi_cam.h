@@ -881,15 +881,14 @@ public:
                                            const std::vector<uint8_t> &active_extrinsic_rot,
                                            const std::vector<uint8_t> &active_extrinsic_trans,
                                            const std::vector<uint8_t> &active_time_groups) const;
-  void restoreInactiveCalibrationCovariance(const Eigen::MatrixXd &prior_cov,
-                                            const std::vector<uint8_t> &active_extrinsic_rot,
-                                            const std::vector<uint8_t> &active_extrinsic_trans,
-                                            const std::vector<uint8_t> &active_time_groups) const;
   void initializeVIO();
   void getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D pc, float *patch_tmp, int level);
   void computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J);
   void computeVirtualProjectionJacobian(const V3D &p_v, MD(2, 3) &J) const;
   void computeJacobianAndUpdateEKF();
+  bool referenceUncertaintyJacobian(const Feature &reference, const VisualPoint &point,
+                                    const std::vector<float> &warped_patch, const Matrix2d &affine,
+                                    int level, int scale, Eigen::MatrixXd &jacobian) const;
   void buildCurrentCrossCameraPairs();
   bool interpolateReferenceFeature(const Feature &reference, const V2D &px, float &value) const;
   bool computeWarpedReferenceGradient(const Feature &reference, const Matrix2d &A_cur_ref,

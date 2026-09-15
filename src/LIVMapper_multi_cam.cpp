@@ -308,6 +308,9 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<bool>("evo.pose_output_en", false);
   try_declare.template operator()<double>("imu.gyr_cov", 1.0);
   try_declare.template operator()<double>("imu.acc_cov", 1.0);
+  try_declare.template operator()<double>("imu.b_gyr_cov", 0.0001);
+  try_declare.template operator()<double>("imu.b_acc_cov", 0.0001);
+  try_declare.template operator()<std::string>("imu.noise_model", "discrete");
   try_declare.template operator()<int>("imu.imu_int_frame", 30);
   try_declare.template operator()<bool>("imu.imu_en", true);
   try_declare.template operator()<bool>("imu.gravity_est_en", true);
@@ -560,6 +563,9 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "evo.pose_output_en", pose_output_en);
   getRosParam(this->node, "imu.gyr_cov", gyr_cov);
   getRosParam(this->node, "imu.acc_cov", acc_cov);
+  getRosParam(this->node, "imu.b_gyr_cov", b_gyr_cov);
+  getRosParam(this->node, "imu.b_acc_cov", b_acc_cov);
+  getRosParam(this->node, "imu.noise_model", imu_noise_model);
   getRosParam(this->node, "imu.imu_int_frame", imu_int_frame);
   getRosParam(this->node, "imu.imu_en", imu_en);
   getRosParam(this->node, "imu.gravity_est_en", gravity_est_en);
@@ -879,8 +885,14 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   p_imu->set_acc_cov_scale(V3D(acc_cov, acc_cov, acc_cov));
   p_imu->set_inv_expo_cov(inv_expo_cov);
   p_imu->set_time_offset_cov(std::pow(online_time_offset_process_noise_ms_sqrt_s * 1.0e-3, 2));
-  p_imu->set_gyr_bias_cov(V3D(0.0001, 0.0001, 0.0001));
-  p_imu->set_acc_bias_cov(V3D(0.0001, 0.0001, 0.0001));
+  for (double variance : {gyr_cov, acc_cov, b_gyr_cov, b_acc_cov})
+    if (!std::isfinite(variance) || variance < 0.0)
+      throw std::invalid_argument("IMU noise parameters must be finite nonnegative variances/PSDs");
+  p_imu->set_noise_model(imu_noise_model);
+  p_imu->set_gyr_bias_cov(V3D::Constant(b_gyr_cov));
+  p_imu->set_acc_bias_cov(V3D::Constant(b_acc_cov));
+  printf("\033[1;36m[ COV IMU ] model=%s gyro=%.6g accel=%.6g bias_gyro=%.6g bias_accel=%.6g\033[0m\n",
+         imu_noise_model.c_str(), gyr_cov, acc_cov, b_gyr_cov, b_acc_cov);
   p_imu->set_imu_init_frame_num(imu_int_frame);
 
   if (!imu_en) p_imu->disable_imu();
@@ -998,6 +1010,11 @@ void LIVMapper::gravityAlignment()
     _state.rot_end = G_R_I0 * _state.rot_end;
     _state.vel_end = G_R_I0 * _state.vel_end;
     _state.gravity = G_R_I0 * _state.gravity;
+    Eigen::MatrixXd coordinate_change = Eigen::MatrixXd::Identity(_state.stateDim(), _state.stateDim());
+    coordinate_change.block<3, 3>(3, 3) = G_R_I0;
+    coordinate_change.block<3, 3>(_state.velocityIndex(), _state.velocityIndex()) = G_R_I0;
+    coordinate_change.block<3, 3>(_state.gravityIndex(), _state.gravityIndex()) = G_R_I0;
+    _state.cov = estimator_covariance::symmetric(coordinate_change * _state.cov * coordinate_change.transpose());
     gravity_align_finished = true;
     std::cout << "Gravity Alignment Finished" << std::endl;
   }
@@ -1058,6 +1075,8 @@ void LIVMapper::savePoseEvaluation(const char *stage)
     }
     fout_pose_evaluation
         << "# pose_covariance_v1; raw estimator covariance, not an online NEES value\n"
+        << "# covariance_model=full_joseph_tangent_shared_map_v2; imu_noise_model=" << imu_noise_model << '\n'
+        << "# Health comments: full_cov timestamp stage dimension min_eigenvalue max_eigenvalue max_asymmetry\n"
         << "# Pose: IMU origin in estimator world W; quaternion xyzw rotates IMU to W.\n"
         << "# Error order: dtheta_I_x dtheta_I_y dtheta_I_z dp_W_x dp_W_y dp_W_z.\n"
         << "# Perturbation: R_true = R_est * Exp(dtheta_I), p_true = p_est + dp_W.\n"
@@ -1089,6 +1108,26 @@ void LIVMapper::savePoseEvaluation(const char *stage)
     return;
   }
   const Eigen::Quaterniond q(_state.rot_end);
+  double min_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  double max_eigenvalue = min_eigenvalue;
+  double asymmetry = min_eigenvalue;
+  if (_state.cov.rows() == _state.cov.cols() && _state.cov.allFinite())
+  {
+    asymmetry = (_state.cov - _state.cov.transpose()).cwiseAbs().maxCoeff();
+    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen_solver(
+        estimator_covariance::symmetric(_state.cov), Eigen::EigenvaluesOnly);
+    if (eigen_solver.info() == Eigen::Success)
+    {
+      min_eigenvalue = eigen_solver.eigenvalues().minCoeff();
+      max_eigenvalue = eigen_solver.eigenvalues().maxCoeff();
+    }
+  }
+  fout_pose_evaluation << std::setprecision(17) << "# full_cov " << LidarMeasures.last_lio_update_time
+                       << ' ' << stage << ' ' << _state.cov.rows() << ' ' << min_eigenvalue
+                       << ' ' << max_eigenvalue << ' ' << asymmetry << '\n';
+  if (!std::isfinite(min_eigenvalue) || min_eigenvalue <= 0.0)
+    printf("\033[1;31m[ COV HEALTH ] t=%.6f stage=%s dim=%d min_eigen=%.6g asym=%.6g\033[0m\n",
+           LidarMeasures.last_lio_update_time, stage, static_cast<int>(_state.cov.rows()), min_eigenvalue, asymmetry);
   fout_pose_evaluation << std::setprecision(17) << LidarMeasures.last_lio_update_time
                        << ' ' << _state.pos_end[0] << ' ' << _state.pos_end[1] << ' ' << _state.pos_end[2]
                        << ' ' << q.x() << ' ' << q.y() << ' ' << q.z() << ' ' << q.w();
@@ -1206,7 +1245,7 @@ void LIVMapper::handleLIO()
            << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
            << _state.bias_a.transpose() << " " << _state.inv_expo_time.transpose() << endl;
 
-  if (feats_undistort->empty() || (feats_undistort == nullptr))
+  if (feats_undistort == nullptr || feats_undistort->empty())
   {
     std::cout << "[ LIO ]: No point!!!" << std::endl;
     return;
@@ -1220,12 +1259,14 @@ void LIVMapper::handleLIO()
   double t_down = omp_get_wtime();
 
   feats_down_size = feats_down_body->points.size();
+  if (feats_down_size == 0) return;
   voxelmap_manager->feats_down_body_ = feats_down_body;
   transformLidar(_state.rot_end, _state.pos_end, feats_down_body, feats_down_world);
   voxelmap_manager->feats_down_world_ = feats_down_world;
   voxelmap_manager->feats_down_size_ = feats_down_size;
 
-  if (!lidar_map_inited)
+  const bool initializing_map = !lidar_map_inited;
+  if (initializing_map)
   {
     lidar_map_inited = true;
     voxelmap_manager->BuildVoxelMap();
@@ -1233,7 +1274,9 @@ void LIVMapper::handleLIO()
 
   double t1 = omp_get_wtime();
 
-  voxelmap_manager->StateEstimation(state_propagat);
+  // The initialization scan defines the first map; it is not an independent
+  // measurement of the map it just constructed.
+  if (!initializing_map) voxelmap_manager->StateEstimation(state_propagat);
   _state = voxelmap_manager->state_;
   _pv_list = voxelmap_manager->pv_list_;
 
@@ -1281,18 +1324,11 @@ void LIVMapper::handleLIO()
 
   double t3 = omp_get_wtime();
 
-  PointCloudXYZI::Ptr world_lidar(new PointCloudXYZI());
-  transformLidar(_state.rot_end, _state.pos_end, feats_down_body, world_lidar);
-  for (size_t i = 0; i < world_lidar->points.size(); i++)
+  if (!initializing_map)
   {
-    voxelmap_manager->pv_list_[i].point_w << world_lidar->points[i].x, world_lidar->points[i].y, world_lidar->points[i].z;
-    M3D point_crossmat = voxelmap_manager->cross_mat_list_[i];
-    M3D var = voxelmap_manager->body_cov_list_[i];
-    var = (_state.rot_end * extR) * var * (_state.rot_end * extR).transpose() +
-          (-point_crossmat) * _state.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose() + _state.cov.block<3, 3>(3, 3);
-    voxelmap_manager->pv_list_[i].var = var;
+    voxelmap_manager->RefreshWorldPoints();
+    voxelmap_manager->UpdateVoxelMap(voxelmap_manager->pv_list_);
   }
-  voxelmap_manager->UpdateVoxelMap(voxelmap_manager->pv_list_);
   std::cout << "[ LIO ] Update Voxel Map" << std::endl;
   _pv_list = voxelmap_manager->pv_list_;
 
