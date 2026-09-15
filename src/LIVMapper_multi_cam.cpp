@@ -14,6 +14,8 @@ which is included as part of this source code package.
 #include "utils/ros1_param.h"
 #include <cmath>
 #include <filesystem>
+#include <cstdio>
+#include <iomanip>
 #include <limits>
 #include <vikit/abstract_camera.h>
 #include <vikit/camera_loader.h>
@@ -1035,6 +1037,74 @@ void LIVMapper::stateEstimationAndMapping()
   }
 }
 
+void LIVMapper::savePoseEvaluation(const char *stage)
+{
+  if (!pose_output_en || pose_evaluation_failed) return;
+
+  const std::string evaluation_path =
+      std::string(ROOT_DIR) + "Log/result/" + seq_name + "_nees_eval.txt";
+  if (!fout_pose_evaluation.is_open())
+  {
+    std::error_code directory_error;
+    std::filesystem::create_directories(std::filesystem::path(evaluation_path).parent_path(), directory_error);
+    if (!directory_error)
+      fout_pose_evaluation.open(evaluation_path, std::ios::out | std::ios::trunc);
+    if (directory_error || !fout_pose_evaluation.is_open())
+    {
+      printf("\033[1;31m[ EVAL INFO ] Cannot open %s; evaluation logging disabled.\033[0m\n",
+             evaluation_path.c_str());
+      pose_evaluation_failed = true;
+      return;
+    }
+    fout_pose_evaluation
+        << "# pose_covariance_v1; raw estimator covariance, not an online NEES value\n"
+        << "# Pose: IMU origin in estimator world W; quaternion xyzw rotates IMU to W.\n"
+        << "# Error order: dtheta_I_x dtheta_I_y dtheta_I_z dp_W_x dp_W_y dp_W_z.\n"
+        << "# Perturbation: R_true = R_est * Exp(dtheta_I), p_true = p_est + dp_W.\n"
+        << "# Covariance: full 6x6 marginal block, row-major; radians/meters, including cross terms.\n"
+        << "# Timestamp: last_lio_update_time in sensor seconds, not wall-clock time.\n"
+        << "# Stage LIO: after LiDAR estimation, matches existing trajectory output stage.\n"
+        << "# Stage VIO: after visual frontend returns; may include frames with no visual correction.\n"
+        << "# Select one stage before trajectory/NEES evaluation; do not mix duplicate timestamps.\n"
+        << "# directional_update_en=" << (directional_update_en ? 1 : 0)
+        << " drop=" << std::setprecision(17) << directional_drop_variance_reduction
+        << " full=" << directional_full_variance_reduction
+        << " frontend_mode=" << frontend_mode << '\n'
+        << "# timestamp px py pz qx qy qz qw";
+    for (int row = 0; row < 6; ++row)
+      for (int col = 0; col < 6; ++col)
+        fout_pose_evaluation << " P" << row << col;
+    fout_pose_evaluation << " stage\n";
+    printf("\033[1;36m[ EVAL INFO ] Pose + 6x6 covariance: %s (LIO/VIO; ground truth required offline).\033[0m\n",
+           evaluation_path.c_str());
+  }
+
+  // Export the estimator's marginal covariance verbatim, without clipping or
+  // regularizing it: downstream consistency checks must see invalid values too.
+  if (_state.cov.rows() < 6 || _state.cov.cols() < 6)
+  {
+    printf("\033[1;31m[ EVAL INFO ] Missing pose covariance; evaluation logging disabled.\033[0m\n");
+    pose_evaluation_failed = true;
+    fout_pose_evaluation.close();
+    return;
+  }
+  const Eigen::Quaterniond q(_state.rot_end);
+  fout_pose_evaluation << std::setprecision(17) << LidarMeasures.last_lio_update_time
+                       << ' ' << _state.pos_end[0] << ' ' << _state.pos_end[1] << ' ' << _state.pos_end[2]
+                       << ' ' << q.x() << ' ' << q.y() << ' ' << q.z() << ' ' << q.w();
+  for (int row = 0; row < 6; ++row)
+    for (int col = 0; col < 6; ++col)
+      fout_pose_evaluation << ' ' << _state.cov(row, col);
+  fout_pose_evaluation << ' ' << stage << std::endl;
+  if (!fout_pose_evaluation.good())
+  {
+    printf("\033[1;31m[ EVAL INFO ] Write failed: %s; evaluation logging disabled.\033[0m\n",
+           evaluation_path.c_str());
+    pose_evaluation_failed = true;
+    fout_pose_evaluation.close();
+  }
+}
+
 void LIVMapper::handleVIO()
 {
   int current_frontend_mode = frontend_mode;
@@ -1092,6 +1162,8 @@ void LIVMapper::handleVIO()
       vio_manager->processMultiCameraFrame(LidarMeasures.measures.back(), _pv_list, voxelmap_manager->voxel_map_);
       break;
   }
+
+  savePoseEvaluation("VIO");
 
   if (imu_prop_enable)
   {
@@ -1200,6 +1272,8 @@ void LIVMapper::handleLIO()
     evoFile << LidarMeasures.last_lio_update_time << " " << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " "
             << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
   }
+
+  savePoseEvaluation("LIO");
 
   euler_cur = RotMtoEuler(_state.rot_end);
   geoQuat = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));

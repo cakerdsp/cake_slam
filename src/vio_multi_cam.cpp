@@ -12287,6 +12287,7 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
   printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Camera Count", numCameras());
+  printf("\033[1;34m| %-29s | %-27lld |\033[0m\n", "Active Visual Points", active_visual_point_count);
   printf("\033[1;34m| %-29s | %-27.3f |\033[0m\n", "Mean Reuse Count", mean_reuse_count);
   printf("\033[1;34m| %-29s | %-27.3f |\033[0m\n", "Mean Camera Count", mean_camera_count);
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");

@@ -89,6 +89,7 @@ public:
   void stateEstimationAndMapping();
   void handleVIO();
   void handleLIO();
+  void savePoseEvaluation(const char *stage);
   void savePCD();
   void processImu();
 
@@ -318,6 +319,8 @@ public:
   PointCloudXYZI::Ptr pcl_wait_save_intensity;
 
   ofstream fout_pre, fout_out, fout_pcd_pos, fout_points;
+  ofstream fout_pose_evaluation;
+  bool pose_evaluation_failed = false;
 
   pcl::VoxelGrid<PointType> downSizeFilterSurf;
 
