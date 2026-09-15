@@ -30,7 +30,6 @@ void suppressRosInfoLogs(const ros::NodeHandle &nh)
   (void)nh;
 }
 
-
 bool hasLaterCompleteImageGroupLocked(const std::map<uint64_t, PendingImageGroup> &pending_images,
                                       uint64_t stamp_ns)
 {
@@ -178,11 +177,15 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<int>("common.lidar_en", 1);
   try_declare.template operator()<int>("common.num_cameras", 1);
   try_declare.template operator()<bool>("common.require_all_cameras", true);
+  try_declare.template operator()<bool>("vio.photometric_selection_en", true);
+  try_declare.template operator()<bool>("vio.photometric_selection_shared_errors", true);
+  try_declare.template operator()<int>("vio.photometric_selection_candidate_budget", 600);
+  try_declare.template operator()<int>("vio.photometric_selection_patch_budget", 150);
+  try_declare.template operator()<int>("vio.photometric_selection_pixel_budget", 9600);
+  try_declare.template operator()<int>("vio.photometric_selection_max_refs", 3);
+  try_declare.template operator()<double>("vio.photometric_selection_reference_pixel_std", 1.0);
   try_declare.template operator()<int>("common.multi_cam_sync_queue_size", 5);
   try_declare.template operator()<double>("common.multi_cam_sync_tolerance_ms", 0.0);
-  try_declare.template operator()<bool>("common.directional_update_en", false);
-  try_declare.template operator()<double>("common.directional_drop_variance_reduction", 0.05);
-  try_declare.template operator()<double>("common.directional_full_variance_reduction", 0.50);
 
   try_declare.template operator()<bool>("vio.normal_en", true);
   try_declare.template operator()<bool>("vio.inverse_composition_en", false);
@@ -354,25 +357,27 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "common.lidar_en", lidar_en);
   getRosParam(this->node, "common.num_cameras", num_cameras);
   getRosParam(this->node, "common.require_all_cameras", require_all_cameras);
+  getRosParam(this->node, "vio.photometric_selection_en", photometric_selection_en);
+  getRosParam(this->node, "vio.photometric_selection_shared_errors", photometric_selection_shared_errors);
+  getRosParam(this->node, "vio.photometric_selection_candidate_budget", photometric_selection_candidate_budget);
+  getRosParam(this->node, "vio.photometric_selection_patch_budget", photometric_selection_patch_budget);
+  getRosParam(this->node, "vio.photometric_selection_pixel_budget", photometric_selection_pixel_budget);
+  getRosParam(this->node, "vio.photometric_selection_max_refs", photometric_selection_max_refs);
+  getRosParam(this->node, "vio.photometric_selection_reference_pixel_std", photometric_selection_reference_pixel_std);
+  if (this->node.hasParam("common/directional_update_en"))
+    printf("\033[1;33m[ PHOTO SELECT ] common.directional_update_en is retired and ignored; use vio.photometric_selection_en.\033[0m\n");
+  if (photometric_selection_candidate_budget < photometric_selection_patch_budget || photometric_selection_patch_budget < 1 || photometric_selection_pixel_budget < 1 ||
+      photometric_selection_max_refs < 1 || !std::isfinite(photometric_selection_reference_pixel_std) ||
+      photometric_selection_reference_pixel_std < 0.0)
+    throw std::runtime_error("invalid photometric selection budget, reference count or pixel noise");
+
   getRosParam(this->node, "common.multi_cam_sync_queue_size", multi_cam_sync_queue_size);
   getRosParam(this->node, "common.multi_cam_sync_tolerance_ms", multi_cam_sync_tolerance_ms);
-  getRosParam(this->node, "common.directional_update_en", directional_update_en);
-  getRosParam(this->node, "common.directional_drop_variance_reduction", directional_drop_variance_reduction);
-  getRosParam(this->node, "common.directional_full_variance_reduction", directional_full_variance_reduction);
   if (num_cameras < 1) throw std::runtime_error("common.num_cameras must be at least 1");
   if (!require_all_cameras) throw std::runtime_error("partial camera frames are not supported; common.require_all_cameras must be true");
   if (multi_cam_sync_queue_size < 1) throw std::runtime_error("common.multi_cam_sync_queue_size must be at least 1");
   if (!std::isfinite(multi_cam_sync_tolerance_ms) || multi_cam_sync_tolerance_ms < 0.0)
     throw std::runtime_error("common.multi_cam_sync_tolerance_ms must be finite and non-negative");
-  if (directional_update_en &&
-      (!std::isfinite(directional_drop_variance_reduction) ||
-       !std::isfinite(directional_full_variance_reduction) ||
-       directional_drop_variance_reduction < 0.0 ||
-       directional_full_variance_reduction > 1.0 ||
-       directional_full_variance_reduction <= directional_drop_variance_reduction))
-    throw std::runtime_error(
-        "directional thresholds must satisfy 0 <= common.directional_drop_variance_reduction "
-        "< common.directional_full_variance_reduction <= 1");
 
   camera_configs.resize(num_cameras);
   last_timestamp_img_by_camera.assign(num_cameras, -1.0);
@@ -807,9 +812,19 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->raw_camera_model_jacobian_en = raw_camera_model_jacobian_en && !virtual_fisheye_patch_en;
   vio_manager->cross_camera_reference_en = cross_camera_reference_en;
   vio_manager->cross_camera_current_residual_en = cross_camera_current_residual_en;
-  vio_manager->directional_update_en = directional_update_en;
-  vio_manager->directional_drop_variance_reduction = directional_drop_variance_reduction;
-  vio_manager->directional_full_variance_reduction = directional_full_variance_reduction;
+  vio_manager->photometric_selection_en = photometric_selection_en;
+  vio_manager->photometric_selection_shared_errors = photometric_selection_shared_errors;
+  vio_manager->photometric_selection_candidate_budget = photometric_selection_candidate_budget;
+  vio_manager->photometric_selection_patch_budget = photometric_selection_patch_budget;
+  vio_manager->photometric_selection_pixel_budget = photometric_selection_pixel_budget;
+  vio_manager->photometric_selection_max_refs = photometric_selection_max_refs;
+  vio_manager->photometric_selection_reference_pixel_std = photometric_selection_reference_pixel_std;
+  if (photometric_selection_en && cross_camera_current_residual_en)
+    throw std::runtime_error("photometric selection requires vio.cross_camera_current_residual_en=false: current-current residuals reuse selected image data outside the patch budget");
+  printf("\033[1;36m[ PHOTO SELECT ] enabled=%d shared_errors=%d candidates=%d patches=%d pixels=%d refs=%d reference_pixel_std=%.3f; LIO ungated.\033[0m\n",
+         photometric_selection_en, photometric_selection_shared_errors, photometric_selection_candidate_budget, photometric_selection_patch_budget,
+         photometric_selection_pixel_budget, photometric_selection_max_refs, photometric_selection_reference_pixel_std);
+
   vio_manager->online_extrinsic_en = online_extrinsic_en;
   vio_manager->online_extrinsic_rot_en = online_extrinsic_rot_en;
   vio_manager->online_extrinsic_trans_en = online_extrinsic_trans_en;
@@ -1085,9 +1100,13 @@ void LIVMapper::savePoseEvaluation(const char *stage)
         << "# Stage LIO: after LiDAR estimation, matches existing trajectory output stage.\n"
         << "# Stage VIO: after visual frontend returns; may include frames with no visual correction.\n"
         << "# Select one stage before trajectory/NEES evaluation; do not mix duplicate timestamps.\n"
-        << "# directional_update_en=" << (directional_update_en ? 1 : 0)
-        << " drop=" << std::setprecision(17) << directional_drop_variance_reduction
-        << " full=" << directional_full_variance_reduction
+        << "# photometric_selection_en=" << (photometric_selection_en ? 1 : 0)
+        << " shared_errors=" << (photometric_selection_shared_errors ? 1 : 0)
+        << " candidate_budget=" << photometric_selection_candidate_budget
+        << " patches=" << photometric_selection_patch_budget
+        << " pixels=" << photometric_selection_pixel_budget
+        << " max_refs=" << photometric_selection_max_refs
+        << " reference_pixel_std=" << std::setprecision(17) << photometric_selection_reference_pixel_std
         << " frontend_mode=" << frontend_mode << '\n'
         << "# timestamp px py pz qx qy qz qw";
     for (int row = 0; row < 6; ++row)

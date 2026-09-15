@@ -39,7 +39,11 @@ public:
   Matrix3d normal_information_; //!< Inverse covariance matrix of normal estimation.
   Vector3d previous_normal_;    //!< Last updated normal vector.
   list<Feature *> obs_;         //!< Reference patches which observe the point.
-  Eigen::Matrix3d covariance_;  //!< Covariance of the point.
+  Eigen::Matrix3d covariance_;
+  M3D local_geometry_covariance_ = M3D::Zero();
+  bool local_geometry_covariance_valid_ = false;
+  int local_geometry_plane_id_ = -1;
+  uint64_t local_geometry_plane_revision_ = 0;
   bool is_converged_;           //!< True if the point is converged.
   bool is_normal_initialized_;  //!< True if the normal is initialized.
   bool has_ref_patch_;          //!< True if the point has a reference patch.

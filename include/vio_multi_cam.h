@@ -15,6 +15,7 @@ which is included as part of this source code package.
 
 #include "voxel_map_multi_cam.h"
 #include "feature_multi_cam.h"
+#include "photometric_selection.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -376,9 +377,15 @@ public:
   bool raw_camera_model_jacobian_en = false;
   bool cross_camera_reference_en = false;
   bool cross_camera_current_residual_en = false;
-  bool directional_update_en = false;
-  double directional_drop_variance_reduction = 0.05;
-  double directional_full_variance_reduction = 0.50;
+  std::map<std::pair<VisualPoint *, int>, bool> photometric_point_tests_;
+  void finalizeManagedPointEvidence(VisualPoint *point);
+  bool photometric_selection_en = true;
+  bool photometric_selection_shared_errors = true;
+  int photometric_selection_candidate_budget = 600;
+  int photometric_selection_patch_budget = 150;
+  int photometric_selection_pixel_budget = 9600;
+  int photometric_selection_max_refs = 3;
+  double photometric_selection_reference_pixel_std = 1.0;
   bool online_extrinsic_en = false;
   bool online_extrinsic_rot_en = true;
   bool online_extrinsic_trans_en = true;
@@ -885,6 +892,11 @@ public:
   void getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D pc, float *patch_tmp, int level);
   void computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J);
   void computeVirtualProjectionJacobian(const V3D &p_v, MD(2, 3) &J) const;
+  bool buildPhotometricSelectionCandidate(
+      const PerCameraData &ctx, int slot, int level, const Eigen::MatrixXd &full_jacobian,
+      const Eigen::MatrixXd &point_jacobian, const Eigen::VectorXd &weights,
+      const std::vector<int> &patch_indices,
+      photometric_selection::Candidate &candidate) const;
   void computeJacobianAndUpdateEKF();
   bool referenceUncertaintyJacobian(const Feature &reference, const VisualPoint &point,
                                     const std::vector<float> &warped_patch, const Matrix2d &affine,

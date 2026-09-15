@@ -5,11 +5,6 @@ common:
   require_all_cameras: true
   multi_cam_sync_queue_size: 5
   multi_cam_sync_tolerance_ms: 40.0
-  # Prior-normalized directional filtering for both sequential LIO and VIO updates.
-  # false preserves the original estimator path exactly.
-  directional_update_en: false
-  directional_drop_variance_reduction: 0.05
-  directional_full_variance_reduction: 1.00
   lid_topic: "/velodyne_points"
   imu_topic: "/handsfree/imu"
   img_en: 1
@@ -150,9 +145,18 @@ preprocess:
   feature_extract_enabled: false
 
 vio:
+  # Shared-error-aware observation selection; no LIO/VIO direction suppression.
+  photometric_selection_en: true
+  photometric_selection_shared_errors: true
+  photometric_selection_candidate_budget: 600
+  photometric_selection_patch_budget: 150
+  photometric_selection_pixel_budget: 9600
+  photometric_selection_max_refs: 3
+  photometric_selection_reference_pixel_std: 1.0
   frontend_mode: 0
   cross_camera_reference_en: true
-  cross_camera_current_residual_en: true
+  # Current-current residuals reuse data outside the selector budget.
+  cross_camera_current_residual_en: false
   max_iterations: 5
   outlier_threshold: 100
   ncc_en: false

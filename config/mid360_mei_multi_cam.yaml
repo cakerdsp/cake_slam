@@ -4,11 +4,6 @@ common:
   require_all_cameras: true
   multi_cam_sync_queue_size: 5
   multi_cam_sync_tolerance_ms: 40.0
-  # Prior-normalized directional filtering for both sequential LIO and VIO updates.
-  # false preserves the original estimator path exactly.
-  directional_update_en: false
-  directional_drop_variance_reduction: 0.05
-  directional_full_variance_reduction: 0.80
   lid_topic: "/livox/lidar"
   imu_topic: "/livox/imu"
   img_en: 0
@@ -97,6 +92,14 @@ preprocess:
   feature_extract_enabled: false
 
 vio:
+  # Shared-error-aware observation selection; no LIO/VIO direction suppression.
+  photometric_selection_en: true
+  photometric_selection_shared_errors: true
+  photometric_selection_candidate_budget: 600
+  photometric_selection_patch_budget: 150
+  photometric_selection_pixel_budget: 9600
+  photometric_selection_max_refs: 3
+  photometric_selection_reference_pixel_std: 1.0
   # 0: direct; 1: optical_flow; 2: color_only.
   # Virtual fisheye patch logic is used by the direct/fisheye frontend.
   frontend_mode: 0

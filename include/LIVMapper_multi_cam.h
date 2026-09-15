@@ -192,9 +192,13 @@ public:
   bool tukey_robust_en = false;
   bool usage_stats_en = false;
   int usage_stats_window = 100;
-  bool directional_update_en = false;
-  double directional_drop_variance_reduction = 0.05;
-  double directional_full_variance_reduction = 0.50;
+  bool photometric_selection_en = true;
+  bool photometric_selection_shared_errors = true;
+  int photometric_selection_candidate_budget = 600;
+  int photometric_selection_patch_budget = 150;
+  int photometric_selection_pixel_budget = 9600;
+  int photometric_selection_max_refs = 3;
+  double photometric_selection_reference_pixel_std = 1.0;
   int lidar_en = 1;
   bool is_first_frame = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;

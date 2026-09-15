@@ -12,7 +12,6 @@ which is included as part of this source code package.
 
 #include "voxel_map_multi_cam.h"
 #include "utils/ros1_param.h"
-#include "directional_update.h"
 using namespace Eigen;
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov)
 {
@@ -51,9 +50,6 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   try_declare.template operator()<double>("lio.sigma_num", 3);
   try_declare.template operator()<double>("lio.beam_err", 0.02);
   try_declare.template operator()<double>("lio.dept_err", 0.05);
-  try_declare.template operator()<bool>("common.directional_update_en", false);
-  try_declare.template operator()<double>("common.directional_drop_variance_reduction", 0.05);
-  try_declare.template operator()<double>("common.directional_full_variance_reduction", 0.50);
 
   try_declare.template operator()<std::vector<int>>("lio.layer_init_num", std::vector<int>{5,5,5,5,5});
   try_declare.template operator()<int>("lio.max_points_num", 50);
@@ -70,9 +66,6 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   getRosParam(nh, "lio.sigma_num", voxel_config.sigma_num_);
   getRosParam(nh, "lio.beam_err", voxel_config.beam_err_);
   getRosParam(nh, "lio.dept_err", voxel_config.dept_err_);
-  getRosParam(nh, "common.directional_update_en", voxel_config.directional_update_en);
-  getRosParam(nh, "common.directional_drop_variance_reduction", voxel_config.directional_drop_variance_reduction);
-  getRosParam(nh, "common.directional_full_variance_reduction", voxel_config.directional_full_variance_reduction);
   getRosParam(nh, "lio.layer_init_num", voxel_config.layer_init_num_);
   getRosParam(nh, "lio.max_points_num", voxel_config.max_points_num_);
   getRosParam(nh, "lio.min_iterations", voxel_config.max_iterations_);
@@ -85,6 +78,8 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
 {
   ++plane->revision_;
   plane->plane_var_ = Eigen::Matrix<double, 6, 6>::Zero();
+  plane->local_plane_var_.setZero();
+  plane->local_plane_var_valid_ = true;
   plane->covariance_ = Eigen::Matrix3d::Zero();
   plane->center_ = Eigen::Vector3d::Zero();
   plane->normal_ = Eigen::Vector3d::Zero();
@@ -153,6 +148,7 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
       if (points[i].scan_uncertainty)
       {
         plane->plane_var_ += J * points[i].var_nostate * J.transpose();
+        plane->local_plane_var_.noalias() += J * points[i].var_nostate * J.transpose();
         auto &scan = scan_contributions[points[i].scan_uncertainty.get()];
         scan.uncertainty = points[i].scan_uncertainty;
         scan.jacobian.noalias() += J * points[i].pose_jacobian;
@@ -160,6 +156,7 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
       else
       {
         plane->plane_var_ += J * points[i].var * J.transpose();
+        plane->local_plane_var_valid_ = false;
       }
     }
     std::vector<Eigen::MatrixXd> shared_terms;
@@ -467,15 +464,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   addLioBlock(state_.gyroBiasIndex(), 3);
   addLioBlock(state_.accelBiasIndex(), 3);
   addLioBlock(state_.gravityIndex(), 3);
-  auto fullCovToLio = [&](const Eigen::MatrixXd &full_cov) {
-    Eigen::MatrixXd reduced(lio_state_dim, lio_state_dim);
-    for (int r = 0; r < lio_state_dim; ++r)
-      for (int c = 0; c < lio_state_dim; ++c)
-        reduced(r, c) = full_cov(lio_to_full[r], lio_to_full[c]);
-    return reduced;
-  };
   Eigen::MatrixXd H_T_H = Eigen::MatrixXd::Zero(lio_state_dim, lio_state_dim);
-  directional_update::Result final_directional_result;
   Eigen::MatrixXd final_posterior_covariance;
 
   bool flg_EKF_inited, flg_EKF_converged, EKF_stop_flg = 0;
@@ -600,28 +589,12 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     // auto &&Hsub_T = Hsub.transpose();
     auto &&HTz = Hsub_T_R_inv * meas_vec;
     // fout_dbg<<"HTz: "<<HTz<<endl;
-    if (config_setting_.directional_update_en) H_T_H.setZero();
+    H_T_H.setZero();
     H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
     // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
     Eigen::VectorXd information_vector = Eigen::VectorXd::Zero(lio_state_dim);
     information_vector.head<6>() = HTz;
-    const Eigen::MatrixXd lio_cov = fullCovToLio(iteration_prior_cov);
-    if (config_setting_.directional_update_en)
-    {
-      directional_update::Result filtered;
-      if (!directional_update::filterInformation(
-              lio_cov, H_T_H, information_vector,
-              config_setting_.directional_drop_variance_reduction,
-              config_setting_.directional_full_variance_reduction, filtered))
-      {
-        std::cerr << "[ Directional LIO ] update rejected: " << filtered.error << std::endl;
-        state_ = state_propagat;
-        return;
-      }
-      H_T_H = filtered.information;
-      information_vector = filtered.information_vector;
-      final_directional_result = filtered;
-    }
+
     Eigen::MatrixXd full_information = Eigen::MatrixXd::Zero(full_state_dim, full_state_dim);
     Eigen::VectorXd full_information_vector = Eigen::VectorXd::Zero(full_state_dim);
     for (int r = 0; r < lio_state_dim; ++r)
@@ -660,15 +633,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     {
       /*** Covariance Update ***/
       // _state.cov = (I_STATE - G) * _state.cov;
-      if (config_setting_.directional_update_en)
-      {
-        std::cout << "[ Directional LIO ] rho_max="
-                  << final_directional_result.variance_reductions.maxCoeff()
-                  << " rho_mean=" << final_directional_result.variance_reductions.mean()
-                  << " active=" << final_directional_result.active_rank
-                  << " full=" << final_directional_result.full_rank
-                  << " dim=" << lio_state_dim << std::endl;
-      }
+
       state_.cov = final_posterior_covariance;
       // total_distance += (_state.pos_end - position_last).norm();
       position_last_ = state_.pos_end;

@@ -44,9 +44,6 @@ typedef struct VoxelMapConfig
   double dept_err_;
   double sigma_num_;
   bool is_pub_plane_map_;
-  bool directional_update_en = false;
-  double directional_drop_variance_reduction = 0.05;
-  double directional_full_variance_reduction = 0.50;
 
   // config of local map sliding
   double sliding_thresh;
@@ -78,6 +75,10 @@ typedef struct VoxelPlane
   Eigen::Vector3d x_normal_;
   Eigen::Matrix3d covariance_;
   Eigen::Matrix<double, 6, 6> plane_var_;
+  // Conditional plane shape covariance [normal, center], excluding scan poses.
+  // Selection only; the existing registration covariance is unchanged.
+  Eigen::Matrix<double, 6, 6> local_plane_var_ = Eigen::Matrix<double, 6, 6>::Zero();
+  bool local_plane_var_valid_ = false;
   float radius_ = 0;
   float min_eigen_value_ = 1;
   float mid_eigen_value_ = 1;

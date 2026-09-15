@@ -11,7 +11,6 @@ which is included as part of this source code package.
 */
 
 #include "vio_multi_cam.h"
-#include "directional_update.h"
 
 #include <Eigen/Eigenvalues>
 
@@ -244,7 +243,6 @@ cv::Mat makeMarkedFloatMatDisplay(const cv::Mat &values, const cv::Mat &valid_ma
   }
   return display;
 }
-
 
 cv::Mat makeMarkedRawSupportDisplay(const cv::Mat &image, const V2D &center_px, int support_size)
 {
@@ -862,6 +860,15 @@ void VIOManager::initializeVIO()
     if (zncc_residual_en && zncc_robust_en)
       printf("[ VIO Tukey Robust ] overriding ZNCC patch Huber weighting.\n");
   }
+  // The raw inverse-composition cache also uses these patch coordinates.
+  core_patch_offsets_.resize(patch_size_total);
+  for (int y = 0; y < patch_size; ++y)
+  {
+    for (int x = 0; x < patch_size; ++x)
+    {
+      core_patch_offsets_[y * patch_size + x] = V2F(x - patch_size_half, y - patch_size_half);
+    }
+  }
   runtime_support_dump_initialized_ = false;
   runtime_support_dump_next_point_id_ = 0;
   runtime_support_dump_best_track_count_ = 0;
@@ -921,15 +928,6 @@ void VIOManager::initializeVIO()
         V3F ray((x - virtual_support_radius) / static_cast<float>(virtual_focal_length),
                 (y - virtual_support_radius) / static_cast<float>(virtual_focal_length), 1.0f);
         virtual_support_ray_lut_[y * virtual_support_size + x] = ray.normalized();
-      }
-    }
-
-    core_patch_offsets_.resize(patch_size_total);
-    for (int y = 0; y < patch_size; ++y)
-    {
-      for (int x = 0; x < patch_size; ++x)
-      {
-        core_patch_offsets_[y * patch_size + x] = V2F(x - patch_size_half, y - patch_size_half);
       }
     }
 
@@ -5332,9 +5330,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       if (!selectManagedReferenceCandidates(ctx, *pt, candidate_limit).empty())
         ++visual_map_manage_stats_.dynamic_selected;
     }
-    if (visual_map_manage_en && visual_ref_current_select_en && !visual_map_manage_shadow_en)
+    if (photometric_selection_en ||
+        (visual_map_manage_en && visual_ref_current_select_en && !visual_map_manage_shadow_en))
     {
-      const int candidate_limit = visual_ref_fallback_en ? visual_ref_max_candidates : 1;
+      const int candidate_limit = photometric_selection_en ? photometric_selection_max_refs :
+                                  (visual_ref_fallback_en ? visual_ref_max_candidates : 1);
       std::vector<Feature *> managed_refs = selectManagedReferenceCandidates(ctx, *pt, candidate_limit);
       if (managed_refs.empty())
       {
@@ -5440,7 +5440,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     }
   }
 
-  if (virtual_raw_score_select_en && raw_score_point_quota >= 0)
+  if (!photometric_selection_en && virtual_raw_score_select_en && raw_score_point_quota >= 0)
   {
     std::vector<int> primary_indices;
     primary_indices.reserve(candidates.size());
@@ -5479,7 +5479,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     const VirtualCandidate &candidate = candidates[candidate_index];
     const bool is_primary = candidate.reference_rank == 0;
     if (is_primary != (fallback_pass == 0)) continue;
-    if (!is_primary)
+    if (!is_primary && !photometric_selection_en)
     {
       int primary_index = candidate_index - 1;
       while (primary_index >= 0 && candidates[primary_index].point == candidate.point &&
@@ -5768,7 +5768,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
   for (int candidate_index = 0; candidate_index < static_cast<int>(candidates.size()); ++candidate_index)
   {
     const VirtualCandidate &collect_candidate = candidates[candidate_index];
-    if (collect_candidate.reference_rank > 0)
+    if (collect_candidate.reference_rank > 0 && !photometric_selection_en)
     {
       if (accepted_managed_points.count(collect_candidate.point) != 0) continue;
       if (fallback_allowed_points.count(collect_candidate.point) == 0) continue;
@@ -6280,9 +6280,11 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
         if (!selectManagedReferenceCandidates(ctx, *pt, candidate_limit).empty())
           ++visual_map_manage_stats_.dynamic_selected;
       }
-      if (visual_map_manage_en && visual_ref_current_select_en && !visual_map_manage_shadow_en)
+      if (photometric_selection_en ||
+        (visual_map_manage_en && visual_ref_current_select_en && !visual_map_manage_shadow_en))
       {
-        const int candidate_limit = visual_ref_fallback_en ? visual_ref_max_candidates : 1;
+        const int candidate_limit = photometric_selection_en ? photometric_selection_max_refs :
+                                    (visual_ref_fallback_en ? visual_ref_max_candidates : 1);
         reference_candidates = selectManagedReferenceCandidates(ctx, *pt, candidate_limit);
         ++visual_map_manage_stats_.dynamic_selected;
       }
@@ -6352,11 +6354,13 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
         if (ref_ftr == nullptr || ref_ftr->camera_id_ < 0 || ref_ftr->camera_id_ >= numCameras())
         {
           ++debug_ref_invalid;
+          if (photometric_selection_en) continue;
           break;
         }
         if (!refreshReferenceCalibration(*ref_ftr))
         {
           ++debug_ref_invalid;
+          if (photometric_selection_en) continue;
           break;
         }
       const PerCameraData &ref_ctx = cameras_[ref_ftr->camera_id_];
@@ -6418,14 +6422,15 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       }
       // Shadow mode must remain observational: it may evaluate managed
       // references above, but it must not gate the legacy raw tracking path.
-      if (visual_map_manage_en && visual_ref_current_select_en && !visual_map_manage_shadow_en)
+      if (photometric_selection_en ||
+        (visual_map_manage_en && visual_ref_current_select_en && !visual_map_manage_shadow_en))
       {
-        if (!debug_affine_ok) break;
+        if (!debug_affine_ok) { if (photometric_selection_en) continue; break; }
         const Eigen::JacobiSVD<Matrix2d> affine_svd(A_cur_ref_zero);
         const V2D singular = affine_svd.singularValues();
         if (!singular.array().isFinite().all() || singular[1] <= 1.0e-9 ||
             singular[0] / singular[1] > visual_ref_max_anisotropy)
-          break;
+          { if (photometric_selection_en) continue; break; }
       }
       if (debug_warp_logs < 8)
       {
@@ -6447,7 +6452,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
           break;
         }
       }
-      if (!warp_ok) break;
+      if (!warp_ok) { if (photometric_selection_en) continue; break; }
 
       std::vector<double> usage_sse_levels(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
       std::vector<double> usage_ncc_levels(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
@@ -6614,7 +6619,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       if (reference_rank > 0) ++visual_map_manage_stats_.fallback_accepted;
 
       ++debug_accepted;
-      break;
+      if (!photometric_selection_en) break;
 
       // t_5 += omp_get_wtime() - t_1;
       }
@@ -7117,8 +7122,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
   std::vector<uint8_t> final_active_extrinsic_trans(state->num_cameras, 0);
   std::vector<uint8_t> final_active_time_groups(state->num_time_offset_groups, 0);
   Eigen::MatrixXd rollback_G = G;
-  directional_update::Result final_directional_result;
-  directional_update::Result rollback_directional_result;
   Eigen::MatrixXd final_posterior_covariance;
   Eigen::MatrixXd rollback_posterior_covariance;
   std::vector<uint8_t> rollback_active_extrinsic_rot = final_active_extrinsic_rot;
@@ -7161,8 +7164,48 @@ void VIOManager::computeJacobianAndUpdateEKF()
   long long rollback_usage_final_residuals_cross = usage_final_residuals_cross;
   long long rollback_usage_final_residuals_current_cross = usage_final_residuals_current_cross;
 
-  for (int level = patch_pyrimid_level - 1; level >= 0; --level)
+  // Pre-score every candidate at its finest eligible level and a common entry
+  // state. Finish all scoring levels before the first estimator correction.
+  std::map<std::pair<int, int>, photometric_selection::Candidate> selection_candidates;
+  std::vector<std::vector<uint8_t>> selected(numCameras());
+  for (const auto &ctx : cameras_) selected[ctx.camera_id].assign(ctx.total_points, 0);
+  // A balanced, spatially stratified candidate pool bounds scoring cost. Slots
+  // follow retrieval grid order; rotate its phase to avoid starving references.
+  std::vector<std::vector<uint8_t>> selection_pool = selected;
+  if (photometric_selection_en)
   {
+    std::vector<int> quotas(numCameras(), 0);
+    int remaining = photometric_selection_candidate_budget;
+    bool allocated = true;
+    while (remaining > 0 && allocated)
+    {
+      allocated = false;
+      for (const auto &ctx : cameras_)
+        if (remaining > 0 && quotas[ctx.camera_id] < ctx.total_points)
+        {
+          ++quotas[ctx.camera_id];
+          --remaining;
+          allocated = true;
+        }
+    }
+    for (const auto &ctx : cameras_)
+    {
+      const int quota = quotas[ctx.camera_id];
+      if (quota == 0) continue;
+      const int phase = std::max(0, frame_count) % std::max(1, ctx.total_points / quota);
+      for (int k = 0; k < quota; ++k)
+        selection_pool[ctx.camera_id][(static_cast<int64_t>(k) * ctx.total_points / quota + phase) % ctx.total_points] = 1;
+    }
+  }
+  double selection_start = omp_get_wtime();
+  int selection_model_rejections = 0;
+  if (photometric_selection_en && cross_camera_current_residual_en)
+    throw std::runtime_error("photometric selection cannot budget current-current residuals");
+  for (int stage = (photometric_selection_en ? 2 * patch_pyrimid_level : patch_pyrimid_level) - 1;
+       stage >= 0; --stage)
+  {
+    const bool selection_pass = stage >= patch_pyrimid_level;
+    const int level = selection_pass ? 2 * patch_pyrimid_level - 1 - stage : stage;
     StatesGroup old_state = *state;
     if (inverse_composition_en) buildFixedTemplateGradientCache(level);
     double last_error = std::numeric_limits<double>::max();
@@ -7197,7 +7240,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
       Eigen::MatrixXd usage_effective_h_same;
       Eigen::MatrixXd usage_effective_h_cross;
       Eigen::MatrixXd usage_effective_h_current_cross;
-      directional_update::Result iteration_directional_result;
       double error = 0.0;
       int measurement_count = 0;
       for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
@@ -7218,6 +7260,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           {
             VisualPoint *point = ctx.visual_submap->voxel_points[i];
             if (point == nullptr) continue;
+            if (photometric_selection_en && !selection_pass && !selected[ctx.camera_id][i]) continue;
             const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
             if (!point_c.array().isFinite().all()) continue;
             MD(2, 3) Jdpi;
@@ -7246,7 +7289,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
               avg_pixel_velocity >= online_time_offset_min_pixel_velocity)
           {
             active_time_groups[group_id] = 1;
-            attempted_time_this_frame = true;
+            if (!selection_pass) attempted_time_this_frame = true;
           }
         }
       }
@@ -7256,11 +7299,13 @@ void VIOManager::computeJacobianAndUpdateEKF()
       {
         const bool camera_active = camera_id < static_cast<int>(cameras_.size()) &&
                                    isOnlineExtrinsicEnabledForCamera(camera_id) &&
-                                   cameras_[camera_id].total_points >= online_extrinsic_min_tracks;
+                                   (photometric_selection_en && !selection_pass
+                                      ? std::count(selected[camera_id].begin(), selected[camera_id].end(), uint8_t{1})
+                                      : cameras_[camera_id].total_points) >= online_extrinsic_min_tracks;
         if (camera_active && allow_extrinsic_rotation) active_extrinsic_rot[camera_id] = 1;
         if (camera_active && allow_extrinsic_translation) active_extrinsic_trans[camera_id] = 1;
         if (active_extrinsic_rot[camera_id] != 0 || active_extrinsic_trans[camera_id] != 0)
-          attempted_extrinsic_this_frame = true;
+          if (!selection_pass) attempted_extrinsic_this_frame = true;
       }
 
       // Enabled calibration states remain uncertain when their mean is frozen.
@@ -7407,6 +7452,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
         {
           VisualPoint *point = ctx.visual_submap->voxel_points[point_index];
           if (point == nullptr) continue;
+          if (photometric_selection_en && !selection_pass && !selected[ctx.camera_id][point_index]) continue;
+          if (selection_pass && selection_candidates.count({ctx.camera_id, point_index}) != 0) continue;
+          if (selection_pass && !selection_pool[ctx.camera_id][point_index]) continue;
           if (point_index < static_cast<int>(ctx.visual_submap->level_active.size()) &&
               (level >= static_cast<int>(ctx.visual_submap->level_active[point_index].size()) ||
                ctx.visual_submap->level_active[point_index][level] == 0))
@@ -7455,12 +7503,15 @@ void VIOManager::computeJacobianAndUpdateEKF()
           Eigen::MatrixXd patch_nuisance = Eigen::MatrixXd::Zero(patch_size_total, 9);
           Eigen::VectorXd patch_residual = Eigen::VectorXd::Zero(patch_size_total);
           Eigen::VectorXd patch_weights = Eigen::VectorXd::Ones(patch_size_total);
+          std::vector<int> selection_patch_indices;
+          if (selection_pass) selection_patch_indices.reserve(patch_size_total);
           double normalized_patch_weight = 1.0;
           auto accumulateObservation = [&](const Eigen::VectorXd &jacobian, double residual, int patch_index) {
             ++vio_linearized_residual_count_;
             const double weight = normalized_patch_weight *
                 (tukey_robust_en ? tukeySqrtWeight(residual, outlier_threshold) : 1.0);
             if (weight < 0.0 || !std::isfinite(weight) || !std::isfinite(residual) || !jacobian.allFinite()) return;
+            if (selection_pass) selection_patch_indices.push_back(patch_index);
             patch_jacobian.row(local_dof) = jacobian.transpose();
             patch_residual[local_dof] = residual;
             patch_weights[local_dof] = weight;
@@ -7841,7 +7892,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           local_hessian = measurement_cov * estimator_covariance::symmetric(weighted_j.transpose() * r_inv_j);
           local_gradient = measurement_cov * r_inv_j.transpose() * weighted_r;
           local_pose_information = local_hessian.topLeftCorner<6, 6>();
-          if (!visual_map_manage_en)
+          if (!visual_map_manage_en && !selection_pass)
           {
             hessian += local_hessian;
             gradient += local_gradient;
@@ -7850,7 +7901,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
             usage_local_dof = local_dof;
           }
           ctx.visual_submap->errors[point_index] = patch_error;
-          if (!visual_map_manage_en)
+          if (!visual_map_manage_en && !selection_pass)
           {
             if (usage_stats_en && usage_reference != nullptr && usage_local_dof > 0)
             {
@@ -7879,7 +7930,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
             continue;
           }
           double nis = std::numeric_limits<double>::quiet_NaN();
-          if (visual_ref_nis_en)
+          if (visual_map_manage_en && visual_ref_nis_en)
           {
             // Raw (pre-robustification) residuals, with actual current-state,
             // reference-pose and landmark Jacobians in residual coordinates.
@@ -7903,6 +7954,32 @@ void VIOManager::computeJacobianAndUpdateEKF()
           const bool nis_pass = !visual_map_manage_en || visual_map_manage_shadow_en || !visual_ref_nis_en ||
                                 (local_dof > 0 && std::isfinite(nis) &&
                                  nis / static_cast<double>(local_dof) <= visual_ref_nis_max_per_dof);
+          if (selection_pass)
+          {
+            // Unvalidated/seed references are still tested above for lifecycle
+            // promotion, but never enter the estimator through this selector.
+            const bool reference_validated = usage_reference->ref_state_ == Feature::RefState::VALIDATED &&
+                !usage_reference->pending_delete_;
+            if (contributes_to_ekf && reference_validated && nis_pass)
+            {
+              Eigen::MatrixXd full_j = Eigen::MatrixXd::Zero(local_dof, full_state_dim);
+              for (int col = 0; col < solve_dim; ++col) full_j.col(solve_to_full[col]) = patch_jacobian.col(col);
+              photometric_selection::Candidate candidate;
+              try
+              {
+                if (buildPhotometricSelectionCandidate(ctx, point_index, level, full_j,
+                        patch_nuisance.rightCols(3), patch_weights, selection_patch_indices, candidate))
+                  selection_candidates[{ctx.camera_id, point_index}] = std::move(candidate);
+                else ++selection_model_rejections;
+              }
+              catch (const std::exception &exception)
+              {
+                if (selection_model_rejections++ == 0)
+                  printf("\033[1;33m[ PHOTO SELECT ] Candidate score rejected: %s\033[0m\n", exception.what());
+              }
+            }
+            continue;
+          }
           if (contributes_to_ekf && nis_pass)
           {
             if (usage_stats_en && usage_reference != nullptr && local_dof > 0)
@@ -7934,6 +8011,57 @@ void VIOManager::computeJacobianAndUpdateEKF()
             error += patch_error;
           }
         }
+      }
+
+      if (selection_pass)
+      {
+        if (stage == patch_pyrimid_level)
+        {
+          std::vector<photometric_selection::Candidate> candidates;
+          candidates.reserve(selection_candidates.size());
+          for (auto &entry : selection_candidates) candidates.push_back(std::move(entry.second));
+          selection_candidates.clear();
+          photometric_selection::Options options;
+          options.patch_budget = photometric_selection_patch_budget;
+          options.pixel_budget = photometric_selection_pixel_budget;
+          options.shared_errors = photometric_selection_shared_errors;
+          try
+          {
+            const auto result = photometric_selection::select(candidates, cov_before_visual_update, options);
+            int cross_references = 0;
+            std::set<int> selected_cameras;
+            std::set<photometric_selection::SourceKey> geometry_sources;
+            for (int index : result.indices)
+            {
+              const auto &candidate = candidates[index];
+              selected[candidate.camera][candidate.slot] = 1;
+              selected_cameras.insert(candidate.camera);
+              const Feature *ref = cameras_[candidate.camera].visual_submap->reference_features[candidate.slot];
+              if (ref->camera_id_ != candidate.camera) ++cross_references;
+              for (const auto &source : candidate.sources)
+                if (std::get<0>(source.first) != 1) geometry_sources.insert(source.first);
+            }
+            // Submap pose_information is potential information used by map
+            // quality management, not the estimator's accepted information.
+            // Preserve it for tested alternatives; usage counters below only
+            // accumulate residuals that actually enter the selected update.
+            printf("\033[1;36m[ PHOTO SELECT ] frame=%d shared=%d candidates=%zu selected=%zu pixels=%d/%d cameras=%zu geometry_sources=%zu cross_refs=%d score_gain=%.6f model_reject_levels=%d prepass_ms=%.3f\033[0m\n",
+                   frame_count, photometric_selection_shared_errors, candidates.size(), result.indices.size(),
+                   result.pixels, photometric_selection_pixel_budget, selected_cameras.size(), geometry_sources.size(),
+                   cross_references, result.pose_logdet_gain, selection_model_rejections,
+                   1000.0 * (omp_get_wtime() - selection_start));
+          }
+          catch (const std::exception &exception)
+          {
+            printf("\033[1;31m[ PHOTO SELECT ] Frame rejected: %s; visual prior retained.\033[0m\n", exception.what());
+            *state = state_before_visual_update;
+            G.setZero();
+            syncCameraExtrinsicsFromState(*state);
+            for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
+            return;
+          }
+        }
+        break;
       }
 
       if (cross_camera_current_residual_en)
@@ -8226,59 +8354,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
           usage_effective_h_current_cross = usage_iter_h_current_cross;
       }
 
-      if (measurement_count > 0 && directional_update_en)
-      {
-        if (!directional_update::filterInformation(
-                fullCovToSolve(iteration_prior_cov), hessian / measurement_cov, gradient / measurement_cov,
-                directional_drop_variance_reduction,
-                directional_full_variance_reduction,
-                iteration_directional_result))
-        {
-          *state = state_before_visual_update;
-          G.setZero();
-          syncCameraExtrinsicsFromState(*state);
-          for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
-          const std::string reason = iteration_directional_result.error.empty()
-              ? "photometric residual covariance must be finite and positive"
-              : iteration_directional_result.error;
-          std::cerr << "[ Directional VIO ] update rejected: " << reason << std::endl;
-          return;
-        }
-        hessian = iteration_directional_result.information * measurement_cov;
-        gradient = iteration_directional_result.information_vector * measurement_cov;
 
-        if (usage_stats_en)
-        {
-          std::string component_error;
-          const bool components_valid =
-              directional_update::filterInformationComponent(
-                  usage_iter_h_all, iteration_directional_result,
-                  usage_effective_h_all, component_error) &&
-              directional_update::filterInformationComponent(
-                  usage_iter_h_same, iteration_directional_result,
-                  usage_effective_h_same, component_error) &&
-              directional_update::filterInformationComponent(
-                  usage_iter_h_cross, iteration_directional_result,
-                  usage_effective_h_cross, component_error) &&
-              (!cross_camera_current_residual_en ||
-               directional_update::filterInformationComponent(
-                   usage_iter_h_current_cross, iteration_directional_result,
-                   usage_effective_h_current_cross, component_error));
-          if (!components_valid)
-          {
-            *state = state_before_visual_update;
-            G.setZero();
-            syncCameraExtrinsicsFromState(*state);
-            for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
-            std::cerr << "[ Directional VIO ] usage-information filtering rejected: "
-                      << component_error << std::endl;
-            return;
-          }
-        }
-      }
-
-      // Calibration regularizers are intentionally excluded from observability
-      // classification and added only after filtering the visual measurements.
+      // Calibration regularizers are excluded from candidate scoring and
+      // added after accumulating the selected visual measurements.
       if (online_extrinsic_active && online_extrinsic_prior_factor_en)
       {
         constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
@@ -8370,7 +8448,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
         usage_final_residuals_same = rollback_usage_final_residuals_same;
         usage_final_residuals_cross = rollback_usage_final_residuals_cross;
         usage_final_residuals_current_cross = rollback_usage_final_residuals_current_cross;
-        final_directional_result = rollback_directional_result;
         final_posterior_covariance = rollback_posterior_covariance;
         syncCameraExtrinsicsFromState(*state);
         break;
@@ -8422,7 +8499,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
       rollback_last_max_rot_update_deg = last_max_rot_update_deg;
       rollback_last_max_trans_update_cm = last_max_trans_update_cm;
       rollback_last_max_time_update_ms = last_max_time_update_ms;
-      rollback_directional_result = final_directional_result;
       rollback_posterior_covariance = final_posterior_covariance;
       estimator_covariance::Update covariance_update;
       std::vector<int> active_update_indices;
@@ -8540,7 +8616,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
           }
         }
       }
-      final_directional_result = iteration_directional_result;
       final_posterior_covariance = state->resetCovariance(covariance_update.covariance, solution);
       *state += solution;
       syncCameraExtrinsicsFromState(*state);
@@ -8575,19 +8650,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
   }
   state->cov = final_posterior_covariance.rows() == state->stateDim()
                    ? final_posterior_covariance : cov_before_visual_update;
-  if (directional_update_en)
-  {
-    state->cov = directional_update::symmetrize(state->cov);
-    if (final_directional_result.valid)
-    {
-      std::cout << "[ Directional VIO ] rho_max="
-                << final_directional_result.variance_reductions.maxCoeff()
-                << " rho_mean=" << final_directional_result.variance_reductions.mean()
-                << " active=" << final_directional_result.active_rank
-                << " full=" << final_directional_result.full_rank
-                << " dim=" << state->stateDim() << std::endl;
-    }
-  }
+
   recordUsagePoseFrameInfo(usage_prior_cov, state->cov, usage_final_h_base,
                            usage_final_h_same, usage_final_h_cross, usage_final_h_current_cross,
                            usage_final_patches_all, usage_final_residuals_all,
@@ -8929,7 +8992,7 @@ std::vector<Feature *> VIOManager::selectManagedReferenceCandidates(const PerCam
   std::vector<Feature *> selected;
   if (point.pending_delete_ || point.state_ == VisualPoint::State::RETIRED) return selected;
   const int requested = std::max(1, max_candidates);
-  if (!visual_map_manage_en || !visual_ref_current_select_en)
+  if (!photometric_selection_en && (!visual_map_manage_en || !visual_ref_current_select_en))
   {
     Feature *legacy = point.referencePatch(ctx.camera_id, cross_camera_reference_en);
     if (legacy != nullptr) selected.push_back(legacy);
@@ -8974,6 +9037,16 @@ std::vector<Feature *> VIOManager::selectManagedReferenceCandidates(const PerCam
   };
   rank(ranked_validated);
   rank(ranked_candidate);
+
+  if (photometric_selection_en)
+  {
+    const int test_slots = !ranked_candidate.empty() && (requested > 1 || ranked_validated.empty()) ? 1 : 0;
+    const int validated_slots = requested - test_slots;
+    for (int i = 0; i < std::min(validated_slots, static_cast<int>(ranked_validated.size())); ++i)
+      selected.push_back(ranked_validated[i].second);
+    if (test_slots != 0) selected.push_back(ranked_candidate.front().second);
+    return selected;
+  }
 
   std::vector<std::pair<double, Feature *>> ranked;
   const double coverage_angle = visual_ref_coverage_angle_deg / kRadiansToDegrees;
@@ -9180,6 +9253,7 @@ void VIOManager::updateManagedObservationEvidence(PerCameraData &ctx)
     const int dof = i < static_cast<int>(ctx.visual_submap->observation_dof.size())
                         ? ctx.visual_submap->observation_dof[i]
                         : patch_size_total;
+    if (photometric_selection_en && dof <= 0) continue;
     const double nis = i < static_cast<int>(ctx.visual_submap->observation_nis.size())
                            ? ctx.visual_submap->observation_nis[i]
                            : std::numeric_limits<double>::quiet_NaN();
@@ -9192,6 +9266,8 @@ void VIOManager::updateManagedObservationEvidence(PerCameraData &ctx)
                                     (zncc_residual_en ||
                                      ctx.visual_submap->errors[i] <= outlier_threshold * patch_size_total);
 
+    const bool add_point_information = !photometric_selection_en ||
+        !photometric_point_tests_[{point, ctx.camera_id}];
     reference->last_test_frame_id_ = ctx.new_frame->id_;
     reference->last_test_camera_id_ = ctx.camera_id;
     reference->last_nis_ = nis;
@@ -9200,14 +9276,19 @@ void VIOManager::updateManagedObservationEvidence(PerCameraData &ctx)
                                 ? normalized_nis
                                 : 0.9 * reference->nis_ema_ + 0.1 * normalized_nis;
     ++reference->independent_test_count_;
-    ++point->independent_test_count_;
-    if (point->state_ == VisualPoint::State::SEED) ++visual_map_manage_stats_.seed_tested;
+    if (photometric_selection_en)
+      photometric_point_tests_[{point, ctx.camera_id}] = photometric_point_tests_[{point, ctx.camera_id}] || accepted;
+    else
+    {
+      ++point->independent_test_count_;
+      if (point->state_ == VisualPoint::State::SEED) ++visual_map_manage_stats_.seed_tested;
+    }
 
     if (accepted)
     {
       reference->consecutive_reject_count_ = 0;
       ++reference->accepted_test_count_;
-      ++point->accepted_test_count_;
+      if (!photometric_selection_en) ++point->accepted_test_count_;
       reference->last_success_frame_id_ = ctx.new_frame->id_;
       point->last_success_frame_ = ctx.new_frame->id_;
       const V3D view = ctx.new_frame->pos() - point->pos_;
@@ -9236,7 +9317,7 @@ void VIOManager::updateManagedObservationEvidence(PerCameraData &ctx)
         reference->mean_pose_information_ +=
             (information - reference->mean_pose_information_) /
             static_cast<double>(reference->accepted_test_count_);
-        point->accumulated_pose_information_ += information;
+        if (add_point_information) point->accumulated_pose_information_ += information;
         Eigen::Matrix<double, 6, 6> regularized = information;
         regularized.diagonal().array() += 1.0e-9;
         const double determinant = regularized.determinant();
@@ -9248,7 +9329,7 @@ void VIOManager::updateManagedObservationEvidence(PerCameraData &ctx)
     {
       ++reference->consecutive_reject_count_;
       ++reference->rejected_test_count_;
-      ++point->rejected_test_count_;
+      if (!photometric_selection_en) ++point->rejected_test_count_;
     }
 
     if (visual_ref_lifecycle_en && reference->ref_state_ == Feature::RefState::CANDIDATE &&
@@ -9272,75 +9353,82 @@ void VIOManager::updateManagedObservationEvidence(PerCameraData &ctx)
       queueReferenceRetirement(*point, *reference);
     }
 
-    if (visual_point_seed_validation_en && point->state_ == VisualPoint::State::SEED &&
-        point->independent_test_count_ >= visual_point_seed_min_tests)
+    if (!photometric_selection_en) finalizeManagedPointEvidence(point);
+  }
+}
+
+void VIOManager::finalizeManagedPointEvidence(VisualPoint *point)
+{
+  if (point == nullptr || point->pending_delete_) return;
+  if (visual_point_seed_validation_en && point->state_ == VisualPoint::State::SEED &&
+      point->independent_test_count_ >= visual_point_seed_min_tests)
+  {
+    const double ratio = static_cast<double>(point->accepted_test_count_) /
+                         std::max(1, point->independent_test_count_);
+    if (ratio >= visual_point_seed_min_ratio)
     {
-      const double ratio = static_cast<double>(point->accepted_test_count_) /
-                           std::max(1, point->independent_test_count_);
-      if (ratio >= visual_point_seed_min_ratio)
+      point->state_ = VisualPoint::State::CONFIRMED;
+      ++visual_map_manage_stats_.seed_confirmed;
+      if (point->challenger_of_ != nullptr && !point->challenger_of_->pending_delete_)
       {
-        point->state_ = VisualPoint::State::CONFIRMED;
-        ++visual_map_manage_stats_.seed_confirmed;
-        if (point->challenger_of_ != nullptr && !point->challenger_of_->pending_delete_)
+        VisualPoint *existing = point->challenger_of_;
+        if (existing->state_ == VisualPoint::State::SUSPECT)
         {
-          VisualPoint *existing = point->challenger_of_;
-          if (existing->state_ == VisualPoint::State::SUSPECT)
-          {
-            queuePointRetirement(*existing);
-          }
-          else if (visual_point_information_prune_en)
-          {
-            Eigen::Matrix<double, 6, 6> old_info =
-                existing->accumulated_pose_information_ / std::max(1, existing->accepted_test_count_);
-            Eigen::Matrix<double, 6, 6> new_info =
-                point->accumulated_pose_information_ / std::max(1, point->accepted_test_count_);
-            Eigen::Matrix<double, 6, 6> all_info = old_info + new_info;
-            old_info.diagonal().array() += 1.0e-9;
-            new_info.diagonal().array() += 1.0e-9;
-            all_info.diagonal().array() += 1.0e-9;
-            auto retention = [&](const Eigen::Matrix<double, 6, 6> &subset) {
-              const Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(subset, all_info);
-              return solver.info() == Eigen::Success ? solver.eigenvalues().minCoeff() : 0.0;
-            };
-            const double old_retention = retention(old_info);
-            const double new_retention = retention(new_info);
-            if (new_retention >= visual_point_information_retain &&
-                new_retention > old_retention)
-              queuePointRetirement(*existing);
-            else if (old_retention >= visual_point_information_retain)
-              queuePointRetirement(*point);
-          }
-          point->challenger_of_ = nullptr;
+          queuePointRetirement(*existing);
         }
-      }
-      else if (point->rejected_test_count_ >= visual_point_suspect_reject_count)
-      {
-        point->state_ = VisualPoint::State::SUSPECT;
+        else if (visual_point_information_prune_en)
+        {
+          Eigen::Matrix<double, 6, 6> old_info =
+              existing->accumulated_pose_information_ / std::max(1, existing->accepted_test_count_);
+          Eigen::Matrix<double, 6, 6> new_info =
+              point->accumulated_pose_information_ / std::max(1, point->accepted_test_count_);
+          Eigen::Matrix<double, 6, 6> all_info = old_info + new_info;
+          old_info.diagonal().array() += 1.0e-9;
+          new_info.diagonal().array() += 1.0e-9;
+          all_info.diagonal().array() += 1.0e-9;
+          auto retention = [&](const Eigen::Matrix<double, 6, 6> &subset) {
+            const Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(subset, all_info);
+            return solver.info() == Eigen::Success ? solver.eigenvalues().minCoeff() : 0.0;
+          };
+          const double old_retention = retention(old_info);
+          const double new_retention = retention(new_info);
+          if (new_retention >= visual_point_information_retain &&
+              new_retention > old_retention)
+            queuePointRetirement(*existing);
+          else if (old_retention >= visual_point_information_retain)
+            queuePointRetirement(*point);
+        }
+        point->challenger_of_ = nullptr;
       }
     }
-    else if (visual_ref_lifecycle_en && point->state_ == VisualPoint::State::CONFIRMED &&
-             point->rejected_test_count_ >= visual_point_suspect_reject_count &&
-             point->accepted_test_count_ * 2 < point->rejected_test_count_)
+    else if (point->rejected_test_count_ >= visual_point_suspect_reject_count)
     {
       point->state_ = VisualPoint::State::SUSPECT;
     }
-    bool has_usable_reference = point->hasUsableReference(0, true, false);
-    if (visual_map_manage_shadow_en && has_usable_reference)
+  }
+  else if (visual_ref_lifecycle_en && point->state_ == VisualPoint::State::CONFIRMED &&
+           point->rejected_test_count_ >= visual_point_suspect_reject_count &&
+           point->accepted_test_count_ * 2 < point->rejected_test_count_)
+  {
+    point->state_ = VisualPoint::State::SUSPECT;
+  }
+  bool has_usable_reference = point->hasUsableReference(0, true, false);
+  if (visual_map_manage_shadow_en && has_usable_reference)
+  {
+    has_usable_reference = false;
+    for (Feature *feature : point->obs_)
     {
-      has_usable_reference = false;
-      for (Feature *feature : point->obs_)
+      if (feature != nullptr && feature->ref_state_ == Feature::RefState::VALIDATED &&
+          !feature->pending_delete_ && shadow_retired_ref_suggestions_.count(feature->ref_id_) == 0)
       {
-        if (feature != nullptr && feature->ref_state_ == Feature::RefState::VALIDATED &&
-            !feature->pending_delete_ && shadow_retired_ref_suggestions_.count(feature->ref_id_) == 0)
-        {
-          has_usable_reference = true;
-          break;
-        }
+        has_usable_reference = true;
+        break;
       }
     }
-    if (point->state_ == VisualPoint::State::SUSPECT && !has_usable_reference)
-      queuePointRetirement(*point);
   }
+  if (point->state_ == VisualPoint::State::SUSPECT && !has_usable_reference)
+    queuePointRetirement(*point);
+
 }
 
 void VIOManager::recordManagedReferenceRejection(VisualPoint &point, Feature &reference,
@@ -9357,9 +9445,13 @@ void VIOManager::recordManagedReferenceRejection(VisualPoint &point, Feature &re
   ++reference.independent_test_count_;
   ++reference.rejected_test_count_;
   ++reference.consecutive_reject_count_;
-  ++point.independent_test_count_;
-  ++point.rejected_test_count_;
-  if (point.state_ == VisualPoint::State::SEED) ++visual_map_manage_stats_.seed_tested;
+  if (photometric_selection_en) photometric_point_tests_.emplace(std::make_pair(&point, camera_id), false);
+  else
+  {
+    ++point.independent_test_count_;
+    ++point.rejected_test_count_;
+    if (point.state_ == VisualPoint::State::SEED) ++visual_map_manage_stats_.seed_tested;
+  }
   if (visual_ref_lifecycle_en && reference.ref_state_ == Feature::RefState::CANDIDATE &&
       reference.independent_test_count_ >= visual_ref_validate_min_tests &&
       reference.rejected_test_count_ >= visual_ref_retire_reject_count)
@@ -9367,7 +9459,7 @@ void VIOManager::recordManagedReferenceRejection(VisualPoint &point, Feature &re
   else if (visual_ref_lifecycle_en && reference.ref_state_ == Feature::RefState::VALIDATED &&
            reference.consecutive_reject_count_ >= visual_ref_retire_reject_count)
     queueReferenceRetirement(point, reference);
-  if (visual_ref_lifecycle_en && point.rejected_test_count_ >= visual_point_suspect_reject_count &&
+  if (!photometric_selection_en && visual_ref_lifecycle_en && point.rejected_test_count_ >= visual_point_suspect_reject_count &&
       point.accepted_test_count_ * 2 < point.rejected_test_count_)
     point.state_ = VisualPoint::State::SUSPECT;
 }
@@ -9661,6 +9753,24 @@ void VIOManager::commitPendingNewPoints(
         point = new VisualPoint(pending.pt_var.point_w);
         point->ensureCameraCount(numCameras());
         point->covariance_ = pending.pt_var.var;
+        if (pending.source_type == SOURCE_PG && pending.pt_var.scan_uncertainty)
+        {
+          point->local_geometry_covariance_ = pending.pt_var.var_nostate;
+          point->local_geometry_covariance_valid_ = true;
+        }
+        else if (pending.source_type == SOURCE_RAYCAST_PLANE)
+        {
+          int64_t vx = 0, vy = 0, vz = 0;
+          const VoxelPlane *birth_plane = nullptr;
+          if (associateVisualPointSurface(point->pos_, plane_map, vx, vy, vz, birth_plane) &&
+              birth_plane->local_plane_var_valid_ && (point->pos_ - birth_plane->center_).norm() < 1.e-6)
+          {
+            point->local_geometry_covariance_ = birth_plane->local_plane_var_.bottomRightCorner<3, 3>();
+            point->local_geometry_covariance_valid_ = true;
+            point->local_geometry_plane_id_ = birth_plane->id_;
+            point->local_geometry_plane_revision_ = birth_plane->revision_;
+          }
+        }
         point->is_normal_initialized_ = true;
         const V3D dir = pending.T_f_w * pending.pt_var.point_w;
         const V3D normal_c = pending.T_f_w.rotationMatrix() * pending.pt_var.normal;
@@ -11758,6 +11868,7 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   if (static_cast<int>(mf.images.size()) != numCameras())
     throw std::runtime_error("MultiCameraFrame image count does not match VIOManager camera count");
 
+  photometric_point_tests_.clear();
   const double frame_start = omp_get_wtime();
   // printf("[ VIO Debug ] processMultiCameraFrame begin frame=%d cameras=%d pg=%zu feat_map=%zu plane_map=%zu virtual=%d cross_ref=%d normal=%d inverse=%d raycast=%d\n",
   //        mf.frame_id, numCameras(), pg.size(), feat_map.size(), plane_map.size(), virtual_fisheye_patch_en ? 1 : 0,
@@ -11804,7 +11915,7 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   for (PerCameraData &ctx : cameras_)
   {
     int raw_score_point_quota = -1;
-    if (virtual_raw_score_select_en)
+    if (virtual_raw_score_select_en && !photometric_selection_en)
     {
       const int camera_id = std::max(0, ctx.camera_id);
       const int cameras_left = std::max(0, numCameras() - camera_id - 1);
@@ -11817,7 +11928,7 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     // printf("[ VIO Debug ] retrieve begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
     // fflush(stdout);
     retrieveFromVisualSparseMap(ctx, ctx.new_frame->img_, pg, plane_map, raw_score_point_quota);
-    if (virtual_raw_score_select_en)
+    if (virtual_raw_score_select_en && !photometric_selection_en)
       raw_score_remaining_total = std::max(0, raw_score_remaining_total - ctx.total_points);
     // printf("[ VIO Debug ] retrieve end camera_id=%d frame=%d total_points=%d\n",
     //        ctx.camera_id, mf.frame_id, ctx.total_points);
@@ -11859,7 +11970,25 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   const double ekf_end = omp_get_wtime();
 
   if (visual_map_manage_en)
+  {
     for (PerCameraData &ctx : cameras_) updateManagedObservationEvidence(ctx);
+    if (photometric_selection_en)
+    {
+      std::set<VisualPoint *> tested_points;
+      for (const auto &test : photometric_point_tests_)
+      {
+        VisualPoint *point = test.first.first;
+        if (point == nullptr || point->pending_delete_) continue;
+        ++point->independent_test_count_;
+        if (test.second) ++point->accepted_test_count_;
+        else ++point->rejected_test_count_;
+        if (point->state_ == VisualPoint::State::SEED) ++visual_map_manage_stats_.seed_tested;
+        tested_points.insert(point);
+      }
+      for (VisualPoint *point : tested_points) finalizeManagedPointEvidence(point);
+      photometric_point_tests_.clear();
+    }
+  }
 
   if (visual_ref_post_ekf_build_en)
   {

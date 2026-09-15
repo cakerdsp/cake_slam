@@ -123,6 +123,7 @@ target_link_libraries(vikit_ros_vendor
 add_library(utils src/utils.cpp)
 add_library(vio_multi_cam
   src/vio_multi_cam.cpp
+  src/photometric_selection.cpp
   src/frame_multi_cam.cpp
   src/visual_point_multi_cam.cpp
 )
