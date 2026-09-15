@@ -798,42 +798,6 @@ void VIOManager::deactivateInactiveCalibrationBlocks(
   }
 }
 
-void VIOManager::restoreInactiveCalibrationCovariance(
-    const Eigen::MatrixXd &prior_cov,
-    const std::vector<uint8_t> &active_extrinsic_rot,
-    const std::vector<uint8_t> &active_extrinsic_trans,
-    const std::vector<uint8_t> &active_time_groups) const
-{
-  if (state == nullptr || prior_cov.rows() != state->cov.rows() || prior_cov.cols() != state->cov.cols()) return;
-  auto restoreIndex = [&](int index) {
-    state->cov.row(index) = prior_cov.row(index);
-    state->cov.col(index) = prior_cov.col(index);
-  };
-  for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
-  {
-    const bool rot_active = camera_id < static_cast<int>(active_extrinsic_rot.size()) &&
-                            active_extrinsic_rot[camera_id] != 0;
-    const bool trans_active = camera_id < static_cast<int>(active_extrinsic_trans.size()) &&
-                              active_extrinsic_trans[camera_id] != 0;
-    if (!rot_active)
-    {
-      const int ridx = state->extrinsicRotIndex(camera_id);
-      for (int k = 0; k < 3; ++k) restoreIndex(ridx + k);
-    }
-    if (!trans_active)
-    {
-      const int tidx = state->extrinsicTransIndex(camera_id);
-      for (int k = 0; k < 3; ++k) restoreIndex(tidx + k);
-    }
-  }
-  for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
-  {
-    const bool active = group_id < static_cast<int>(active_time_groups.size()) &&
-                        active_time_groups[group_id] != 0;
-    if (!active) restoreIndex(state->timeOffsetIndex(group_id));
-  }
-}
-
 bool VIOManager::refreshReferenceCalibration(Feature &feature)
 {
   if (feature.camera_id_ < 0 || feature.camera_id_ >= numCameras()) return false;
@@ -7063,10 +7027,51 @@ void VIOManager::buildCurrentCrossCameraPairs()
     if (pair.accepted) pair.hessian_weight = 1.0 / std::max(1, accepted_pair_count[pair.point]);
 }
 
+bool VIOManager::referenceUncertaintyJacobian(
+    const Feature &reference, const VisualPoint &point,
+    const std::vector<float> &warped_patch, const Matrix2d &affine,
+    int level, int scale, Eigen::MatrixXd &jacobian) const
+{
+  if (reference.camera_id_ < 0 || reference.camera_id_ >= numCameras() ||
+      patch_size < 2 || level < 0 || scale <= 0 || !affine.allFinite() ||
+      static_cast<int>(warped_patch.size()) < (level + 1) * patch_size_total)
+    return false;
+  const PerCameraData &ref_ctx = cameras_[reference.camera_id_];
+  const SE3d &pose = reference.virtual_patch_valid_ ? reference.T_v_w_ : reference.T_f_w_;
+  const V3D p_ref = pose * point.pos_;
+  MD(2, 3) projection;
+  if (reference.virtual_patch_valid_)
+  {
+    if (p_ref.z() <= virtual_min_z) return false;
+    computeVirtualProjectionJacobian(p_ref, projection);
+  }
+  else if (!computeCameraModelProjectionJacobianForContext(ref_ctx, p_ref, projection)) return false;
+  const M3D r_rw = pose.rotationMatrix();
+  const V3D p_i = reference.Rwi_ref_.transpose() * (point.pos_ - reference.Pwi_ref_);
+  jacobian = Eigen::MatrixXd::Zero(patch_size_total, 9);
+  // The direct frontend freezes the local affine warp for this solve. Recover
+  // reference-image gradients from that warped template in the same local model.
+  for (int index = 0; index < patch_size_total; ++index)
+  {
+    const int x = index % patch_size, y = index / patch_size;
+    const int xl = std::max(0, x - 1), xr = std::min(patch_size - 1, x + 1);
+    const int yt = std::max(0, y - 1), yb = std::min(patch_size - 1, y + 1);
+    const int base = level * patch_size_total;
+    MD(1, 2) gradient;
+    gradient << (warped_patch[base + y * patch_size + xr] - warped_patch[base + y * patch_size + xl]) / (xr - xl),
+                (warped_patch[base + yb * patch_size + x] - warped_patch[base + yt * patch_size + x]) / (yb - yt);
+    const MD(1, 3) photo = (gradient / scale) * affine * projection;
+    jacobian.row(index) = estimator_covariance::referencePhotometricJacobian(
+        photo, r_rw, reference.Rwi_ref_, p_i);
+  }
+  return jacobian.allFinite();
+}
+
 void VIOManager::computeJacobianAndUpdateEKF()
 {
   compute_jacobian_time = update_ekf_time = 0.0;
   vio_linearized_residual_count_ = 0;
+  int invalid_patch_covariances = 0;
   int total_observations = 0;
   for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
   if (total_observations == 0) return;
@@ -7114,8 +7119,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
   Eigen::MatrixXd rollback_G = G;
   directional_update::Result final_directional_result;
   directional_update::Result rollback_directional_result;
-  Eigen::MatrixXd final_directional_posterior_covariance;
-  Eigen::MatrixXd rollback_directional_posterior_covariance;
+  Eigen::MatrixXd final_posterior_covariance;
+  Eigen::MatrixXd rollback_posterior_covariance;
   std::vector<uint8_t> rollback_active_extrinsic_rot = final_active_extrinsic_rot;
   std::vector<uint8_t> rollback_active_extrinsic_trans = final_active_extrinsic_trans;
   std::vector<uint8_t> rollback_active_time_groups = final_active_time_groups;
@@ -7165,6 +7170,17 @@ void VIOManager::computeJacobianAndUpdateEKF()
     {
       const double linearize_start = omp_get_wtime();
       const int full_state_dim = state->stateDim();
+      const Eigen::MatrixXd iteration_prior_cov = state_before_visual_update.covarianceAt(*state);
+      if (!iteration_prior_cov.allFinite() ||
+          Eigen::LLT<Eigen::MatrixXd>(iteration_prior_cov).info() != Eigen::Success)
+      {
+        printf("\033[1;31m[ COV VIO ] Full prior covariance is invalid; update rejected.\033[0m\n");
+        *state = state_before_visual_update;
+        G.setZero();
+        syncCameraExtrinsicsFromState(*state);
+        for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
+        return;
+      }
       Eigen::MatrixXd usage_iter_h_all;
       Eigen::MatrixXd usage_iter_h_same;
       Eigen::MatrixXd usage_iter_h_cross;
@@ -7247,6 +7263,20 @@ void VIOManager::computeJacobianAndUpdateEKF()
           attempted_extrinsic_this_frame = true;
       }
 
+      // Enabled calibration states remain uncertain when their mean is frozen.
+      std::vector<uint8_t> linearized_extrinsic_rot(state->num_cameras, 0);
+      std::vector<uint8_t> linearized_extrinsic_trans(state->num_cameras, 0);
+      std::vector<uint8_t> linearized_time_groups(state->num_time_offset_groups, 0);
+      for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+      {
+        linearized_extrinsic_rot[camera_id] = online_extrinsic_en && online_extrinsic_rot_en &&
+                                             isOnlineExtrinsicEnabledForCamera(camera_id);
+        linearized_extrinsic_trans[camera_id] = online_extrinsic_en && online_extrinsic_trans_en &&
+                                               isOnlineExtrinsicEnabledForCamera(camera_id);
+      }
+      for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+        linearized_time_groups[group_id] = online_time_offset_en && isOnlineTimeOffsetEnabledForGroup(group_id);
+
       std::vector<int> solve_to_full;
       std::vector<int> full_to_solve(full_state_dim, -1);
       auto addSolveIndex = [&](int full_index) {
@@ -7266,13 +7296,13 @@ void VIOManager::computeJacobianAndUpdateEKF()
         for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
           addSolveIndex(state->exposureIndex(camera_id));
       for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
-        if (group_id < static_cast<int>(active_time_groups.size()) && active_time_groups[group_id] != 0)
+        if (group_id < static_cast<int>(linearized_time_groups.size()) && linearized_time_groups[group_id] != 0)
           addSolveIndex(state->timeOffsetIndex(group_id));
       for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
       {
-        if (camera_id < static_cast<int>(active_extrinsic_rot.size()) && active_extrinsic_rot[camera_id] != 0)
+        if (camera_id < static_cast<int>(linearized_extrinsic_rot.size()) && linearized_extrinsic_rot[camera_id] != 0)
           addSolveBlock(state->extrinsicRotIndex(camera_id), 3);
-        if (camera_id < static_cast<int>(active_extrinsic_trans.size()) && active_extrinsic_trans[camera_id] != 0)
+        if (camera_id < static_cast<int>(linearized_extrinsic_trans.size()) && linearized_extrinsic_trans[camera_id] != 0)
           addSolveBlock(state->extrinsicTransIndex(camera_id), 3);
       }
       const int solve_dim = static_cast<int>(solve_to_full.size());
@@ -7289,7 +7319,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
       };
       struct SparseResidualJacobian
       {
-        enum : int { kMaxEntries = 24 };
+        enum : int { kMaxEntries = 32 };
         std::array<int, kMaxEntries> index = {};
         std::array<double, kMaxEntries> value = {};
         int size = 0;
@@ -7370,7 +7400,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
         const V3D Pwi = ctx.Pwi;
         const bool estimate_extrinsic =
             ctx.camera_id >= 0 && ctx.camera_id < state->num_cameras &&
-            (active_extrinsic_rot[ctx.camera_id] != 0 || active_extrinsic_trans[ctx.camera_id] != 0);
+            (linearized_extrinsic_rot[ctx.camera_id] != 0 || linearized_extrinsic_trans[ctx.camera_id] != 0);
         const double current_exposure = state->inv_expo_time[ctx.camera_id];
 
         for (int point_index = 0; point_index < ctx.total_points; ++point_index)
@@ -7384,8 +7414,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
           const int group_id = ctx.time_offset_group;
           const bool estimate_time_offset =
               group_id >= 0 && group_id < state->num_time_offset_groups &&
-              group_id < static_cast<int>(active_time_groups.size()) &&
-              active_time_groups[group_id] != 0;
+              group_id < static_cast<int>(linearized_time_groups.size()) &&
+              linearized_time_groups[group_id] != 0;
           V3D point_i_for_time = V3D::Zero();
           V3D dpc_dtd = V3D::Zero();
           if (estimate_time_offset || estimate_extrinsic)
@@ -7408,115 +7438,45 @@ void VIOManager::computeJacobianAndUpdateEKF()
           const bool contributes_to_ekf = point_index >= static_cast<int>(ctx.visual_submap->contributes_to_ekf.size()) ||
                                           ctx.visual_submap->contributes_to_ekf[point_index] != 0;
           Eigen::Matrix<double, 6, 6> local_pose_information = Eigen::Matrix<double, 6, 6>::Zero();
-          Eigen::MatrixXd local_hessian;
-          Eigen::VectorXd local_gradient;
+          Eigen::MatrixXd local_hessian = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
+          Eigen::VectorXd local_gradient = Eigen::VectorXd::Zero(solve_dim);
           Eigen::MatrixXd usage_local_hessian;
           int usage_local_dof = 0;
-          if (visual_map_manage_en)
-          {
-            local_hessian = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
-            local_gradient = Eigen::VectorXd::Zero(solve_dim);
-          }
-          else if (usage_stats_en)
-          {
-            usage_local_hessian = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
-          }
-          double local_squared_error = 0.0;
           int local_dof = 0;
-          auto accumulateObservation = [&](const Eigen::VectorXd &raw_jacobian, double raw_residual) {
+          Feature *usage_reference = point_index < static_cast<int>(ctx.visual_submap->reference_features.size())
+                                         ? ctx.visual_submap->reference_features[point_index] : nullptr;
+          if (usage_reference == nullptr || point_index >= static_cast<int>(ctx.visual_submap->warp_affines.size())) continue;
+          Eigen::MatrixXd reference_noise_jacobian;
+          if (!referenceUncertaintyJacobian(*usage_reference, *point, reference_patch,
+                                             ctx.visual_submap->warp_affines[point_index], level, scale,
+                                             reference_noise_jacobian)) continue;
+          if (!zncc_residual_en) reference_noise_jacobian *= reference_exposure;
+          Eigen::MatrixXd patch_jacobian = Eigen::MatrixXd::Zero(patch_size_total, solve_dim);
+          Eigen::MatrixXd patch_nuisance = Eigen::MatrixXd::Zero(patch_size_total, 9);
+          Eigen::VectorXd patch_residual = Eigen::VectorXd::Zero(patch_size_total);
+          Eigen::VectorXd patch_weights = Eigen::VectorXd::Ones(patch_size_total);
+          double normalized_patch_weight = 1.0;
+          auto accumulateObservation = [&](const Eigen::VectorXd &jacobian, double residual, int patch_index) {
             ++vio_linearized_residual_count_;
-            const double sqrt_robust_weight =
-                tukey_robust_en ? tukeySqrtWeight(raw_residual, outlier_threshold) : 1.0;
-            const Eigen::VectorXd jacobian = sqrt_robust_weight * raw_jacobian;
-            const double residual = sqrt_robust_weight * raw_residual;
-            if (visual_map_manage_en)
-            {
-              if (iteration == 0 && jacobian.size() >= 6)
-              {
-                const Eigen::Matrix<double, 6, 1> pose_jacobian = jacobian.head<6>();
-                local_pose_information.noalias() += pose_jacobian * pose_jacobian.transpose();
-              }
-              local_squared_error += residual * residual;
-              ++local_dof;
-            }
-            if (visual_map_manage_en)
-            {
-              local_hessian.noalias() += jacobian * jacobian.transpose();
-              local_gradient.noalias() += jacobian * residual;
-            }
-            else
-            {
-              hessian.noalias() += jacobian * jacobian.transpose();
-              gradient.noalias() += jacobian * residual;
-              ++measurement_count;
-              if (usage_stats_en)
-              {
-                usage_local_hessian.noalias() += jacobian * jacobian.transpose();
-                ++usage_local_dof;
-              }
-            }
-            patch_error += residual * residual;
+            const double weight = normalized_patch_weight *
+                (tukey_robust_en ? tukeySqrtWeight(residual, outlier_threshold) : 1.0);
+            if (weight < 0.0 || !std::isfinite(weight) || !std::isfinite(residual) || !jacobian.allFinite()) return;
+            patch_jacobian.row(local_dof) = jacobian.transpose();
+            patch_residual[local_dof] = residual;
+            patch_weights[local_dof] = weight;
+            patch_nuisance.row(local_dof) = reference_noise_jacobian.row(patch_index);
+            // Landmark perturbations move its current projection oppositely to
+            // a world-frame camera translation. The reference part is already
+            // expressed in world coordinates by referenceUncertaintyJacobian.
+            patch_nuisance.block<1, 3>(local_dof, 6) -= jacobian.segment<3>(3).transpose();
+            patch_error += weight * weight * residual * residual;
+            ++local_dof;
           };
           auto accumulateSparseObservation =
-              [&](const SparseResidualJacobian &raw_jacobian, double raw_residual) {
-            ++vio_linearized_residual_count_;
-            const double sqrt_robust_weight =
-                tukey_robust_en ? tukeySqrtWeight(raw_residual, outlier_threshold) : 1.0;
-            const double residual = sqrt_robust_weight * raw_residual;
-            if (visual_map_manage_en)
-            {
-              if (iteration == 0)
-              {
-                for (int r = 0; r < raw_jacobian.size; ++r)
-                {
-                  const int row = raw_jacobian.index[r];
-                  if (row < 0 || row >= 6) continue;
-                  const double row_value = sqrt_robust_weight * raw_jacobian.value[r];
-                  for (int c = 0; c < raw_jacobian.size; ++c)
-                  {
-                    const int col = raw_jacobian.index[c];
-                    if (col < 0 || col >= 6) continue;
-                    local_pose_information(row, col) +=
-                        row_value * sqrt_robust_weight * raw_jacobian.value[c];
-                  }
-                }
-              }
-              local_squared_error += residual * residual;
-              ++local_dof;
-            }
-            Eigen::MatrixXd &target_hessian = visual_map_manage_en ? local_hessian : hessian;
-            Eigen::VectorXd &target_gradient = visual_map_manage_en ? local_gradient : gradient;
-            for (int r = 0; r < raw_jacobian.size; ++r)
-            {
-              const int row = raw_jacobian.index[r];
-              const double row_value = sqrt_robust_weight * raw_jacobian.value[r];
-              target_gradient[row] += row_value * residual;
-              for (int c = 0; c < raw_jacobian.size; ++c)
-              {
-                const int col = raw_jacobian.index[c];
-                target_hessian(row, col) += row_value * sqrt_robust_weight * raw_jacobian.value[c];
-              }
-            }
-            if (!visual_map_manage_en)
-            {
-              ++measurement_count;
-              if (usage_stats_en)
-              {
-                for (int r = 0; r < raw_jacobian.size; ++r)
-                {
-                  const int row = raw_jacobian.index[r];
-                  const double row_value = sqrt_robust_weight * raw_jacobian.value[r];
-                  for (int c = 0; c < raw_jacobian.size; ++c)
-                  {
-                    const int col = raw_jacobian.index[c];
-                    usage_local_hessian(row, col) +=
-                        row_value * sqrt_robust_weight * raw_jacobian.value[c];
-                  }
-                }
-                ++usage_local_dof;
-              }
-            }
-            patch_error += residual * residual;
+              [&](const SparseResidualJacobian &sparse, double residual, int patch_index) {
+            Eigen::VectorXd jacobian;
+            sparseJacobianToDense(sparse, jacobian);
+            accumulateObservation(jacobian, residual, patch_index);
           };
           auto accumulateNormalizedReferencePatch =
               [&](const std::vector<double> &current_values,
@@ -7524,19 +7484,23 @@ void VIOManager::computeJacobianAndUpdateEKF()
             Eigen::VectorXd normalized_current;
             Eigen::MatrixXd normalized_current_jacobian;
             Eigen::VectorXd normalized_reference;
+            Eigen::MatrixXd normalized_reference_jacobian;
+            std::vector<double> reference_values(patch_size_total);
+            for (int k = 0; k < patch_size_total; ++k)
+              reference_values[k] = reference_patch[patch_size_total * level + k];
             if (!normalizePatchWithJacobian(current_values, raw_current_jacobian, zncc_min_std,
                                             normalized_current, normalized_current_jacobian) ||
-                !normalizePatchValues(reference_patch.data() + patch_size_total * level,
-                                      patch_size_total, zncc_min_std, normalized_reference))
+                !normalizePatchWithJacobian(reference_values, reference_noise_jacobian, zncc_min_std,
+                                            normalized_reference, normalized_reference_jacobian))
               return false;
             Eigen::VectorXd residual = normalized_current - normalized_reference;
             const double sqrt_robust_weight =
                 normalizedPatchRobustSqrtWeight(residual, zncc_robust_en && !tukey_robust_en,
                                                 zncc_huber_delta);
-            residual *= sqrt_robust_weight;
-            normalized_current_jacobian *= sqrt_robust_weight;
+            normalized_patch_weight = sqrt_robust_weight;
+            reference_noise_jacobian = normalized_reference_jacobian;
             for (int row = 0; row < patch_size_total; ++row)
-              accumulateObservation(normalized_current_jacobian.row(row).transpose(), residual[row]);
+              accumulateObservation(normalized_current_jacobian.row(row).transpose(), residual[row], row);
             return true;
           };
           auto addMotionTimeJacobian = [&](Eigen::VectorXd &jacobian, const MD(1, 3) &J_photo_center) {
@@ -7556,9 +7520,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                      (J_photo_center * dpc_dtd)(0, 0));
             }
           };
-          Feature *usage_reference = point_index < static_cast<int>(ctx.visual_submap->reference_features.size())
-                                         ? ctx.visual_submap->reference_features[point_index]
-                                         : nullptr;
           V2D usage_current_px_for_stats = usage_reference != nullptr ? usage_reference->px_ : V2D::Zero();
           Matrix2d usage_affine_for_stats = Matrix2d::Zero();
           bool usage_level_valid = false;
@@ -7627,14 +7588,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   addSparseJacobianValue(jacobian, state->exposureIndex(ctx.camera_id), current_value);
                 if (estimate_extrinsic)
                 {
-                  if (active_extrinsic_rot[ctx.camera_id] != 0)
+                  if (linearized_extrinsic_rot[ctx.camera_id] != 0)
                     addSparseJacobianSegment(jacobian, state->extrinsicRotIndex(ctx.camera_id),
                                              (J_photo_center * Jpc_dRcl).transpose());
-                  if (active_extrinsic_trans[ctx.camera_id] != 0)
+                  if (linearized_extrinsic_trans[ctx.camera_id] != 0)
                     addSparseJacobianSegment(jacobian, state->extrinsicTransIndex(ctx.camera_id),
                                              J_photo_center.transpose());
                 }
-                accumulateSparseObservation(jacobian, residual);
+                accumulateSparseObservation(jacobian, residual, patch_index);
               }
             }
             else
@@ -7708,10 +7669,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   addSparseJacobianValue(jacobian, state->exposureIndex(ctx.camera_id), current_value);
                 if (estimate_extrinsic)
                 {
-                  if (active_extrinsic_rot[ctx.camera_id] != 0)
+                  if (linearized_extrinsic_rot[ctx.camera_id] != 0)
                     addSparseJacobianSegment(jacobian, state->extrinsicRotIndex(ctx.camera_id),
                                              (Jimg_Jpi_R * Jpc_dRcl).transpose());
-                  if (active_extrinsic_trans[ctx.camera_id] != 0)
+                  if (linearized_extrinsic_trans[ctx.camera_id] != 0)
                     addSparseJacobianSegment(jacobian, state->extrinsicTransIndex(ctx.camera_id),
                                              Jimg_Jpi_R.transpose());
                 }
@@ -7725,7 +7686,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 {
                   const double residual = current_exposure * current_value -
                                           reference_exposure * reference_patch[patch_size_total * level + patch_index];
-                  accumulateSparseObservation(jacobian, residual);
+                  accumulateSparseObservation(jacobian, residual, patch_index);
                 }
               }
               if (zncc_residual_en &&
@@ -7817,10 +7778,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   addSparseJacobianValue(jacobian, state->exposureIndex(ctx.camera_id), current_value);
                 if (estimate_extrinsic)
                 {
-                  if (active_extrinsic_rot[ctx.camera_id] != 0)
+                  if (linearized_extrinsic_rot[ctx.camera_id] != 0)
                     addSparseJacobianSegment(jacobian, state->extrinsicRotIndex(ctx.camera_id),
                                              (Jimg_Jpi * Jpc_dRcl).transpose());
-                  if (active_extrinsic_trans[ctx.camera_id] != 0)
+                  if (linearized_extrinsic_trans[ctx.camera_id] != 0)
                     addSparseJacobianSegment(jacobian, state->extrinsicTransIndex(ctx.camera_id),
                                              Jimg_Jpi.transpose());
                 }
@@ -7834,13 +7795,59 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 {
                   const double residual = current_exposure * current_value -
                                           reference_exposure * reference_patch[patch_size_total * level + patch_index];
-                  accumulateSparseObservation(jacobian, residual);
+                  accumulateSparseObservation(jacobian, residual, patch_index);
                 }
               }
             }
             if (zncc_residual_en &&
                 !accumulateNormalizedReferencePatch(normalized_current_values, normalized_current_jacobian))
               continue;
+          }
+          if (local_dof == 0) continue;
+          patch_jacobian.conservativeResize(local_dof, Eigen::NoChange);
+          patch_nuisance.conservativeResize(local_dof, Eigen::NoChange);
+          patch_residual.conservativeResize(local_dof);
+          patch_weights.conservativeResize(local_dof);
+          Eigen::MatrixXd nuisance_root(local_dof, 9);
+          try
+          {
+            nuisance_root.leftCols(6) = patch_nuisance.leftCols(6) *
+                estimator_covariance::positiveSemidefiniteRoot(usage_reference->birth_pose_cov_);
+            nuisance_root.rightCols(3) = patch_nuisance.rightCols(3) *
+                estimator_covariance::positiveSemidefiniteRoot(point->covariance_);
+          }
+          catch (const std::exception &error)
+          {
+            if (invalid_patch_covariances++ == 0)
+              printf("\033[1;31m[ COV VIO ] Invalid reference/landmark covariance: %s; patch rejected.\033[0m\n", error.what());
+            continue;
+          }
+          // Reference pose and landmark errors can be correlated. Bound their
+          // joint contribution rather than adding them as independent states.
+          const double reference_trace_root = nuisance_root.leftCols(6).norm();
+          const double point_trace_root = nuisance_root.rightCols(3).norm();
+          const double nuisance_trace_root = reference_trace_root + point_trace_root;
+          if (reference_trace_root > 0.0)
+            nuisance_root.leftCols(6) *= std::sqrt(nuisance_trace_root / reference_trace_root);
+          if (point_trace_root > 0.0)
+            nuisance_root.rightCols(3) *= std::sqrt(nuisance_trace_root / point_trace_root);
+          const Eigen::VectorXd noise = Eigen::VectorXd::Constant(local_dof, measurement_cov);
+          const Eigen::MatrixXd weighted_j = patch_weights.asDiagonal() * patch_jacobian;
+          const Eigen::VectorXd weighted_r = patch_weights.asDiagonal() * patch_residual;
+          const Eigen::MatrixXd weighted_u = patch_weights.asDiagonal() * nuisance_root;
+          const Eigen::MatrixXd r_inv_j = estimator_covariance::solveIndependentPlusShared(noise, weighted_u, weighted_j);
+          // Retain the legacy information scaling expected by the solver and
+          // usage counters. The same nuisance model now weights the update.
+          local_hessian = measurement_cov * estimator_covariance::symmetric(weighted_j.transpose() * r_inv_j);
+          local_gradient = measurement_cov * r_inv_j.transpose() * weighted_r;
+          local_pose_information = local_hessian.topLeftCorner<6, 6>();
+          if (!visual_map_manage_en)
+          {
+            hessian += local_hessian;
+            gradient += local_gradient;
+            measurement_count += local_dof;
+            usage_local_hessian = local_hessian;
+            usage_local_dof = local_dof;
           }
           ctx.visual_submap->errors[point_index] = patch_error;
           if (!visual_map_manage_en)
@@ -7872,49 +7879,20 @@ void VIOManager::computeJacobianAndUpdateEKF()
             continue;
           }
           double nis = std::numeric_limits<double>::quiet_NaN();
-          if (!visual_ref_nis_en)
+          if (visual_ref_nis_en)
           {
-            // Photometric acceptance is used below; avoid the full-state NIS solve.
-          }
-          else if (iteration > 0 && point_index < static_cast<int>(ctx.visual_submap->observation_nis.size()))
-            nis = ctx.visual_submap->observation_nis[point_index];
-          else if (local_dof > 0)
-          {
-            const double inv_r = 1.0 / measurement_cov;
-            const Eigen::MatrixXd A = inv_r * local_hessian;
-            const Eigen::VectorXd b = inv_r * local_gradient;
-            const double c = inv_r * local_squared_error;
-            Eigen::MatrixXd P = fullCovToSolve(state->cov);
-            if (usage_reference != nullptr && usage_reference->birth_pose_cov_.array().isFinite().all())
-            {
-              // updateFrameState() already projects the composed camera rotation to SO(3)
-              // when it creates T_f_w_. Reuse that valid pose instead of asking Sophus
-              // to construct an SE3 directly from the numerically approximate ctx.Rcw.
-              const SE3d &T_cur_w = ctx.new_frame->T_f_w_;
-              const SE3d T_cur_ref = T_cur_w * usage_reference->T_f_w_.inverse();
-              const M3D R = T_cur_ref.rotationMatrix();
-              const V3D t = T_cur_ref.translation();
-              Eigen::Matrix<double, 6, 6> adjoint = Eigen::Matrix<double, 6, 6>::Zero();
-              M3D t_hat;
-              t_hat << SKEW_SYM_MATRX(t);
-              adjoint.block<3, 3>(0, 0) = R;
-              adjoint.block<3, 3>(3, 0) = t_hat * R;
-              adjoint.block<3, 3>(3, 3) = R;
-              P.block<6, 6>(0, 0) +=
-                  adjoint * usage_reference->birth_pose_cov_ * adjoint.transpose();
-            }
-            if (point->covariance_.array().isFinite().all())
-              P.block<3, 3>(3, 3) += point->covariance_;
-            P.diagonal().array() += 1.0e-12;
-            const Eigen::LDLT<Eigen::MatrixXd> p_ldlt(P);
-            if (p_ldlt.info() == Eigen::Success)
-            {
-              const Eigen::MatrixXd system =
-                  p_ldlt.solve(Eigen::MatrixXd::Identity(solve_dim, solve_dim)) + A;
-              const Eigen::LDLT<Eigen::MatrixXd> system_ldlt(system);
-              if (system_ldlt.info() == Eigen::Success)
-                nis = std::max(0.0, c - b.dot(system_ldlt.solve(b)));
-            }
+            // Raw (pre-robustification) residuals, with actual current-state,
+            // reference-pose and landmark Jacobians in residual coordinates.
+            const Eigen::MatrixXd prior = fullCovToSolve(iteration_prior_cov);
+            const Eigen::LLT<Eigen::MatrixXd> prior_llt(prior);
+            if (prior_llt.info() != Eigen::Success)
+              throw std::runtime_error("invalid visual NIS prior covariance");
+            Eigen::MatrixXd innovation_root(local_dof, 9 + solve_dim);
+            innovation_root.leftCols(9) = nuisance_root;
+            innovation_root.rightCols(solve_dim) = patch_jacobian * prior_llt.matrixL();
+            const Eigen::MatrixXd normalized = estimator_covariance::solveIndependentPlusShared(
+                noise, innovation_root, patch_residual);
+            nis = patch_residual.dot(normalized.col(0));
           }
           if (iteration == 0 && point_index < static_cast<int>(ctx.visual_submap->pose_information.size()))
           {
@@ -8023,7 +8001,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           if (!point_c.array().isFinite().all()) return false;
           const bool estimate_extrinsic =
               ctx.camera_id >= 0 && ctx.camera_id < state->num_cameras &&
-              (active_extrinsic_rot[ctx.camera_id] != 0 || active_extrinsic_trans[ctx.camera_id] != 0);
+              (linearized_extrinsic_rot[ctx.camera_id] != 0 || linearized_extrinsic_trans[ctx.camera_id] != 0);
           M3D Jpc_dRcl = M3D::Zero();
           if (estimate_extrinsic)
           {
@@ -8105,8 +8083,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
           addJacobianSegment(jacobian, state->velocityIndex(), (J_photo_center * ctx.dpc_dvel).transpose());
           const int group_id = ctx.time_offset_group;
           if (group_id >= 0 && group_id < state->num_time_offset_groups &&
-              group_id < static_cast<int>(active_time_groups.size()) &&
-              active_time_groups[group_id] != 0)
+              group_id < static_cast<int>(linearized_time_groups.size()) &&
+              linearized_time_groups[group_id] != 0)
           {
             const V3D point_i_time = ctx.Rwi.transpose() * (point_w - ctx.Pwi);
             M3D point_i_time_hat;
@@ -8119,10 +8097,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
             addJacobianValue(jacobian, state->exposureIndex(ctx.camera_id), value);
           if (estimate_extrinsic)
           {
-            if (active_extrinsic_rot[ctx.camera_id] != 0)
+            if (linearized_extrinsic_rot[ctx.camera_id] != 0)
               addJacobianSegment(jacobian, state->extrinsicRotIndex(ctx.camera_id),
                                  (J_photo_center * Jpc_dRcl).transpose());
-            if (active_extrinsic_trans[ctx.camera_id] != 0)
+            if (linearized_extrinsic_trans[ctx.camera_id] != 0)
               addJacobianSegment(jacobian, state->extrinsicTransIndex(ctx.camera_id),
                                  J_photo_center.transpose());
           }
@@ -8251,7 +8229,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
       if (measurement_count > 0 && directional_update_en)
       {
         if (!directional_update::filterInformation(
-                fullCovToSolve(state->cov), hessian / measurement_cov, gradient / measurement_cov,
+                fullCovToSolve(iteration_prior_cov), hessian / measurement_cov, gradient / measurement_cov,
                 directional_drop_variance_reduction,
                 directional_full_variance_reduction,
                 iteration_directional_result))
@@ -8259,6 +8237,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           *state = state_before_visual_update;
           G.setZero();
           syncCameraExtrinsicsFromState(*state);
+          for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
           const std::string reason = iteration_directional_result.error.empty()
               ? "photometric residual covariance must be finite and positive"
               : iteration_directional_result.error;
@@ -8290,6 +8269,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
             *state = state_before_visual_update;
             G.setZero();
             syncCameraExtrinsicsFromState(*state);
+            for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
             std::cerr << "[ Directional VIO ] usage-information filtering rejected: "
                       << component_error << std::endl;
             return;
@@ -8391,7 +8371,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
         usage_final_residuals_cross = rollback_usage_final_residuals_cross;
         usage_final_residuals_current_cross = rollback_usage_final_residuals_current_cross;
         final_directional_result = rollback_directional_result;
-        final_directional_posterior_covariance = rollback_directional_posterior_covariance;
+        final_posterior_covariance = rollback_posterior_covariance;
         syncCameraExtrinsicsFromState(*state);
         break;
       }
@@ -8427,8 +8407,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
         usage_final_residuals_cross = usage_iter_residuals_cross;
         usage_final_residuals_current_cross = usage_iter_residuals_current_cross;
       }
-      const Eigen::VectorXd prior_delta_full = *state_propagat - *state;
-      const Eigen::VectorXd prior_delta = fullVectorToSolve(prior_delta_full);
+      const Eigen::VectorXd prior_delta_full = state_before_visual_update - *state;
       Eigen::MatrixXd solve_hessian = hessian;
       Eigen::VectorXd solve_gradient = gradient;
       rollback_G = G;
@@ -8444,67 +8423,69 @@ void VIOManager::computeJacobianAndUpdateEKF()
       rollback_last_max_trans_update_cm = last_max_trans_update_cm;
       rollback_last_max_time_update_ms = last_max_time_update_ms;
       rollback_directional_result = final_directional_result;
-      rollback_directional_posterior_covariance = final_directional_posterior_covariance;
-      Eigen::MatrixXd K1;
-      Eigen::MatrixXd solve_posterior_covariance;
+      rollback_posterior_covariance = final_posterior_covariance;
+      estimator_covariance::Update covariance_update;
+      std::vector<int> active_update_indices;
+      for (int index : solve_to_full)
+      {
+        bool active = true;
+        for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+        {
+          const int rotation = state->extrinsicRotIndex(camera_id);
+          const int translation = state->extrinsicTransIndex(camera_id);
+          if (index >= rotation && index < rotation + 3) active = active_extrinsic_rot[camera_id] != 0;
+          if (index >= translation && index < translation + 3) active = active_extrinsic_trans[camera_id] != 0;
+        }
+        for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
+          if (index == state->timeOffsetIndex(group_id)) active = active_time_groups[group_id] != 0;
+        if (active) active_update_indices.push_back(index);
+      }
       std::string solve_error;
-      const Eigen::MatrixXd solve_cov = fullCovToSolve(state->cov);
       auto factorSolveSystem = [&]() {
-        if (directional_update_en)
+        try
         {
-          if (!directional_update::posteriorCovariance(
-                  solve_cov, solve_hessian / measurement_cov,
-                  solve_posterior_covariance, solve_error))
-            return false;
-          K1 = solve_posterior_covariance / measurement_cov;
+          covariance_update = estimator_covariance::update(
+              iteration_prior_cov, solveMatrixToFull(solve_hessian / measurement_cov),
+              solveVectorToFull(-solve_gradient / measurement_cov), prior_delta_full, active_update_indices);
+          return true;
         }
-        else
+        catch (const std::exception &error)
         {
-          K1 = (solve_hessian + (solve_cov / measurement_cov).inverse()).inverse();
+          solve_error = error.what();
+          return false;
         }
-        return true;
       };
       if (!factorSolveSystem())
       {
         *state = state_before_visual_update;
         G.setZero();
         syncCameraExtrinsicsFromState(*state);
-        std::cerr << "[ Directional VIO ] system factorization rejected: "
-                  << solve_error << std::endl;
+        for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
+        printf("\033[1;31m[ COV VIO ] System factorization rejected: %s\033[0m\n", solve_error.c_str());
         return;
       }
-      Eigen::MatrixXd G_reduced = K1 * solve_hessian;
-      G = solveMatrixToFull(G_reduced);
-      Eigen::VectorXd solution = solveVectorToFull(-K1 * solve_gradient + prior_delta - G_reduced * prior_delta);
+      G = covariance_update.gain_times_jacobian;
+      Eigen::VectorXd solution = covariance_update.correction;
       if (!calibrationUpdateWithinTrustRegion(solution, allow_extrinsic_rotation,
                                               allow_extrinsic_translation, active_time_groups))
       {
-        std::vector<uint8_t> deactivate_time_groups = active_time_groups;
-        auto zeroReducedIndex = [&](int full_index) {
-          const int solve_index = (full_index >= 0 && full_index < full_state_dim) ? full_to_solve[full_index] : -1;
-          if (solve_index < 0) return;
-          solve_hessian.row(solve_index).setZero();
-          solve_hessian.col(solve_index).setZero();
-          solve_gradient[solve_index] = 0.0;
-        };
-        for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
-          for (int k = 0; k < 6; ++k)
-            zeroReducedIndex(state->extrinsicIndex(camera_id) + k);
-        for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
-          if (group_id < static_cast<int>(deactivate_time_groups.size()) && deactivate_time_groups[group_id])
-            zeroReducedIndex(state->timeOffsetIndex(group_id));
+        // Freeze gain rows, not covariance rows. Keep uncertainty and the
+        // measurement Jacobians of these nuisance parameters in the solve.
+        active_update_indices.erase(std::remove_if(active_update_indices.begin(), active_update_indices.end(),
+            [&](int index) { return index >= state->extrinsicBaseIndex() ||
+                (index >= state->timeOffsetBaseIndex() && index < state->velocityIndex()); }),
+            active_update_indices.end());
         if (!factorSolveSystem())
         {
           *state = state_before_visual_update;
           G.setZero();
           syncCameraExtrinsicsFromState(*state);
-          std::cerr << "[ Directional VIO ] trust-region system factorization rejected: "
-                    << solve_error << std::endl;
+          for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
+          printf("\033[1;31m[ COV VIO ] Frozen-calibration solve rejected: %s\033[0m\n", solve_error.c_str());
           return;
         }
-        G_reduced = K1 * solve_hessian;
-        G = solveMatrixToFull(G_reduced);
-        solution = solveVectorToFull(-K1 * solve_gradient + prior_delta - G_reduced * prior_delta);
+        G = covariance_update.gain_times_jacobian;
+        solution = covariance_update.correction;
         for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
         {
           solution.segment<3>(state->extrinsicRotIndex(camera_id)).setZero();
@@ -8559,15 +8540,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
           }
         }
       }
-      if (directional_update_en)
-      {
-        final_directional_result = iteration_directional_result;
-        final_directional_posterior_covariance = cov_before_visual_update;
-        for (int r = 0; r < solve_posterior_covariance.rows(); ++r)
-          for (int c = 0; c < solve_posterior_covariance.cols(); ++c)
-            final_directional_posterior_covariance(solve_to_full[r], solve_to_full[c]) =
-                solve_posterior_covariance(r, c);
-      }
+      final_directional_result = iteration_directional_result;
+      final_posterior_covariance = state->resetCovariance(covariance_update.covariance, solution);
       *state += solution;
       syncCameraExtrinsicsFromState(*state);
       update_ekf_time += omp_get_wtime() - update_start;
@@ -8599,26 +8573,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
         break;
     }
   }
-  if (directional_update_en)
-  {
-    if (final_directional_posterior_covariance.rows() == state->stateDim() &&
-        final_directional_posterior_covariance.cols() == state->stateDim())
-    {
-      state->cov = final_directional_posterior_covariance;
-    }
-    else
-    {
-      state->cov = cov_before_visual_update;
-    }
-  }
-  else
-  {
-    state->cov -= G * state->cov;
-  }
-  restoreInactiveCalibrationCovariance(cov_before_visual_update,
-                                       final_active_extrinsic_rot,
-                                       final_active_extrinsic_trans,
-                                       final_active_time_groups);
+  state->cov = final_posterior_covariance.rows() == state->stateDim()
+                   ? final_posterior_covariance : cov_before_visual_update;
   if (directional_update_en)
   {
     state->cov = directional_update::symmetrize(state->cov);
@@ -8687,299 +8643,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
   for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
 }
 
-void VIOManager::updateStateVirtualS2(cv::Mat img, int level)
+// Compatibility entry point: the joint solver handles S2 and all pyramid levels.
+void VIOManager::updateStateVirtualS2(cv::Mat /*img*/, int level)
 {
-  if (!virtual_fisheye_patch_en || !virtual_s2_optimize_en) return;
-  if (level < 0 || level >= patch_pyrimid_level) return;
-
-  int total_observations = 0;
-  for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
-  if (total_observations == 0) return;
-
-  G = Eigen::MatrixXd::Zero(state->stateDim(), state->stateDim());
-  StatesGroup old_state = *state;
-  double last_error = std::numeric_limits<double>::max();
-  const bool online_extrinsic_active = online_extrinsic_en &&
-      frame_count >= online_extrinsic_start_frame &&
-      total_observations >= online_extrinsic_min_tracks;
-  const bool allow_extrinsic_rotation = online_extrinsic_active && online_extrinsic_rot_en;
-  const bool allow_extrinsic_translation = online_extrinsic_active && online_extrinsic_trans_en;
-  const Eigen::MatrixXd cov_before_visual_update = state->cov;
-  std::vector<uint8_t> final_active_extrinsic_rot(state->num_cameras, 0);
-  std::vector<uint8_t> final_active_extrinsic_trans(state->num_cameras, 0);
-  std::vector<uint8_t> final_active_time_groups(state->num_time_offset_groups, 0);
-  Eigen::MatrixXd rollback_G = G;
-  std::vector<uint8_t> rollback_active_extrinsic_rot = final_active_extrinsic_rot;
-  std::vector<uint8_t> rollback_active_extrinsic_trans = final_active_extrinsic_trans;
-  std::vector<uint8_t> rollback_active_time_groups = final_active_time_groups;
-
-  for (int iteration = 0; iteration < max_iterations; ++iteration)
-  {
-    const double linearize_start = omp_get_wtime();
-    const int state_dim = state->stateDim();
-    Eigen::MatrixXd hessian = Eigen::MatrixXd::Zero(state_dim, state_dim);
-    Eigen::VectorXd gradient = Eigen::VectorXd::Zero(state_dim);
-    double error = 0.0;
-    int measurement_count = 0;
-    for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
-    std::vector<uint8_t> active_time_groups(state->num_time_offset_groups, 0);
-    if (online_time_offset_en && frame_count >= online_time_offset_start_frame &&
-        (online_time_offset_min_update_interval <= 0 ||
-         frame_count % std::max(1, online_time_offset_min_update_interval) == 0))
-    {
-      std::vector<int> group_tracks(state->num_time_offset_groups, 0);
-      std::vector<double> group_pixel_velocity(state->num_time_offset_groups, 0.0);
-      for (PerCameraData &ctx : cameras_)
-      {
-        if (ctx.total_points <= 0 || ctx.visual_submap == nullptr) continue;
-        const int group_id = ctx.time_offset_group;
-        if (!isOnlineTimeOffsetEnabledForGroup(group_id)) continue;
-        const int count = std::min<int>(ctx.total_points, ctx.visual_submap->voxel_points.size());
-        for (int i = 0; i < count; ++i)
-        {
-          VisualPoint *point = ctx.visual_submap->voxel_points[i];
-          if (point == nullptr || i >= static_cast<int>(ctx.visual_submap->virtual_track_patches.size())) continue;
-          const VirtualTrackPatch &track = ctx.visual_submap->virtual_track_patches[i];
-          if (!track.valid) continue;
-          const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
-          const V3D point_v = track.R_vcur_from_ccur_seed * point_c;
-          if (!point_v.array().isFinite().all() || point_v.norm() <= kS2Eps) continue;
-          MD(2, 3) Jdpi;
-          computeVirtualProjectionJacobian(point_v, Jdpi);
-          const V3D point_i = ctx.Rwi.transpose() * (point->pos_ - ctx.Pwi);
-          M3D point_i_hat;
-          point_i_hat << SKEW_SYM_MATRX(point_i);
-          const V3D dpc_dtd = ctx.Rci * (point_i_hat * ctx.gyro_i - ctx.Rwi.transpose() * ctx.Vwi);
-          const double pixel_speed = (Jdpi * track.R_vcur_from_ccur_seed * dpc_dtd).norm();
-          if (!std::isfinite(pixel_speed)) continue;
-          ++group_tracks[group_id];
-          group_pixel_velocity[group_id] += pixel_speed;
-        }
-      }
-      for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
-      {
-        const double avg_pixel_velocity =
-            group_tracks[group_id] > 0 ? group_pixel_velocity[group_id] / group_tracks[group_id] : 0.0;
-        if (isOnlineTimeOffsetEnabledForGroup(group_id) &&
-            group_tracks[group_id] >= online_time_offset_min_tracks &&
-            avg_pixel_velocity >= online_time_offset_min_pixel_velocity)
-          active_time_groups[group_id] = 1;
-      }
-    }
-    std::vector<uint8_t> active_extrinsic_rot(state->num_cameras, 0);
-    std::vector<uint8_t> active_extrinsic_trans(state->num_cameras, 0);
-    for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
-    {
-      const bool camera_active = camera_id < static_cast<int>(cameras_.size()) &&
-                                 isOnlineExtrinsicEnabledForCamera(camera_id) &&
-                                 cameras_[camera_id].total_points >= online_extrinsic_min_tracks;
-      if (camera_active && allow_extrinsic_rotation) active_extrinsic_rot[camera_id] = 1;
-      if (camera_active && allow_extrinsic_translation) active_extrinsic_trans[camera_id] = 1;
-    }
-
-    for (PerCameraData &ctx : cameras_)
-    {
-      if (ctx.total_points == 0 || ctx.visual_submap == nullptr) continue;
-      const cv::Mat &raw_img = (ctx.new_frame != nullptr) ? ctx.new_frame->img_ : img;
-      if (raw_img.empty()) continue;
-      const M3D Rwi = ctx.Rwi;
-      const V3D Pwi = ctx.Pwi;
-      const bool estimate_extrinsic =
-          ctx.camera_id >= 0 && ctx.camera_id < state->num_cameras &&
-          (active_extrinsic_rot[ctx.camera_id] != 0 || active_extrinsic_trans[ctx.camera_id] != 0);
-      const double current_exposure = state->inv_expo_time[ctx.camera_id];
-
-      for (int point_index = 0; point_index < ctx.total_points; ++point_index)
-      {
-        VisualPoint *point = ctx.visual_submap->voxel_points[point_index];
-        if (point == nullptr || point_index >= static_cast<int>(ctx.visual_submap->virtual_track_patches.size())) continue;
-        const int search_level = ctx.visual_submap->search_levels[point_index];
-        const int pyramid_level = level + search_level;
-        const int scale = 1 << pyramid_level;
-        const std::vector<float> &reference_patch = ctx.visual_submap->warp_patch[point_index];
-        const double reference_exposure = ctx.visual_submap->inv_expo_list[point_index];
-        const VirtualTrackPatch &track = ctx.visual_submap->virtual_track_patches[point_index];
-        if (!track.valid) continue;
-        const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
-        if (!point_c.array().isFinite().all()) continue;
-        const double point_c_norm = point_c.norm();
-        if (!std::isfinite(point_c_norm) || point_c_norm <= kS2Eps) continue;
-        const V3D point_i_for_time = Rwi.transpose() * (point->pos_ - Pwi);
-        M3D point_i_for_time_hat;
-        point_i_for_time_hat << SKEW_SYM_MATRX(point_i_for_time);
-        const V3D dpc_dtd =
-            ctx.Rci * (point_i_for_time_hat * ctx.gyro_i - Rwi.transpose() * ctx.Vwi);
-
-        M3D Jpc_dRcl = M3D::Zero();
-        if (estimate_extrinsic)
-        {
-          const V3D point_l = Rli * point_i_for_time + Pli;
-          M3D point_l_hat;
-          point_l_hat << SKEW_SYM_MATRX(point_l);
-          Jpc_dRcl = -ctx.Rcl * point_l_hat;
-        }
-
-        M3D point_c_hat;
-        point_c_hat << SKEW_SYM_MATRX(point_c);
-        double patch_error = 0.0;
-        for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
-        {
-          const V2D offset = (core_patch_offsets_[patch_index] * static_cast<float>(scale)).cast<double>();
-          float current_value = 0.0f;
-          MD(1, 3) J_photo_center;
-          if (!linearizeVirtualS2Sample(ctx, raw_img, point_c, track, offset, scale,
-                                        current_exposure, current_value, J_photo_center))
-            continue;
-
-          const MD(1, 3) Jdphi = J_photo_center * point_c_hat;
-          const MD(1, 3) Jdp = -J_photo_center;
-          const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
-          const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
-          const double residual = current_exposure * current_value -
-                                  reference_exposure * reference_patch[patch_size_total * level + patch_index];
-
-          Eigen::VectorXd jacobian = Eigen::VectorXd::Zero(state_dim);
-          jacobian.segment<3>(0) = JdR.transpose();
-          jacobian.segment<3>(3) = Jdt.transpose();
-          jacobian.segment<3>(state->velocityIndex()) = (J_photo_center * ctx.dpc_dvel).transpose();
-          const int group_id = ctx.time_offset_group;
-          if (group_id >= 0 && group_id < state->num_time_offset_groups &&
-              group_id < static_cast<int>(active_time_groups.size()) &&
-              active_time_groups[group_id] != 0)
-            jacobian[state->timeOffsetIndex(group_id)] = (J_photo_center * dpc_dtd)(0, 0);
-          if (exposure_estimate_en) jacobian[state->exposureIndex(ctx.camera_id)] = current_value;
-          if (estimate_extrinsic)
-          {
-            if (active_extrinsic_rot[ctx.camera_id] != 0)
-              jacobian.segment<3>(state->extrinsicRotIndex(ctx.camera_id)) =
-                  (J_photo_center * Jpc_dRcl).transpose();
-            if (active_extrinsic_trans[ctx.camera_id] != 0)
-              jacobian.segment<3>(state->extrinsicTransIndex(ctx.camera_id)) = J_photo_center.transpose();
-          }
-          hessian.noalias() += jacobian * jacobian.transpose();
-          gradient.noalias() += jacobian * residual;
-          patch_error += residual * residual;
-          ++measurement_count;
-        }
-        ctx.visual_submap->errors[point_index] = patch_error;
-        error += patch_error;
-      }
-    }
-
-    if (online_extrinsic_active && online_extrinsic_prior_factor_en)
-      applyOnlineExtrinsicPriors(hessian, gradient, allow_extrinsic_rotation, allow_extrinsic_translation);
-    if (online_time_offset_en)
-      applyOnlineTimeOffsetPriors(hessian, gradient, active_time_groups);
-    compute_jacobian_time += omp_get_wtime() - linearize_start;
-    if (measurement_count == 0) return;
-    error /= measurement_count;
-    if (error > last_error)
-    {
-      *state = old_state;
-      G = rollback_G;
-      final_active_extrinsic_rot = rollback_active_extrinsic_rot;
-      final_active_extrinsic_trans = rollback_active_extrinsic_trans;
-      final_active_time_groups = rollback_active_time_groups;
-      syncCameraExtrinsicsFromState(*state);
-      break;
-    }
-
-    old_state = *state;
-    last_error = error;
-    const double update_start = omp_get_wtime();
-    const Eigen::VectorXd prior_delta = *state_propagat - *state;
-    Eigen::MatrixXd solve_hessian = hessian;
-    Eigen::VectorXd solve_gradient = gradient;
-    rollback_G = G;
-    rollback_active_extrinsic_rot = final_active_extrinsic_rot;
-    rollback_active_extrinsic_trans = final_active_extrinsic_trans;
-    rollback_active_time_groups = final_active_time_groups;
-    deactivateInactiveCalibrationBlocks(solve_hessian, solve_gradient,
-                                        active_extrinsic_rot,
-                                        active_extrinsic_trans,
-                                        active_time_groups);
-    Eigen::MatrixXd K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
-    G = K1 * solve_hessian;
-    Eigen::VectorXd solution = -K1 * solve_gradient + prior_delta - G * prior_delta;
-    auto zeroInactiveCalibrationInSolution = [&](Eigen::VectorXd &delta) {
-      for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
-      {
-        if (camera_id >= static_cast<int>(active_extrinsic_rot.size()) ||
-            active_extrinsic_rot[camera_id] == 0)
-          delta.segment<3>(state->extrinsicRotIndex(camera_id)).setZero();
-        if (camera_id >= static_cast<int>(active_extrinsic_trans.size()) ||
-            active_extrinsic_trans[camera_id] == 0)
-          delta.segment<3>(state->extrinsicTransIndex(camera_id)).setZero();
-      }
-      for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
-      {
-        if (group_id >= static_cast<int>(active_time_groups.size()) || active_time_groups[group_id] == 0)
-          delta[state->timeOffsetIndex(group_id)] = 0.0;
-      }
-    };
-    zeroInactiveCalibrationInSolution(solution);
-    if (!calibrationUpdateWithinTrustRegion(solution, allow_extrinsic_rotation,
-                                            allow_extrinsic_translation, active_time_groups))
-    {
-      std::vector<uint8_t> deactivate_time_groups = active_time_groups;
-      deactivateCalibrationBlocks(solve_hessian, solve_gradient, true, deactivate_time_groups);
-      K1 = (solve_hessian + (state->cov / img_point_cov).inverse()).inverse();
-      G = K1 * solve_hessian;
-      solution = -K1 * solve_gradient + prior_delta - G * prior_delta;
-      zeroInactiveCalibrationInSolution(solution);
-      for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
-      {
-        solution.segment<3>(state->extrinsicRotIndex(camera_id)).setZero();
-        solution.segment<3>(state->extrinsicTransIndex(camera_id)).setZero();
-      }
-      for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
-      {
-        if (group_id < static_cast<int>(active_time_groups.size()) && active_time_groups[group_id])
-          solution[state->timeOffsetIndex(group_id)] = 0.0;
-      }
-      std::fill(final_active_extrinsic_rot.begin(), final_active_extrinsic_rot.end(), 0);
-      std::fill(final_active_extrinsic_trans.begin(), final_active_extrinsic_trans.end(), 0);
-      std::fill(final_active_time_groups.begin(), final_active_time_groups.end(), 0);
-    }
-    else
-    {
-      final_active_extrinsic_rot = active_extrinsic_rot;
-      final_active_extrinsic_trans = active_extrinsic_trans;
-      final_active_time_groups = active_time_groups;
-    }
-    *state += solution;
-    syncCameraExtrinsicsFromState(*state);
-    update_ekf_time += omp_get_wtime() - update_start;
-    double max_extrinsic_update = 0.0;
-    for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
-    {
-      if (camera_id < static_cast<int>(active_extrinsic_rot.size()) &&
-          active_extrinsic_rot[camera_id] != 0)
-        max_extrinsic_update = std::max(max_extrinsic_update,
-                                        solution.segment<3>(state->extrinsicRotIndex(camera_id)).norm());
-      if (camera_id < static_cast<int>(active_extrinsic_trans.size()) &&
-          active_extrinsic_trans[camera_id] != 0)
-        max_extrinsic_update = std::max(max_extrinsic_update,
-                                        solution.segment<3>(state->extrinsicTransIndex(camera_id)).norm());
-    }
-    double max_time_update = 0.0;
-    for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
-    {
-      if (group_id < static_cast<int>(active_time_groups.size()) && active_time_groups[group_id])
-        max_time_update = std::max(max_time_update, std::fabs(solution[state->timeOffsetIndex(group_id)]));
-    }
-    if (solution.segment<3>(0).norm() * 57.3 < 0.001 &&
-        solution.segment<3>(3).norm() * 100.0 < 0.001 &&
-        max_extrinsic_update < 1.0e-6 &&
-        max_time_update < 1.0e-6)
-      break;
-  }
-  state->cov -= G * state->cov;
-  restoreInactiveCalibrationCovariance(cov_before_visual_update,
-                                       final_active_extrinsic_rot,
-                                       final_active_extrinsic_trans,
-                                       final_active_time_groups);
-  for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
+  if (virtual_fisheye_patch_en && virtual_s2_optimize_en && level == patch_pyrimid_level - 1)
+    computeJacobianAndUpdateEKF();
 }
 
 void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
@@ -9351,6 +9019,23 @@ void VIOManager::initializeManagedReference(Feature &feature, VisualPoint &point
                                              bool initial_point_reference)
 {
   (void)initial_point_reference;
+  // Reference uncertainty is required by the photometric likelihood even
+  // when landmark lifecycle/quality management is disabled.
+  feature.birth_pose_cov_.setZero();
+  if (state != nullptr && state->cov.rows() == state->stateDim())
+  {
+    Eigen::MatrixXd reference_pose_jacobian = Eigen::MatrixXd::Zero(6, state->stateDim());
+    const auto local_jacobian = estimator_covariance::timeShiftPoseJacobian(
+        feature.Rwi_ref_.transpose() * state->rot_end, ctx.Vwi, ctx.gyro_i, ctx.frame_time_offset_delta);
+    reference_pose_jacobian.leftCols(6) = local_jacobian.leftCols(6);
+    reference_pose_jacobian.block(0, state->velocityIndex(), 6, 3) = local_jacobian.middleCols(6, 3);
+    if (isOnlineTimeOffsetEnabledForGroup(ctx.time_offset_group))
+    {
+      reference_pose_jacobian.col(state->timeOffsetIndex(ctx.time_offset_group)) = local_jacobian.col(9);
+    }
+    feature.birth_pose_cov_ = estimator_covariance::symmetric(
+        reference_pose_jacobian * state->cov * reference_pose_jacobian.transpose());
+  }
   if (!visual_map_manage_en) return;
   feature.ref_id_ = next_visual_ref_id_++;
   feature.birth_frame_id_ = ctx.new_frame != nullptr ? ctx.new_frame->id_ : frame_count;
@@ -9367,9 +9052,6 @@ void VIOManager::initializeManagedReference(Feature &feature, VisualPoint &point
     feature.view_direction_w_ = view / feature.view_range_;
   else
     feature.view_direction_w_.setZero();
-  feature.birth_pose_cov_.setZero();
-  if (state != nullptr && state->cov.rows() >= 6 && state->cov.cols() >= 6)
-    feature.birth_pose_cov_ = state->cov.block<6, 6>(0, 0);
 }
 
 void VIOManager::queueReferenceRetirement(VisualPoint &point, Feature &feature)
@@ -10037,9 +9719,9 @@ void VIOManager::commitPendingNewPoints(
       feature->R_v_from_c_ = pending.R_v_from_c;
       feature->R_c_from_v_ = pending.R_c_from_v;
       feature->virtual_patch_valid_ = pending.virtual_patch_valid;
+      initializeManagedReference(*feature, *point, ctx, true);
       if (visual_map_manage_en)
       {
-        initializeManagedReference(*feature, *point, ctx, true);
         feature->surface_plane_id_ = pending.surface_plane_id;
         feature->surface_revision_ = pending.surface_revision;
         feature->footprint_valid_ = pending.footprint_valid;
@@ -11472,6 +11154,9 @@ void VIOManager::updateFrameState(PerCameraData &ctx, const StatesGroup &state_v
   ctx.frame_time_offset_delta = time_offset_delta;
   ctx.Rcw = ctx.Rci * Rwi.transpose();
   ctx.Pcw = -ctx.Rci * Rwi.transpose() * Pwi + ctx.Pci;
+  const M3D frame_from_state = Exp(gyro_i, time_offset_delta).transpose();
+  ctx.Jdphi_dR = ctx.Jdphi_dR * frame_from_state;
+  ctx.Jdp_dR = ctx.Jdp_dR * frame_from_state;
   ctx.Jdp_dt = ctx.Rci * Rwi.transpose();
   ctx.dpc_dvel = -ctx.Rci * Rwi.transpose() * time_offset_delta;
   if (ctx.new_frame != nullptr)

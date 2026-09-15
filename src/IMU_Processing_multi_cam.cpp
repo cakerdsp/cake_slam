@@ -107,6 +107,13 @@ void ImuProcess::set_time_offset_cov(const double &time_offset_cov) { cov_time_o
 
 void ImuProcess::set_acc_bias_cov(const V3D &b_a) { cov_bias_acc = b_a; }
 
+void ImuProcess::set_noise_model(const std::string &model)
+{
+  if (model != "discrete" && model != "continuous")
+    throw std::invalid_argument("imu.noise_model must be discrete or continuous");
+  continuous_noise_ = model == "continuous";
+}
+
 void ImuProcess::set_imu_init_frame_num(const int &num) { MAX_INI_COUNT = num; }
 
 void ImuProcess::IMU_init(const MeasureGroup &meas, StatesGroup &state_inout, int &N)
@@ -202,14 +209,15 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
   // F_x.block<3, 3>(6, 12) = - R_imu * dt;
   // F_x.block<3, 3>(6, 15) = Eye3d * dt;
 
-  cov_w.block<3, 3>(state_inout.gyroBiasIndex(), state_inout.gyroBiasIndex()).diagonal() = cov_gyr * dt * dt;
-  cov_w.block<3, 3>(state_inout.velocityIndex(), state_inout.velocityIndex()).diagonal() = cov_acc * dt * dt;
+  const double noise_dt = continuous_noise_ ? dt : dt * dt;
+  cov_w.block<3, 3>(state_inout.gyroBiasIndex(), state_inout.gyroBiasIndex()).diagonal() = cov_gyr * noise_dt;
+  cov_w.block<3, 3>(state_inout.velocityIndex(), state_inout.velocityIndex()).diagonal() = cov_acc * noise_dt;
   if (cov_time_offset > 0.0 && state_inout.num_time_offset_groups > 0)
     cov_w.block(state_inout.timeOffsetBaseIndex(), state_inout.timeOffsetBaseIndex(),
                 state_inout.num_time_offset_groups, state_inout.num_time_offset_groups)
         .diagonal().setConstant(cov_time_offset * dt);
   // cov_w.block<3, 3>(6, 6) =
-  //     R_imu * cov_acc.asDiagonal() * R_imu.transpose() * dt * dt;
+  //     R_imu * cov_acc.asDiagonal() * R_imu.transpose() * noise_dt;
   // cov_w.block<3, 3>(9, 9).diagonal() =
   //     cov_bias_gyr * dt * dt; // bias gyro covariance
   // cov_w.block<3, 3>(12, 12).diagonal() =
@@ -217,7 +225,7 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
 
   // std::cout << "before propagete:" << state_inout.cov.diagonal().transpose()
   //           << std::endl;
-  state_inout.cov = F_x * state_inout.cov * F_x.transpose() + cov_w;
+  state_inout.cov = estimator_covariance::symmetric(F_x * state_inout.cov * F_x.transpose() + cov_w);
   // std::cout << "cov_w:" << cov_w.diagonal().transpose() << std::endl;
   // std::cout << "after propagete:" << state_inout.cov.diagonal().transpose()
   //           << std::endl;
@@ -413,13 +421,15 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
         cov_w.block(state_inout.timeOffsetBaseIndex(), state_inout.timeOffsetBaseIndex(),
                     state_inout.num_time_offset_groups, state_inout.num_time_offset_groups)
             .diagonal().setConstant(cov_time_offset * dt);
-      cov_w.block<3, 3>(0, 0).diagonal() = cov_gyr * dt * dt;
+      // First-order discretization. Values are variances or PSDs, never standard deviations.
+      const double noise_dt = continuous_noise_ ? dt : dt * dt;
+      cov_w.block<3, 3>(0, 0).diagonal() = cov_gyr * noise_dt;
       cov_w.block<3, 3>(state_inout.velocityIndex(), state_inout.velocityIndex()) =
-          R_imu * cov_acc.asDiagonal() * R_imu.transpose() * dt * dt;
-      cov_w.block<3, 3>(state_inout.gyroBiasIndex(), state_inout.gyroBiasIndex()).diagonal() = cov_bias_gyr * dt * dt;
-      cov_w.block<3, 3>(state_inout.accelBiasIndex(), state_inout.accelBiasIndex()).diagonal() = cov_bias_acc * dt * dt;
+          R_imu * cov_acc.asDiagonal() * R_imu.transpose() * noise_dt;
+      cov_w.block<3, 3>(state_inout.gyroBiasIndex(), state_inout.gyroBiasIndex()).diagonal() = cov_bias_gyr * noise_dt;
+      cov_w.block<3, 3>(state_inout.accelBiasIndex(), state_inout.accelBiasIndex()).diagonal() = cov_bias_acc * noise_dt;
 
-      state_inout.cov = F_x * state_inout.cov * F_x.transpose() + cov_w;
+      state_inout.cov = estimator_covariance::symmetric(F_x * state_inout.cov * F_x.transpose() + cov_w);
       // state_inout.cov.block<18,18>(0,0) = F_x.block<18,18>(0,0) *
       // state_inout.cov.block<18,18>(0,0) * F_x.block<18,18>(0,0).transpose() +
       // cov_w.block<18,18>(0,0);

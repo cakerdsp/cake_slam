@@ -90,31 +90,44 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   plane->normal_ = Eigen::Vector3d::Zero();
   plane->points_size_ = points.size();
   plane->radius_ = 0;
-  for (auto pv : points)
+  if (points.size() < 3)
   {
-    plane->covariance_ += pv.point_w * pv.point_w.transpose();
-    plane->center_ += pv.point_w;
+    plane->is_plane_ = false;
+    plane->is_update_ = true;
+    return;
   }
-  plane->center_ = plane->center_ / plane->points_size_;
-  plane->covariance_ = plane->covariance_ / plane->points_size_ - plane->center_ * plane->center_.transpose();
-  Eigen::EigenSolver<Eigen::Matrix3d> es(plane->covariance_);
-  Eigen::Matrix3cd evecs = es.eigenvectors();
-  Eigen::Vector3cd evals = es.eigenvalues();
-  Eigen::Vector3d evalsReal;
-  evalsReal = evals.real();
-  Eigen::Matrix3f::Index evalsMin, evalsMax;
-  evalsReal.rowwise().sum().minCoeff(&evalsMin);
-  evalsReal.rowwise().sum().maxCoeff(&evalsMax);
-  int evalsMid = 3 - evalsMin - evalsMax;
-  Eigen::Vector3d evecMin = evecs.real().col(evalsMin);
-  Eigen::Vector3d evecMid = evecs.real().col(evalsMid);
-  Eigen::Vector3d evecMax = evecs.real().col(evalsMax);
+  for (const auto &pv : points) plane->center_ += pv.point_w;
+  plane->center_ /= plane->points_size_;
+  for (const auto &pv : points)
+  {
+    const V3D centered = pv.point_w - plane->center_;
+    plane->covariance_.noalias() += centered * centered.transpose();
+  }
+  plane->covariance_ /= plane->points_size_;
+  const Eigen::SelfAdjointEigenSolver<M3D> es(plane->covariance_);
+  if (es.info() != Eigen::Success || !es.eigenvalues().allFinite())
+  {
+    plane->is_plane_ = false;
+    plane->is_update_ = true;
+    return;
+  }
+  const M3D evecs = es.eigenvectors();
+  const V3D evalsReal = es.eigenvalues();
+  constexpr int evalsMin = 0, evalsMid = 1, evalsMax = 2;
+  const double eigen_gap_floor = 1.0e-10 * std::max(1.0, evalsReal[evalsMax]);
   Eigen::Matrix3d J_Q;
   J_Q << 1.0 / plane->points_size_, 0, 0, 0, 1.0 / plane->points_size_, 0, 0, 0, 1.0 / plane->points_size_;
   // && evalsReal(evalsMid) > 0.05
   //&& evalsReal(evalsMid) > 0.01
-  if (evalsReal(evalsMin) < planer_threshold_)
+  if (evalsReal(evalsMin) < planer_threshold_ &&
+      evalsReal[evalsMid] - evalsReal[evalsMin] > eigen_gap_floor)
   {
+    struct ScanContribution
+    {
+      Eigen::Matrix<double, 6, 6> jacobian = Eigen::Matrix<double, 6, 6>::Zero();
+      std::shared_ptr<const ScanPoseUncertainty> uncertainty;
+    };
+    std::unordered_map<const ScanPoseUncertainty *, ScanContribution> scan_contributions;
     for (int i = 0; i < points.size(); i++)
     {
       Eigen::Matrix<double, 6, 3> J;
@@ -125,7 +138,7 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
         {
           Eigen::Matrix<double, 1, 3> F_m =
               (points[i].point_w - plane->center_).transpose() / ((plane->points_size_) * (evalsReal[evalsMin] - evalsReal[m])) *
-              (evecs.real().col(m) * evecs.real().col(evalsMin).transpose() + evecs.real().col(evalsMin) * evecs.real().col(m).transpose());
+              (evecs.col(m) * evecs.col(evalsMin).transpose() + evecs.col(evalsMin) * evecs.col(m).transpose());
           F.row(m) = F_m;
         }
         else
@@ -135,14 +148,34 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
           F.row(m) = F_m;
         }
       }
-      J.block<3, 3>(0, 0) = evecs.real() * F;
+      J.block<3, 3>(0, 0) = evecs * F;
       J.block<3, 3>(3, 0) = J_Q;
-      plane->plane_var_ += J * points[i].var * J.transpose();
+      if (points[i].scan_uncertainty)
+      {
+        plane->plane_var_ += J * points[i].var_nostate * J.transpose();
+        auto &scan = scan_contributions[points[i].scan_uncertainty.get()];
+        scan.uncertainty = points[i].scan_uncertainty;
+        scan.jacobian.noalias() += J * points[i].pose_jacobian;
+      }
+      else
+      {
+        plane->plane_var_ += J * points[i].var * J.transpose();
+      }
     }
+    std::vector<Eigen::MatrixXd> shared_terms;
+    for (const auto &entry : scan_contributions)
+    {
+      const auto &scan = entry.second;
+      shared_terms.push_back(scan.jacobian * scan.uncertainty->covariance * scan.jacobian.transpose());
+    }
+    // Preserve exact within-scan correlation. Between scans we do not retain
+    // pose cross-covariances; use a covariance bound, not false independence.
+    plane->plane_var_ += estimator_covariance::unknownCorrelationBound(shared_terms, 6);
+    plane->plane_var_ = estimator_covariance::symmetric(plane->plane_var_);
 
-    plane->normal_ << evecs.real()(0, evalsMin), evecs.real()(1, evalsMin), evecs.real()(2, evalsMin);
-    plane->y_normal_ << evecs.real()(0, evalsMid), evecs.real()(1, evalsMid), evecs.real()(2, evalsMid);
-    plane->x_normal_ << evecs.real()(0, evalsMax), evecs.real()(1, evalsMax), evecs.real()(2, evalsMax);
+    plane->normal_ << evecs(0, evalsMin), evecs(1, evalsMin), evecs(2, evalsMin);
+    plane->y_normal_ << evecs(0, evalsMid), evecs(1, evalsMid), evecs(2, evalsMid);
+    plane->x_normal_ << evecs(0, evalsMax), evecs(1, evalsMax), evecs(2, evalsMax);
     plane->min_eigen_value_ = evalsReal(evalsMin);
     plane->mid_eigen_value_ = evalsReal(evalsMid);
     plane->max_eigen_value_ = evalsReal(evalsMax);
@@ -365,7 +398,7 @@ VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
   return nullptr;
 }
 
-void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
+void VoxelMapManager::PrepareScanCovariances()
 {
   cross_mat_list_.clear();
   cross_mat_list_.reserve(feats_down_size_);
@@ -388,6 +421,35 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     point_crossmat << SKEW_SYM_MATRX(point_this);
     cross_mat_list_.push_back(point_crossmat);
   }
+}
+
+void VoxelMapManager::RefreshWorldPoints()
+{
+  if (body_cov_list_.size() != feats_down_body_->size()) PrepareScanCovariances();
+  pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(new pcl::PointCloud<pcl::PointXYZI>);
+  TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, world_lidar);
+  auto scan = std::make_shared<ScanPoseUncertainty>();
+  scan->covariance = state_.cov.topLeftCorner<6, 6>();
+  pv_list_.resize(feats_down_body_->size());
+  const M3D r_wl = state_.rot_end * extR_;
+  for (size_t i = 0; i < feats_down_body_->size(); ++i)
+  {
+    auto &pv = pv_list_[i];
+    pv.point_b << feats_down_body_->points[i].x, feats_down_body_->points[i].y, feats_down_body_->points[i].z;
+    pv.point_i = extR_ * pv.point_b + extT_;
+    pv.point_w << world_lidar->points[i].x, world_lidar->points[i].y, world_lidar->points[i].z;
+    pv.body_var = body_cov_list_[i];
+    pv.var_nostate = r_wl * pv.body_var * r_wl.transpose();
+    pv.pose_jacobian = estimator_covariance::pointJacobian(state_.rot_end, pv.point_i);
+    pv.scan_uncertainty = scan;
+    pv.var = estimator_covariance::pointCovariance(state_.rot_end, extR_, pv.point_i,
+                                                  pv.body_var, scan->covariance);
+  }
+}
+
+void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
+{
+  PrepareScanCovariances();
 
   vector<pointWithVar>().swap(pv_list_);
   pv_list_.resize(feats_down_size_);
@@ -405,11 +467,6 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   addLioBlock(state_.gyroBiasIndex(), 3);
   addLioBlock(state_.accelBiasIndex(), 3);
   addLioBlock(state_.gravityIndex(), 3);
-  auto fullVectorToLio = [&](const Eigen::VectorXd &full_vector) {
-    Eigen::VectorXd reduced(lio_state_dim);
-    for (int k = 0; k < lio_state_dim; ++k) reduced[k] = full_vector[lio_to_full[k]];
-    return reduced;
-  };
   auto fullCovToLio = [&](const Eigen::MatrixXd &full_cov) {
     Eigen::MatrixXd reduced(lio_state_dim, lio_state_dim);
     for (int r = 0; r < lio_state_dim; ++r)
@@ -417,11 +474,9 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
         reduced(r, c) = full_cov(lio_to_full[r], lio_to_full[c]);
     return reduced;
   };
-  Eigen::MatrixXd G = Eigen::MatrixXd::Zero(full_state_dim, full_state_dim);
   Eigen::MatrixXd H_T_H = Eigen::MatrixXd::Zero(lio_state_dim, lio_state_dim);
-  const Eigen::MatrixXd I_LIO = Eigen::MatrixXd::Identity(lio_state_dim, lio_state_dim);
   directional_update::Result final_directional_result;
-  Eigen::MatrixXd final_directional_posterior_covariance;
+  Eigen::MatrixXd final_posterior_covariance;
 
   bool flg_EKF_inited, flg_EKF_converged, EKF_stop_flg = 0;
   for (int iterCount = 0; iterCount < config_setting_.max_iterations_; iterCount++)
@@ -429,18 +484,16 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     double total_residual = 0.0;
     pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(new pcl::PointCloud<pcl::PointXYZI>);
     TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, world_lidar);
-    M3D rot_var = state_.cov.block<3, 3>(0, 0);
-    M3D t_var = state_.cov.block<3, 3>(3, 3);
+    const Eigen::MatrixXd iteration_prior_cov = state_propagat.covarianceAt(state_);
     for (size_t i = 0; i < feats_down_body_->size(); i++)
     {
       pointWithVar &pv = pv_list_[i];
       pv.point_b << feats_down_body_->points[i].x, feats_down_body_->points[i].y, feats_down_body_->points[i].z;
       pv.point_w << world_lidar->points[i].x, world_lidar->points[i].y, world_lidar->points[i].z;
 
-      M3D cov = body_cov_list_[i];
-      M3D point_crossmat = cross_mat_list_[i];
-      cov = state_.rot_end * cov * state_.rot_end.transpose() + (-point_crossmat) * rot_var * (-point_crossmat.transpose()) + t_var;
-      pv.var = cov;
+      pv.point_i = extR_ * pv.point_b + extT_;
+      pv.var = estimator_covariance::pointCovariance(state_.rot_end, extR_, pv.point_i,
+                                                     body_cov_list_[i], iteration_prior_cov.topLeftCorner<6, 6>());
       pv.body_var = body_cov_list_[i];
     }
     ptpl_list_.clear();
@@ -456,6 +509,11 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       total_residual += fabs(ptpl_list_[i].dis_to_plane_);
     }
     effct_feat_num_ = ptpl_list_.size();
+    if (effct_feat_num_ == 0)
+    {
+      state_ = state_propagat;
+      return;
+    }
     cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
          << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
 
@@ -463,8 +521,10 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
      * ***/
     MatrixXd Hsub(effct_feat_num_, 6);
     MatrixXd Hsub_T_R_inv(6, effct_feat_num_);
-    VectorXd R_inv(effct_feat_num_);
     VectorXd meas_vec(effct_feat_num_);
+    MatrixXd plane_jacobians(effct_feat_num_, 6);
+    VectorXd independent_variances(effct_feat_num_);
+    std::unordered_map<int, std::vector<int>> plane_groups;
     meas_vec.setZero();
     for (int i = 0; i < effct_feat_num_; i++)
     {
@@ -477,39 +537,62 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
       /*** get the normal vector of closest surface/corner ***/
 
-      V3D point_world = state_propagat.rot_end * point_this + state_propagat.pos_end;
+      const V3D point_world = state_.rot_end * point_this + state_.pos_end;
       Eigen::Matrix<double, 1, 6> J_nq;
-      J_nq.block<1, 3>(0, 0) = point_world - ptpl_list_[i].center_;
-      J_nq.block<1, 3>(0, 3) = -ptpl_list_[i].normal_;
-
-      M3D var;
-      // V3D normal_b = state_.rot_end.inverse() * ptpl_list_[i].normal_;
-      // V3D point_b = ptpl_list_[i].point_b_;
-      // double cos_theta = fabs(normal_b.dot(point_b) / point_b.norm());
-      // ptpl_list_[i].body_cov_ = ptpl_list_[i].body_cov_ * (1.0 / cos_theta) * (1.0 / cos_theta);
-
-      // point_w cov
-      // var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose() +
-      //       state_propagat.cov.block<3, 3>(3, 3) + (-point_crossmat) * state_propagat.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose();
-
-      // point_w cov (another_version)
-      // var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose() +
-      //       state_propagat.cov.block<3, 3>(3, 3) - point_crossmat * state_propagat.cov.block<3, 3>(0, 0) * point_crossmat;
-
-      // point_body cov
-      var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose();
-
-      double sigma_l = J_nq * ptpl_list_[i].plane_var_ * J_nq.transpose();
-
-      R_inv(i) = 1.0 / (0.001 + sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
-      // R_inv(i) = 1.0 / (sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
+      J_nq.head<3>() = (point_world - ptpl.center_).transpose();
+      J_nq.tail<3>() = -ptpl.normal_.transpose();
+      const M3D r_wl = state_.rot_end * extR_;
+      const M3D var = r_wl * ptpl.body_cov_ * r_wl.transpose();
+      plane_jacobians.row(i) = J_nq;
+      independent_variances[i] = 0.001 + (ptpl.normal_.transpose() * var * ptpl.normal_)(0, 0);
+      plane_groups[ptpl.plane_id_].push_back(i);
 
       /*** calculate the Measuremnt Jacobian matrix H ***/
       V3D A(point_crossmat * state_.rot_end.transpose() * ptpl_list_[i].normal_);
       Hsub.row(i) << VEC_FROM_ARRAY(A), ptpl_list_[i].normal_[0], ptpl_list_[i].normal_[1], ptpl_list_[i].normal_[2];
-      Hsub_T_R_inv.col(i) << A[0] * R_inv(i), A[1] * R_inv(i), A[2] * R_inv(i), ptpl_list_[i].normal_[0] * R_inv(i),
-          ptpl_list_[i].normal_[1] * R_inv(i), ptpl_list_[i].normal_[2] * R_inv(i);
       meas_vec(i) = -ptpl_list_[i].dis_to_plane_;
+    }
+    // One plane is a shared random variable for all its residuals. Retain that
+    // low-rank covariance; different planes can also share source scan errors.
+    // A block covariance bound covers their unknown cross-correlations.
+    double sum_root_trace = 0.0;
+    std::unordered_map<int, double> root_traces;
+    for (const auto &group : plane_groups)
+    {
+      double trace = 0.0;
+      for (int index : group.second)
+        trace += std::max(0.0, (plane_jacobians.row(index) * ptpl_list_[index].plane_var_ *
+                               plane_jacobians.row(index).transpose())(0, 0));
+      root_traces[group.first] = std::sqrt(trace);
+      sum_root_trace += std::sqrt(trace);
+    }
+    try
+    {
+      for (const auto &group : plane_groups)
+      {
+        const auto &indices = group.second;
+        const int count = static_cast<int>(indices.size());
+        MatrixXd h(count, 6), j_plane(count, 6);
+        VectorXd variances(count);
+        for (int row = 0; row < count; ++row)
+        {
+          h.row(row) = Hsub.row(indices[row]);
+          j_plane.row(row) = plane_jacobians.row(indices[row]);
+          variances[row] = independent_variances[indices[row]];
+        }
+        const double root_trace = root_traces[group.first];
+        const double bound_scale = root_trace > 0.0 ? sum_root_trace / root_trace : 1.0;
+        const MatrixXd u = j_plane * estimator_covariance::positiveSemidefiniteRoot(
+            bound_scale * ptpl_list_[indices.front()].plane_var_);
+        const MatrixXd weighted_h = estimator_covariance::solveIndependentPlusShared(variances, u, h);
+        for (int row = 0; row < count; ++row) Hsub_T_R_inv.col(indices[row]) = weighted_h.row(row).transpose();
+      }
+    }
+    catch (const std::exception &error)
+    {
+      printf("\033[1;31m[ COV LIO ] Plane covariance rejected: %s\033[0m\n", error.what());
+      state_ = state_propagat;
+      return;
     }
     EKF_stop_flg = false;
     flg_EKF_converged = false;
@@ -522,7 +605,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
     Eigen::VectorXd information_vector = Eigen::VectorXd::Zero(lio_state_dim);
     information_vector.head<6>() = HTz;
-    const Eigen::MatrixXd lio_cov = fullCovToLio(state_.cov);
+    const Eigen::MatrixXd lio_cov = fullCovToLio(iteration_prior_cov);
     if (config_setting_.directional_update_en)
     {
       directional_update::Result filtered;
@@ -539,42 +622,28 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       information_vector = filtered.information_vector;
       final_directional_result = filtered;
     }
-    Eigen::MatrixXd K_1;
-    if (config_setting_.directional_update_en)
-    {
-      std::string covariance_error;
-      if (!directional_update::posteriorCovariance(
-              lio_cov, H_T_H, K_1, covariance_error))
-      {
-        std::cerr << "[ Directional LIO ] system factorization rejected: "
-                  << covariance_error << std::endl;
-        state_ = state_propagat;
-        return;
-      }
-      final_directional_posterior_covariance = K_1;
-    }
-    else
-    {
-      K_1 = (H_T_H + lio_cov.inverse()).inverse();
-    }
-    Eigen::VectorXd vec = fullVectorToLio(state_propagat - state_);
-    Eigen::VectorXd solution_lio;
-    Eigen::MatrixXd G_lio = Eigen::MatrixXd::Zero(lio_state_dim, lio_state_dim);
-    if (config_setting_.directional_update_en)
-    {
-      G_lio = K_1 * H_T_H;
-      solution_lio = K_1 * information_vector + vec - G_lio * vec;
-    }
-    else
-    {
-      G_lio.leftCols(6) = K_1.leftCols(6) * H_T_H.topLeftCorner(6, 6);
-      solution_lio = K_1.leftCols(6) * HTz + vec - G_lio.leftCols(6) * vec.head(6);
-    }
+    Eigen::MatrixXd full_information = Eigen::MatrixXd::Zero(full_state_dim, full_state_dim);
+    Eigen::VectorXd full_information_vector = Eigen::VectorXd::Zero(full_state_dim);
     for (int r = 0; r < lio_state_dim; ++r)
+    {
+      full_information_vector[lio_to_full[r]] = information_vector[r];
       for (int c = 0; c < lio_state_dim; ++c)
-        G(lio_to_full[r], lio_to_full[c]) = G_lio(r, c);
-    Eigen::VectorXd solution = Eigen::VectorXd::Zero(full_state_dim);
-    for (int k = 0; k < lio_state_dim; ++k) solution[lio_to_full[k]] = solution_lio[k];
+        full_information(lio_to_full[r], lio_to_full[c]) = H_T_H(r, c);
+    }
+    estimator_covariance::Update update;
+    try
+    {
+      update = estimator_covariance::update(iteration_prior_cov, full_information,
+                                             full_information_vector, state_propagat - state_, lio_to_full);
+    }
+    catch (const std::exception &error)
+    {
+      printf("\033[1;31m[ COV LIO ] Update rejected: %s\033[0m\n", error.what());
+      state_ = state_propagat;
+      return;
+    }
+    const Eigen::VectorXd solution = update.correction;
+    final_posterior_covariance = state_.resetCovariance(update.covariance, solution);
     int minRow, minCol;
     state_ += solution;
     auto rot_add = solution.block<3, 1>(0, 0);
@@ -593,17 +662,6 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       // _state.cov = (I_STATE - G) * _state.cov;
       if (config_setting_.directional_update_en)
       {
-        if (final_directional_posterior_covariance.rows() != lio_state_dim ||
-            final_directional_posterior_covariance.cols() != lio_state_dim)
-        {
-          std::cerr << "[ Directional LIO ] covariance update rejected: missing final posterior"
-                    << std::endl;
-          state_ = state_propagat;
-          return;
-        }
-        for (int r = 0; r < lio_state_dim; ++r)
-          for (int c = 0; c < lio_state_dim; ++c)
-            state_.cov(lio_to_full[r], lio_to_full[c]) = final_directional_posterior_covariance(r, c);
         std::cout << "[ Directional LIO ] rho_max="
                   << final_directional_result.variance_reductions.maxCoeff()
                   << " rho_mean=" << final_directional_result.variance_reductions.mean()
@@ -611,13 +669,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
                   << " full=" << final_directional_result.full_rank
                   << " dim=" << lio_state_dim << std::endl;
       }
-      else
-      {
-        const Eigen::MatrixXd updated_lio_cov = (I_LIO - G_lio) * fullCovToLio(state_.cov);
-        for (int r = 0; r < lio_state_dim; ++r)
-          for (int c = 0; c < lio_state_dim; ++c)
-            state_.cov(lio_to_full[r], lio_to_full[c]) = updated_lio_cov(r, c);
-      }
+      state_.cov = final_posterior_covariance;
       // total_distance += (_state.pos_end - position_last).norm();
       position_last_ = state_.pos_end;
       geoQuat_ = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));
@@ -667,22 +719,9 @@ void VoxelMapManager::BuildVoxelMap()
   int max_points_num = config_setting_.max_points_num_;
   std::vector<int> layer_init_num = config_setting_.layer_init_num_;
 
-  std::vector<pointWithVar> input_points;
-
-  for (size_t i = 0; i < feats_down_world_->size(); i++)
-  {
-    pointWithVar pv;
-    pv.point_w << feats_down_world_->points[i].x, feats_down_world_->points[i].y, feats_down_world_->points[i].z;
-    V3D point_this(feats_down_body_->points[i].x, feats_down_body_->points[i].y, feats_down_body_->points[i].z);
-    M3D var;
-    calcBodyCov(point_this, config_setting_.dept_err_, config_setting_.beam_err_, var);
-    M3D point_crossmat;
-    point_crossmat << SKEW_SYM_MATRX(point_this);
-    var = (state_.rot_end * extR_) * var * (state_.rot_end * extR_).transpose() +
-          (-point_crossmat) * state_.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose() + state_.cov.block<3, 3>(3, 3);
-    pv.var = var;
-    input_points.push_back(pv);
-  }
+  PrepareScanCovariances();
+  RefreshWorldPoints();
+  const std::vector<pointWithVar> &input_points = pv_list_;
 
   uint plsize = input_points.size();
   for (uint i = 0; i < plsize; i++)
@@ -718,6 +757,9 @@ void VoxelMapManager::BuildVoxelMap()
   {
     iter->second->init_octo_tree();
   }
+  // Populate normals needed by the first visual frame. These self-map queries
+  // are metadata only: no Kalman update or second map insertion is performed.
+  BuildResidualListOMP(pv_list_, ptpl_list_);
 }
 
 V3F VoxelMapManager::RGBFromVoxel(const V3D &input_point)
@@ -855,7 +897,7 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
     float dis_to_plane = fabs(plane.normal_(0) * p_w(0) + plane.normal_(1) * p_w(1) + plane.normal_(2) * p_w(2) + plane.d_);
     float dis_to_center = (plane.center_(0) - p_w(0)) * (plane.center_(0) - p_w(0)) + (plane.center_(1) - p_w(1)) * (plane.center_(1) - p_w(1)) +
                           (plane.center_(2) - p_w(2)) * (plane.center_(2) - p_w(2));
-    float range_dis = sqrt(dis_to_center - dis_to_plane * dis_to_plane);
+    float range_dis = sqrt(std::max(0.0f, dis_to_center - dis_to_plane * dis_to_plane));
 
     if (range_dis <= radius_k * plane.radius_)
     {
@@ -864,7 +906,7 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
       J_nq.block<1, 3>(0, 3) = -plane.normal_;
       double sigma_l = J_nq * plane.plane_var_ * J_nq.transpose();
       sigma_l += plane.normal_.transpose() * pv.var * plane.normal_;
-      if (dis_to_plane < sigma_num * sqrt(sigma_l))
+      if (std::isfinite(sigma_l) && sigma_l > 0.0 && dis_to_plane < sigma_num * sqrt(sigma_l))
       {
         is_sucess = true;
         double this_prob = 1.0 / (sqrt(sigma_l)) * exp(-0.5 * dis_to_plane * dis_to_plane / sigma_l);
@@ -880,6 +922,7 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
           single_ptpl.center_ = plane.center_;
           single_ptpl.d_ = plane.d_;
           single_ptpl.layer_ = current_layer;
+          single_ptpl.plane_id_ = plane.id_;
           single_ptpl.dis_to_plane_ = plane.normal_(0) * p_w(0) + plane.normal_(1) * p_w(1) + plane.normal_(2) * p_w(2) + plane.d_;
         }
         return;
