@@ -103,7 +103,7 @@ time_offset:
 preprocess:
   image_downclock_en: true
   image_downclock_factor: 4
-  point_filter_num: 10
+  point_filter_num: 5
   filter_size_surf: 0.1
   lidar_type: 5
   scan_line: 32
@@ -139,7 +139,7 @@ vio:
   patch_size: 8
   patch_pyrimid_level: 2
 
-  virtual_fisheye_patch_en: false
+  virtual_fisheye_patch_en: true
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
@@ -151,7 +151,7 @@ vio:
   # mode: collect decisions and diagnostics without changing EKF admission,
   # reference selection, or deleting map objects while the raw-path abort is traced.
   visual_ref_post_ekf_build_en: true
-  visual_map_manage_en: false
+  visual_map_manage_en: true
   visual_map_manage_log_en: true
   visual_map_manage_shadow_en: true
   visual_ref_current_select_en: true
@@ -279,7 +279,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "exp04_cake2r"
+  seq_name: "exp04_cake2rt"
   pose_output_en: true
 
 pcd_save:

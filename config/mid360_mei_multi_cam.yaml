@@ -1,6 +1,6 @@
 common:
   # This launch defaults to the single raw MEI camera0 stream.
-  num_cameras: 1
+  num_cameras: 2
   require_all_cameras: true
   multi_cam_sync_queue_size: 5
   multi_cam_sync_tolerance_ms: 40.0
@@ -8,10 +8,10 @@ common:
   # false preserves the original estimator path exactly.
   directional_update_en: false
   directional_drop_variance_reduction: 0.05
-  directional_full_variance_reduction: 0.40
+  directional_full_variance_reduction: 0.80
   lid_topic: "/livox/lidar"
   imu_topic: "/livox/imu"
-  img_en: 1
+  img_en: 0
   lidar_en: 1
   ros_driver_bug_fix: false
 
@@ -86,7 +86,7 @@ time_offset:
   exposure_time_init: 0.0
 
 preprocess:
-  image_downclock_en: false
+  image_downclock_en: true
   image_downclock_factor: 2
   point_filter_num: 1
   filter_size_surf: 0.1
@@ -101,19 +101,19 @@ vio:
   # Virtual fisheye patch logic is used by the direct/fisheye frontend.
   frontend_mode: 0
   cross_camera_reference_en: true
-  cross_camera_current_residual_en: true
+  cross_camera_current_residual_en: false
   max_iterations: 5
   outlier_threshold: 1000
-  ncc_en: true
+  ncc_en: false
   ncc_thre: 0.7
   # Per-level thresholds ordered [L0, L1, ...]; one value broadcasts to all levels.
   ncc_thre_by_level: [0.4, 0.4]
   # Standardize every same-camera and cross-camera patch before EKF linearization.
   # Enabling this disables exposure estimation and is incompatible with IC/S2.
-  zncc_residual_en: true
+  zncc_residual_en: false
   zncc_min_std: 1.0
   zncc_residual_cov: 1.0
-  zncc_robust_en: true
+  zncc_robust_en: false
   zncc_huber_delta: 0.5
   # Omni-LIVO-style per-residual Tukey weighting; uses outlier_threshold as cutoff.
   # When enabled, this overrides the ZNCC patch-level Huber weighting above.
@@ -129,26 +129,27 @@ vio:
   # Adapted from the original cam0 virtual-patch values:
   # virtual_width/height and sphere LUT fields are not read by this project;
   # ax/ay=120 maps to the current virtual_focal_length parameter.
-  virtual_fisheye_patch_en: true
+  virtual_fisheye_patch_en: false
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
   virtual_raw_score_select_en: true
-  max_total_points: 150
+  max_total_points: 500
   points_per_camera_min: 50
-  points_per_camera_max: 150
+  points_per_camera_max: 250
   # Advanced visual reference/landmark management. Start MEI in shadow mode:
   # collect decisions and diagnostics without changing EKF admission,
   # reference selection, or deleting map objects while the raw-path abort is traced.
   visual_ref_post_ekf_build_en: true
-  visual_map_manage_en: true
-  visual_map_manage_log_en: true
-  visual_map_manage_shadow_en: true
+
+  visual_map_manage_en: false
+  visual_map_manage_log_en: false
+  visual_map_manage_shadow_en: false
   visual_ref_current_select_en: true
   visual_ref_fallback_en: true
   visual_ref_lifecycle_en: true
   visual_ref_view_coverage_en: true
-  visual_ref_nis_en: true
+  visual_ref_nis_en: false
   visual_point_seed_validation_en: true
   visual_point_footprint_redundancy_en: true
   visual_point_information_prune_en: true
@@ -159,8 +160,8 @@ vio:
   visual_ref_validate_min_ratio: 0.67
   visual_ref_retire_reject_count: 5
   visual_ref_max_count: 8
-  visual_ref_coverage_angle_deg: 12.0
-  visual_ref_max_anisotropy: 4.0
+  visual_ref_coverage_angle_deg: 10.0
+  visual_ref_max_anisotropy: 8.0
   visual_ref_nis_max_per_dof: 3.0
   visual_point_seed_min_tests: 3
   visual_point_seed_min_ratio: 0.67
@@ -168,7 +169,7 @@ vio:
   visual_point_information_retain: 0.90
   visual_point_suspect_reject_count: 8
   visual_point_stale_frames: 200
-  virtual_focal_length: 1000.0
+  virtual_focal_length: 300
   virtual_patch_margin: 4
   virtual_max_search_level: 0
   # virtual_patch_resampling_mode: "forward_splat"
@@ -177,10 +178,11 @@ vio:
   # virtual_interp_mode: "bicubic"
   virtual_raw_window_half_size: 96
   virtual_splat_min_weight: 1.0e-6
-  virtual_splat_require_full_core_coverage: true
+  virtual_splat_require_full_core_coverage: false
   virtual_splat_debug_compare_pull_exact: false
   # Keep the strong insertion filter disabled during diagnosis. Its lookup
   # scale matches mid360 lio.voxel_size so footprint association stays coherent.
+  
   visual_geom_filter_en: true
   visual_geom_filter_log_en: true
   visual_geom_filter_require_point_cov: true
@@ -266,7 +268,6 @@ local_map:
   map_sliding_en: false
   half_map_size: 100
   sliding_thresh: 8.0
-
 uav:
   imu_rate_odom: false
   gravity_align_en: true
@@ -279,11 +280,11 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "lidar"
+  seq_name: "mocap4_nees_onlylio_off"
   pose_output_en: true
 
 pcd_save:
-  pcd_save_en: true
+  pcd_save_en: false
   type: 0
   colmap_output_en: false
   filter_size_pcd: 0.15
