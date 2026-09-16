@@ -124,5 +124,64 @@ int main() {
     try { select({}, bad, {}); } catch (const std::runtime_error &) { rejected = true; }
     require(rejected, "invalid prior silently repaired");
   }
+  {
+    // Zero-column marginalization must retain uncertainty and cross covariance
+    // of the full state, not condition inactive IMU/calibration states away.
+    const int dim = 32;
+    Matrix seed = Matrix::Random(dim, dim);
+    const Matrix p = seed * seed.transpose() + Matrix::Identity(dim, dim);
+    std::vector<Candidate> c;
+    for (int i = 0; i < 7; ++i) {
+      Candidate a;
+      a.h = Matrix::Zero(3, dim);
+      a.h.leftCols(6) = Matrix::Random(3, 6);
+      a.h.col(9) = Matrix::Random(3, 1);
+      a.h.col(17) = Matrix::Random(3, 1);
+      a.sources[{0, static_cast<uint64_t>(i / 3), 0, 0}] = Matrix::Random(3, 2);
+      a.sources[{1, 0, 0, static_cast<uint64_t>(i % 3)}] = Matrix::Random(3, 1);
+      a.point = i; a.cost = 64; c.push_back(a);
+    }
+    for (bool shared : {false, true}) {
+      const auto result = select(c, p, {5, 320, shared});
+      require(result.active_state_dimension == 8, "unused columns were not marginalized");
+      std::vector<int> prefix;
+      Matrix previous = p;
+      for (size_t step = 0; step < result.indices.size(); ++step) {
+        int best = -1; double best_gain = -1.;
+        for (int i = 0; i < static_cast<int>(c.size()); ++i) {
+          if (std::find(prefix.begin(), prefix.end(), i) != prefix.end()) continue;
+          auto trial = prefix; trial.push_back(i);
+          const double gain = .5 * (poseLogdet(previous) - poseLogdet(densePosterior(c, trial, p, shared)));
+          if (gain > best_gain) { best = i; best_gain = gain; }
+        }
+        require(best == result.indices[step], "compressed/cached greedy differs from full dense oracle");
+        require(std::abs(best_gain - result.gains[step]) < 1.e-9, "compressed gain mismatch");
+        prefix.push_back(best); previous = densePosterior(c, prefix, p, shared);
+      }
+      close(result.design_covariance, previous);
+    }
+  }
+  {
+    // The >=96-candidate branch is parallel in OpenMP builds. Check ordering,
+    // shared noise and inactive-state recovery against a serial dense oracle.
+    std::vector<Candidate> c;
+    for (int i = 0; i < 100; ++i)
+      c.push_back(scalar(i % 6, 0.5 + .013 * i, .3, i / 4, i, i % 2));
+    const auto result = select(c, prior, {6, 384, true});
+    std::vector<int> prefix;
+    Matrix previous = prior;
+    for (int selected : result.indices) {
+      int best = -1; double best_gain = -1.;
+      for (int i = 0; i < static_cast<int>(c.size()); ++i) {
+        if (std::find(prefix.begin(), prefix.end(), i) != prefix.end()) continue;
+        auto trial = prefix; trial.push_back(i);
+        const double gain = .5 * (poseLogdet(previous) - poseLogdet(densePosterior(c, trial, prior, true)));
+        if (gain > best_gain) { best = i; best_gain = gain; }
+      }
+      require(best == selected, "parallel ordered reduction differs from serial oracle");
+      prefix.push_back(selected); previous = densePosterior(c, prefix, prior, true);
+    }
+    close(result.design_covariance, previous);
+  }
   std::cout << "photometric_selection_math_test passed\n";
 }

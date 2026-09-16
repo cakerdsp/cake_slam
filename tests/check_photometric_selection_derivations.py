@@ -123,6 +123,61 @@ class SelectionDerivations(unittest.TestCase):
             updated = posterior(p, h, np.eye(6) + b @ b.T)
             self.assertGreaterEqual(np.linalg.eigvalsh(p[:6, :6] - updated[:6, :6]).min(), -1e-10)
 
+    def test_active_marginal_recovers_full_posterior(self):
+        for _ in range(15):
+            d = 32
+            x = self.rng.normal(size=(d, d)); p = x @ x.T + np.eye(d)
+            active = list(range(6)) + [9, 17]
+            h = np.zeros((13, d)); h[:, active] = self.rng.normal(size=(13, len(active)))
+            u = self.rng.normal(size=(13, 5)); r = np.eye(13) + u @ u.T
+            pa = p[np.ix_(active, active)]
+            reduced = posterior(pa, h[:, active], r)
+            g = np.linalg.solve(pa, p[:, active].T).T
+            recovered = p + g @ (reduced - pa) @ g.T
+            self.assertClose(recovered, posterior(p, h, r))
+
+    def test_early_pixel_projection_matches_original_noise_model(self):
+        for normalized in [False, True]:
+            m = 64; rows = 47; rank = 7
+            indices = self.rng.choice(m, size=rows, replace=False)
+            q, _ = np.linalg.qr(self.rng.normal(size=(rows, rank)))
+            weights = self.rng.uniform(.1, 1., size=rows)
+            projection = q.T * weights / np.sqrt(1000.)
+            a = self.rng.uniform(size=(m, 91)); a /= a.sum(axis=1, keepdims=True)
+            values = self.rng.uniform(20., 230., size=m)
+            centered = values - values.mean(); sigma = values.std()
+            if normalized:
+                norm_j = (np.eye(m) - np.ones((m, m)) / m -
+                          np.outer(centered, centered) / (m * sigma**2)) / sigma
+            else:
+                norm_j = 1.3 * np.eye(m)
+            original = -projection @ (norm_j @ a)[indices]
+            early = np.zeros((rank, m)); early[:, indices] = -projection
+            if normalized:
+                early = (early - early.mean(axis=1, keepdims=True)) / sigma - \
+                    np.outer(early @ centered, centered) / (m * sigma**3)
+            else:
+                early *= 1.3
+            self.assertClose(early @ a, original)
+
+    def test_sparse_source_cache_matches_dense_joint_covariance(self):
+        sizes = [3, 5, 2, 4, 6]
+        sources = [{i // 2: self.rng.normal(size=(m, 2)),
+                    10 + i % 2: self.rng.normal(size=(m, 1))}
+                   for i, m in enumerate(sizes)]
+        blocks = {}; owners = {}
+        for i, source in enumerate(sources):
+            for key, b in source.items():
+                for j, other in owners.get(key, []):
+                    blocks[i, j] = blocks.get((i, j), np.zeros((sizes[i], sizes[j]))) + b @ other.T
+                owners.setdefault(key, []).append((i, b))
+        for i in range(len(sizes)):
+            for j in range(i):
+                dense = sum((sources[i][k] @ sources[j][k].T
+                             for k in sources[i].keys() & sources[j].keys()),
+                            np.zeros((sizes[i], sizes[j])))
+                self.assertClose(blocks.get((i, j), np.zeros_like(dense)), dense)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

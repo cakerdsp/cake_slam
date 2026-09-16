@@ -1033,7 +1033,8 @@ void VIOManager::initializeVIO()
     ctx.grid_num.resize(ctx.length);
     ctx.map_index.resize(ctx.length);
     ctx.map_dist.resize(ctx.length);
-    ctx.update_flag.resize(ctx.length);
+    // update_flag is indexed by observation slot, not image-grid cell.
+    ctx.update_flag.clear();
     ctx.scan_value.resize(ctx.length);
     ctx.border_flag.assign(ctx.length, 0);
     ctx.retrieve_voxel_points.reserve(ctx.length);
@@ -1134,7 +1135,7 @@ void VIOManager::resetGrid(PerCameraData &ctx)
   fill(ctx.grid_num.begin(), ctx.grid_num.end(), TYPE_UNKNOWN);
   fill(ctx.map_index.begin(), ctx.map_index.end(), 0);
   fill(ctx.map_dist.begin(), ctx.map_dist.end(), 10000.0f);
-  fill(ctx.update_flag.begin(), ctx.update_flag.end(), 0);
+  ctx.update_flag.clear();
   fill(ctx.scan_value.begin(), ctx.scan_value.end(), 0.0f);
   ctx.retrieve_voxel_points.assign(ctx.length, nullptr);
   ctx.retrieve_voxel_point_candidates.assign(ctx.length, std::vector<VisualPoint *>());
@@ -7171,6 +7172,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
   // Pre-score every candidate at its finest eligible level and a common entry
   // state. Finish all scoring levels before the first estimator correction.
   std::map<std::pair<int, int>, photometric_selection::Candidate> selection_candidates;
+  // Map/reference covariances are fixed throughout this frame's iterations.
+  // Their roots do not depend on the current photometric Jacobian or level.
+  std::unordered_map<const Feature *, Eigen::MatrixXd> reference_covariance_roots;
+  std::unordered_map<const VisualPoint *, Eigen::MatrixXd> point_covariance_roots;
   std::vector<std::vector<uint8_t>> selected(numCameras());
   for (const auto &ctx : cameras_) selected[ctx.camera_id].assign(ctx.total_points, 0);
   // A balanced, spatially stratified candidate pool bounds scoring cost. Slots
@@ -7222,6 +7227,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
           Eigen::LLT<Eigen::MatrixXd>(iteration_prior_cov).info() != Eigen::Success)
       {
         printf("\033[1;31m[ COV VIO ] Full prior covariance is invalid; update rejected.\033[0m\n");
+        vio_update_status_ = "prior_rejected";
+        vio_final_residual_count_ = 0;
         *state = state_before_visual_update;
         G.setZero();
         syncCameraExtrinsicsFromState(*state);
@@ -7863,13 +7870,51 @@ void VIOManager::computeJacobianAndUpdateEKF()
           patch_nuisance.conservativeResize(local_dof, Eigen::NoChange);
           patch_residual.conservativeResize(local_dof);
           patch_weights.conservativeResize(local_dof);
+          auto score_candidate = [&]() {
+            // Unvalidated/seed references are still tested above for lifecycle
+            // promotion, but never enter the estimator through this selector.
+            const bool reference_validated = usage_reference->ref_state_ == Feature::RefState::VALIDATED &&
+                !usage_reference->pending_delete_;
+            if (contributes_to_ekf && reference_validated)
+            {
+              Eigen::MatrixXd full_j = Eigen::MatrixXd::Zero(local_dof, full_state_dim);
+              for (int col = 0; col < solve_dim; ++col) full_j.col(solve_to_full[col]) = patch_jacobian.col(col);
+              photometric_selection::Candidate candidate;
+              try
+              {
+                if (buildPhotometricSelectionCandidate(ctx, point_index, level, full_j,
+                        patch_nuisance.rightCols(3), patch_weights, selection_patch_indices, candidate))
+                  selection_candidates[{ctx.camera_id, point_index}] = std::move(candidate);
+                else ++selection_model_rejections;
+              }
+              catch (const std::exception &exception)
+              {
+                if (selection_model_rejections++ == 0)
+                  printf("\033[1;33m[ PHOTO SELECT ] Candidate score rejected: %s\033[0m\n", exception.what());
+              }
+            }
+          };
+          // With map management disabled, scoring needs H and the conditional
+          // geometry Jacobian only. Do not build an unused estimator likelihood.
+          if (selection_pass && !visual_map_manage_en)
+          {
+            ctx.visual_submap->errors[point_index] = patch_error;
+            score_candidate();
+            continue;
+          }
           Eigen::MatrixXd nuisance_root(local_dof, 9);
           try
           {
-            nuisance_root.leftCols(6) = patch_nuisance.leftCols(6) *
-                estimator_covariance::positiveSemidefiniteRoot(usage_reference->birth_pose_cov_);
-            nuisance_root.rightCols(3) = patch_nuisance.rightCols(3) *
-                estimator_covariance::positiveSemidefiniteRoot(point->covariance_);
+            auto ref_root = reference_covariance_roots.find(usage_reference);
+            if (ref_root == reference_covariance_roots.end())
+              ref_root = reference_covariance_roots.emplace(usage_reference,
+                  estimator_covariance::positiveSemidefiniteRoot(usage_reference->birth_pose_cov_)).first;
+            auto point_root = point_covariance_roots.find(point);
+            if (point_root == point_covariance_roots.end())
+              point_root = point_covariance_roots.emplace(point,
+                  estimator_covariance::positiveSemidefiniteRoot(point->covariance_)).first;
+            nuisance_root.leftCols(6).noalias() = patch_nuisance.leftCols(6) * ref_root->second;
+            nuisance_root.rightCols(3).noalias() = patch_nuisance.rightCols(3) * point_root->second;
           }
           catch (const std::exception &error)
           {
@@ -7960,28 +8005,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                  nis / static_cast<double>(local_dof) <= visual_ref_nis_max_per_dof);
           if (selection_pass)
           {
-            // Unvalidated/seed references are still tested above for lifecycle
-            // promotion, but never enter the estimator through this selector.
-            const bool reference_validated = usage_reference->ref_state_ == Feature::RefState::VALIDATED &&
-                !usage_reference->pending_delete_;
-            if (contributes_to_ekf && reference_validated && nis_pass)
-            {
-              Eigen::MatrixXd full_j = Eigen::MatrixXd::Zero(local_dof, full_state_dim);
-              for (int col = 0; col < solve_dim; ++col) full_j.col(solve_to_full[col]) = patch_jacobian.col(col);
-              photometric_selection::Candidate candidate;
-              try
-              {
-                if (buildPhotometricSelectionCandidate(ctx, point_index, level, full_j,
-                        patch_nuisance.rightCols(3), patch_weights, selection_patch_indices, candidate))
-                  selection_candidates[{ctx.camera_id, point_index}] = std::move(candidate);
-                else ++selection_model_rejections;
-              }
-              catch (const std::exception &exception)
-              {
-                if (selection_model_rejections++ == 0)
-                  printf("\033[1;33m[ PHOTO SELECT ] Candidate score rejected: %s\033[0m\n", exception.what());
-              }
-            }
+            if (nis_pass) score_candidate();
             continue;
           }
           if (contributes_to_ekf && nis_pass)
@@ -8031,7 +8055,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
           options.shared_errors = photometric_selection_shared_errors;
           try
           {
+            const double choose_start = omp_get_wtime();
+            const double build_ms = 1000.0 * (choose_start - selection_start);
             const auto result = photometric_selection::select(candidates, cov_before_visual_update, options);
+            const double choose_ms = 1000.0 * (omp_get_wtime() - choose_start);
             int cross_references = 0;
             std::set<int> selected_cameras;
             std::set<photometric_selection::SourceKey> geometry_sources;
@@ -8049,10 +8076,12 @@ void VIOManager::computeJacobianAndUpdateEKF()
             // quality management, not the estimator's accepted information.
             // Preserve it for tested alternatives; usage counters below only
             // accumulate residuals that actually enter the selected update.
-            printf("\033[1;36m[ PHOTO SELECT ] frame=%d shared=%d candidates=%zu selected=%zu pixels=%d/%d cameras=%zu geometry_sources=%zu cross_refs=%d score_gain=%.6f model_reject_levels=%d prepass_ms=%.3f\033[0m\n",
+            printf("\033[1;36m[ PHOTO SELECT ] frame=%d shared=%d candidates=%zu selected=%zu pixels=%d/%d cameras=%zu geometry_sources=%zu cross_refs=%d score_gain=%.6f model_reject_levels=%d build_ms=%.3f choose_ms=%.3f score_evals=%d state_dim=%d shared_blocks=%d prepass_ms=%.3f\033[0m\n",
                    frame_count, photometric_selection_shared_errors, candidates.size(), result.indices.size(),
                    result.pixels, photometric_selection_pixel_budget, selected_cameras.size(), geometry_sources.size(),
                    cross_references, result.pose_logdet_gain, selection_model_rejections,
+                   build_ms, choose_ms, result.score_evaluations, result.active_state_dimension,
+                   result.shared_covariance_blocks,
                    1000.0 * (omp_get_wtime() - selection_start));
           }
           catch (const std::exception &exception)
@@ -9871,20 +9900,41 @@ void VIOManager::commitPendingNewPoints(
   printf("[ VIO ] committed %zu new shared visual map points\n", created_points.size());
 }
 
+void VIOManager::deferLegacyReferenceRemoval(VisualPoint &point, Feature *feature)
+{
+  if (feature == nullptr || feature->pending_delete_) return;
+  feature->pending_delete_ = true;
+  legacy_retired_refs_.emplace_back(&point, feature);
+}
+
+void VIOManager::deferLegacyNonReferenceRemoval(VisualPoint &point)
+{
+  for (Feature *feature : point.obs_)
+  {
+    const bool kept_by_camera = std::find(point.ref_patch_by_camera_.begin(),
+        point.ref_patch_by_camera_.end(), feature) != point.ref_patch_by_camera_.end();
+    if (feature != point.ref_patch && !kept_by_camera)
+      deferLegacyReferenceRemoval(point, feature);
+  }
+}
+
 void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat &img)
 {
+  ctx.update_flag.assign(ctx.total_points, 0);
   if (ctx.total_points == 0) return;
 
   int update_num = 0;
   int level_gate_reject_num = 0;
   const SE3d pose_cur = ctx.new_frame->T_f_w_;
+  std::set<VisualPoint *> updated_points;
   for (int i = 0; i < ctx.total_points; ++i)
   {
     VisualPoint *pt = ctx.visual_submap->voxel_points[i];
     if (pt == nullptr || pt->pending_delete_) continue;
+    if (!updated_points.insert(pt).second) continue;
     if (pt->is_converged_ && (!visual_map_manage_en || visual_map_manage_shadow_en))
     {
-      pt->deleteNonRefPatchFeatures();
+      deferLegacyNonReferenceRemoval(*pt);
       continue;
     }
 
@@ -9892,7 +9942,8 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
     if (!projectRawFisheyeIfValid(ctx, ctx.new_frame->w2f(pt->pos_), 1, raw_px)) continue;
     Feature *last_feature = nullptr;
     for (Feature *feature : pt->obs_)
-      if (feature != nullptr && feature->camera_id_ == ctx.camera_id) { last_feature = feature; break; }
+      if (feature != nullptr && !feature->pending_delete_ && feature->camera_id_ == ctx.camera_id)
+        { last_feature = feature; break; }
     bool add_flag = last_feature == nullptr;
     if (last_feature != nullptr)
     {
@@ -9920,11 +9971,14 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
       continue;
     }
 
-    if ((!visual_map_manage_en || visual_map_manage_shadow_en) && pt->obs_.size() >= 30)
+    if ((!visual_map_manage_en || visual_map_manage_shadow_en) &&
+        std::count_if(pt->obs_.begin(), pt->obs_.end(), [](const Feature *f) {
+          return f != nullptr && !f->pending_delete_;
+        }) >= 30)
     {
       Feature *ref_ftr;
       pt->findMinScoreFeature(ctx.new_frame->pos(), ref_ftr);
-      pt->deleteFeatureRef(ref_ftr);
+      deferLegacyReferenceRemoval(*pt, ref_ftr);
     }
     if (!add_flag) continue;
     std::unique_ptr<float[]> patch(new float[patch_size_total]);
@@ -9966,7 +10020,7 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
     initializeManagedReference(*ftr_new, *pt, ctx, false);
     pt->addFrameRef(ftr_new);
     manageReferenceBank(*pt);
-    ctx.update_flag[i] = 1;
+    ctx.update_flag.at(i) = 1;
     ++update_num;
   }
   printf("[ VIO Virtual ] Update %d points in visual submap (all-level map gate rejected %d)\n",
@@ -9975,23 +10029,28 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
 
 void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
 {
+  // Multiple points per grid cell and alternate references can both make the
+  // observation list larger than ctx.length. Resize before either frontend.
   if (virtual_fisheye_patch_en)
   {
     updateVisualMapPointsVirtual(ctx, img);
     return;
   }
+  ctx.update_flag.assign(ctx.total_points, 0);
   if (ctx.total_points == 0) return;
 
   int update_num = 0;
   int level_gate_reject_num = 0;
   SE3 pose_cur = ctx.new_frame->T_f_w_;
+  std::set<VisualPoint *> updated_points;
   for (int i = 0; i < ctx.total_points; i++)
   {
     VisualPoint *pt = ctx.visual_submap->voxel_points[i];
     if (pt == nullptr || pt->pending_delete_) continue;
+    if (!updated_points.insert(pt).second) continue;
     if (pt->is_converged_ && (!visual_map_manage_en || visual_map_manage_shadow_en))
     { 
-      pt->deleteNonRefPatchFeatures();
+      deferLegacyNonReferenceRemoval(*pt);
       continue;
     }
 
@@ -10003,7 +10062,8 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
     // Step 1: time
     Feature *last_feature = nullptr;
     for (Feature *feature : pt->obs_)
-      if (feature != nullptr && feature->camera_id_ == ctx.camera_id) { last_feature = feature; break; }
+      if (feature != nullptr && !feature->pending_delete_ && feature->camera_id_ == ctx.camera_id)
+        { last_feature = feature; break; }
     // if(new_frame_->id_ >= last_feature->id_ + 10) add_flag = true; // 10
 
     // Step 2: delta_pose
@@ -10033,11 +10093,14 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
     }
 
     // Maintain the size of 3D point observation features.
-    if ((!visual_map_manage_en || visual_map_manage_shadow_en) && pt->obs_.size() >= 30)
+    if ((!visual_map_manage_en || visual_map_manage_shadow_en) &&
+        std::count_if(pt->obs_.begin(), pt->obs_.end(), [](const Feature *f) {
+          return f != nullptr && !f->pending_delete_;
+        }) >= 30)
     {
       Feature *ref_ftr;
       pt->findMinScoreFeature(ctx.new_frame->pos(), ref_ftr);
-      pt->deleteFeatureRef(ref_ftr);
+      deferLegacyReferenceRemoval(*pt, ref_ftr);
       // cout<<"pt->obs_.size() exceed 20 !!!!!!"<<endl;
     }
     if (add_flag)
@@ -10045,7 +10108,7 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
       patch_temp = new float[patch_size_total];
       getImagePatch(ctx, img, pc, patch_temp, 0);
       update_num += 1;
-      ctx.update_flag[i] = 1;
+      ctx.update_flag.at(i) = 1;
       Vector3d f = ctx.cam->cam2world(pc);
       Feature *ftr_new = new Feature(pt, patch_temp, pc, f, ctx.new_frame->T_f_w_,
                                      ctx.visual_submap->search_levels[i], ctx.camera_id,
@@ -10073,12 +10136,16 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
 void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
   if (ctx.total_points == 0) return;
+  if (ctx.update_flag.size() != ctx.visual_submap->voxel_points.size())
+    throw std::logic_error("visual observation flags do not match submap slots");
+  std::set<VisualPoint *> updated_points;
 
   for (int i = 0; i < static_cast<int>(ctx.visual_submap->voxel_points.size()); i++)
   {
     VisualPoint *pt = ctx.visual_submap->voxel_points[i];
 
     if (pt == nullptr || pt->pending_delete_ || !pt->is_normal_initialized_) continue;
+    if (!updated_points.insert(pt).second) continue;
     if (visual_map_manage_en)
     {
       if (pt->point_id_ == 0) pt->point_id_ = next_visual_point_id_++;
@@ -10156,7 +10223,7 @@ void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VO
     }
     if (pt->is_converged_) continue;
     if (pt->obs_.size() <= 5) continue;
-    if (ctx.update_flag[i] == 0) continue;
+    if (ctx.update_flag.at(i) == 0) continue;
 
     const V3D &p_w = pt->pos_;
     float loc_xyz[3];
@@ -10217,7 +10284,7 @@ void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VO
     for (auto it = pt->obs_.begin(), ite = pt->obs_.end(); it != ite; ++it)
     {
       Feature *ref_patch_temp = *it;
-      if (ref_patch_temp == nullptr) continue;
+      if (ref_patch_temp == nullptr || ref_patch_temp->pending_delete_) continue;
       refreshReferenceCalibration(*ref_patch_temp);
       if (!cross_camera_reference_en && ref_patch_temp->camera_id_ != ctx.camera_id) continue;
       float *patch_temp = ref_patch_temp->patch_;
@@ -10244,7 +10311,7 @@ void VIOManager::updateReferencePatch(PerCameraData &ctx, const unordered_map<VO
 
       for (auto itm = pt->obs_.begin(), itme = pt->obs_.end(); itm != itme; ++itm)
       {
-        if (*itm == nullptr || *itm == ref_patch_temp) continue;
+        if (*itm == nullptr || (*itm)->pending_delete_ || *itm == ref_patch_temp) continue;
         if (!cross_camera_reference_en && (*itm)->camera_id_ != ctx.camera_id) continue;
         float *patch_cache = (*itm)->patch_;
 
@@ -12082,6 +12149,11 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   }
   printVisualMapManageStats(mf.frame_id);
   if (colmap_output_en && numCameras() == 1) dumpDataForColmap();
+  // All submap/reference consumers have finished. Each feature is queued once
+  // using pending_delete_, even when observed by multiple current cameras.
+  for (const auto &entry : legacy_retired_refs_)
+    entry.first->deleteFeatureRef(entry.second);
+  legacy_retired_refs_.clear();
   const double reference_end = omp_get_wtime();
   ++frame_count;
   const double elapsed = reference_end - frame_start;
@@ -12108,8 +12180,10 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
       active_visual_point_count > 0
           ? static_cast<double>(active_visual_point_camera_reuse_sum) / static_cast<double>(active_visual_point_count)
           : 0.0;
-  printf("[ VIO ] multi-camera frame=%d cameras=%d observations=%zu elapsed=%.6f s\n",
-         mf.frame_id, numCameras(), feat_map.size(), elapsed);
+  size_t observation_slots = 0;
+  for (const auto &ctx : cameras_) observation_slots += ctx.total_points;
+  printf("[ VIO ] multi-camera frame=%d cameras=%d map_voxels=%zu observation_slots=%zu elapsed=%.6f s\n",
+         mf.frame_id, numCameras(), feat_map.size(), observation_slots, elapsed);
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");

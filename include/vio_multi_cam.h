@@ -379,6 +379,11 @@ public:
   bool cross_camera_current_residual_en = false;
   std::map<std::pair<VisualPoint *, int>, bool> photometric_point_tests_;
   void finalizeManagedPointEvidence(VisualPoint *point);
+  // Frame submaps borrow Feature pointers, including alternate references.
+  // Reclaim legacy references only after every camera finishes using them.
+  std::vector<std::pair<VisualPoint *, Feature *>> legacy_retired_refs_;
+  void deferLegacyReferenceRemoval(VisualPoint &point, Feature *feature);
+  void deferLegacyNonReferenceRemoval(VisualPoint &point);
   bool photometric_selection_en = true;
   bool photometric_selection_shared_errors = true;
   int photometric_selection_candidate_budget = 600;

@@ -68,6 +68,12 @@ bool VIOManager::buildPhotometricSelectionCandidate(
   // patch, not the rank of its score sketch or partially surviving pixels.
   candidate.cost = patch_size_total;
   candidate.h = weights.asDiagonal() * full_jacobian / stddev;
+  // Project once, before allocating per-pixel source vectors. The previous
+  // path allocated a 64-row vector for every source then projected each one.
+  const Eigen::MatrixXd q = photometric_selection::rowSpaceBasis(candidate.h);
+  if (q.cols() == 0) return false;
+  candidate.h = (q.transpose() * candidate.h).eval();
+  const Eigen::MatrixXd weighted_projection = q.transpose() * weights.asDiagonal() / stddev;
 
   // Geometry is tied to its actual creation source. Scan landmarks use their
   // local sensor covariance. The frontend's raycast additions are plane
@@ -79,8 +85,10 @@ bool VIOManager::buildPhotometricSelectionCandidate(
       ? photometric_selection::SourceKey{0, static_cast<uint64_t>(point.local_geometry_plane_id_),
                                           point.local_geometry_plane_revision_, 0}
       : photometric_selection::SourceKey{2, candidate.point, 0, 0};
-  candidate.sources[geometry_key] = weights.asDiagonal() * point_jacobian *
-      estimator_covariance::positiveSemidefiniteRoot(point.local_geometry_covariance_) / stddev;
+  const Eigen::MatrixXd geometry = weighted_projection * point_jacobian *
+      estimator_covariance::positiveSemidefiniteRoot(point.local_geometry_covariance_);
+  if (!geometry.allFinite()) return false;
+  if (geometry.squaredNorm() > 0.0) candidate.sources[geometry_key] = geometry;
 
   if (photometric_selection_reference_pixel_std > 0.0) {
     if (reference.camera_id_ < 0 || reference.camera_id_ >= numCameras()) return false;
@@ -154,17 +162,10 @@ bool VIOManager::buildPhotometricSelectionCandidate(
         for (auto &entry : ancestry[index]) entry.second /= sums[index];
       }
     }
-    std::map<int, Eigen::VectorXd> raw_columns;
-    for (int p = 0; p < patch_size_total; ++p) {
-      auto add = [&](int pixel, double weight) {
-        auto inserted = raw_columns.emplace(pixel, Eigen::VectorXd());
-        if (inserted.second) inserted.first->second = Eigen::VectorXd::Zero(patch_size_total);
-        inserted.first->second[p] += weight;
-      };
-      for (const auto &entry : samples[p]) {
-        if (!virt) add(entry.first, entry.second);
-        else for (const auto &raw : ancestry[entry.first]) add(raw.first, entry.second * raw.second);
-      }
+    Eigen::MatrixXd pixel_projection = Eigen::MatrixXd::Zero(q.cols(), patch_size_total);
+    for (int row = 0; row < rows; ++row) {
+      if (patch_indices[row] < 0 || patch_indices[row] >= patch_size_total) return false;
+      pixel_projection.col(patch_indices[row]) -= weighted_projection.col(row);
     }
     Eigen::VectorXd centered;
     double sigma = 1.0;
@@ -174,6 +175,25 @@ bool VIOManager::buildPhotometricSelectionCandidate(
       centered.array() -= centered.mean();
       sigma = std::sqrt(centered.squaredNorm() / patch_size_total);
       if (!std::isfinite(sigma) || sigma < zncc_min_std) return false;
+      const Eigen::VectorXd row_mean = pixel_projection.rowwise().mean();
+      const Eigen::VectorXd centered_response = pixel_projection * centered;
+      pixel_projection = ((pixel_projection.colwise() - row_mean) / sigma -
+          centered_response * centered.transpose() /
+              (patch_size_total * sigma * sigma * sigma)).eval();
+    }
+    else pixel_projection *= reference.inv_expo_time_;
+    pixel_projection *= photometric_selection_reference_pixel_std;
+    std::map<int, Eigen::VectorXd> raw_columns;
+    for (int p = 0; p < patch_size_total; ++p) {
+      auto add = [&](int pixel, double weight) {
+        auto inserted = raw_columns.emplace(pixel, Eigen::VectorXd());
+        if (inserted.second) inserted.first->second = Eigen::VectorXd::Zero(q.cols());
+        inserted.first->second.noalias() += weight * pixel_projection.col(p);
+      };
+      for (const auto &entry : samples[p]) {
+        if (!virt) add(entry.first, entry.second);
+        else for (const auto &raw : ancestry[entry.first]) add(raw.first, entry.second * raw.second);
+      }
     }
     uint64_t image_stamp = 0;
     const double stamp = reference.raw_timestamp_ != 0.0 ? reference.raw_timestamp_ : reference.capture_timestamp_;
@@ -182,18 +202,11 @@ bool VIOManager::buildPhotometricSelectionCandidate(
     // A zero timestamp carries no image identity; do not invent cross-feature
     // correlation in that compatibility path.
     if (stamp == 0.0) image_stamp = reinterpret_cast<uintptr_t>(&reference);
-    for (const auto &entry : raw_columns) {
-      Eigen::VectorXd normalized;
-      if (zncc_residual_en)
-        normalized = (entry.second.array() - entry.second.mean()).matrix() / sigma -
-            centered * centered.dot(entry.second) / (patch_size_total * sigma * sigma * sigma);
-      else normalized = reference.inv_expo_time_ * entry.second;
-      Eigen::MatrixXd b(rows, 1);
-      for (int row = 0; row < rows; ++row)
-        b(row, 0) = -weights[row] * normalized[patch_indices[row]] * photometric_selection_reference_pixel_std / stddev;
-      if (b.squaredNorm() > 0.0)
-        candidate.sources[{1, static_cast<uint64_t>(reference.camera_id_), image_stamp, static_cast<uint64_t>(entry.first)}] = std::move(b);
+    for (auto &entry : raw_columns) {
+      if (!entry.second.allFinite()) return false;
+      if (entry.second.squaredNorm() > 0.0)
+        candidate.sources[{1, static_cast<uint64_t>(reference.camera_id_), image_stamp, static_cast<uint64_t>(entry.first)}] = std::move(entry.second);
     }
   }
-  return photometric_selection::project(candidate);
+  return candidate.h.allFinite();
 }
