@@ -7446,13 +7446,18 @@ void VIOManager::computeJacobianAndUpdateEKF()
           Feature *usage_reference = point_index < static_cast<int>(ctx.visual_submap->reference_features.size())
                                          ? ctx.visual_submap->reference_features[point_index] : nullptr;
           if (usage_reference == nullptr || point_index >= static_cast<int>(ctx.visual_submap->warp_affines.size())) continue;
+          const bool compute_reference_nis = visual_map_manage_en && visual_ref_nis_en;
           Eigen::MatrixXd reference_noise_jacobian;
-          if (!referenceUncertaintyJacobian(*usage_reference, *point, reference_patch,
+          if (compute_reference_nis)
+          {
+            if (!referenceUncertaintyJacobian(*usage_reference, *point, reference_patch,
                                              ctx.visual_submap->warp_affines[point_index], level, scale,
                                              reference_noise_jacobian)) continue;
-          if (!zncc_residual_en) reference_noise_jacobian *= reference_exposure;
+            if (!zncc_residual_en) reference_noise_jacobian *= reference_exposure;
+          }
           Eigen::MatrixXd patch_jacobian = Eigen::MatrixXd::Zero(patch_size_total, solve_dim);
-          Eigen::MatrixXd patch_nuisance = Eigen::MatrixXd::Zero(patch_size_total, 9);
+          Eigen::MatrixXd patch_nuisance;
+          if (compute_reference_nis) patch_nuisance.setZero(patch_size_total, 9);
           Eigen::VectorXd patch_residual = Eigen::VectorXd::Zero(patch_size_total);
           Eigen::VectorXd patch_weights = Eigen::VectorXd::Ones(patch_size_total);
           double normalized_patch_weight = 1.0;
@@ -7464,11 +7469,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
             patch_jacobian.row(local_dof) = jacobian.transpose();
             patch_residual[local_dof] = residual;
             patch_weights[local_dof] = weight;
-            patch_nuisance.row(local_dof) = reference_noise_jacobian.row(patch_index);
-            // Landmark perturbations move its current projection oppositely to
-            // a world-frame camera translation. The reference part is already
-            // expressed in world coordinates by referenceUncertaintyJacobian.
-            patch_nuisance.block<1, 3>(local_dof, 6) -= jacobian.segment<3>(3).transpose();
+            if (compute_reference_nis)
+            {
+              patch_nuisance.row(local_dof) = reference_noise_jacobian.row(patch_index);
+              // Landmark perturbations move its current projection oppositely to
+              // a world-frame camera translation. The reference part is already
+              // expressed in world coordinates by referenceUncertaintyJacobian.
+              patch_nuisance.block<1, 3>(local_dof, 6) -= jacobian.segment<3>(3).transpose();
+            }
             patch_error += weight * weight * residual * residual;
             ++local_dof;
           };
@@ -7489,16 +7497,23 @@ void VIOManager::computeJacobianAndUpdateEKF()
             for (int k = 0; k < patch_size_total; ++k)
               reference_values[k] = reference_patch[patch_size_total * level + k];
             if (!normalizePatchWithJacobian(current_values, raw_current_jacobian, zncc_min_std,
-                                            normalized_current, normalized_current_jacobian) ||
-                !normalizePatchWithJacobian(reference_values, reference_noise_jacobian, zncc_min_std,
-                                            normalized_reference, normalized_reference_jacobian))
+                                            normalized_current, normalized_current_jacobian))
+              return false;
+            if (compute_reference_nis)
+            {
+              if (!normalizePatchWithJacobian(reference_values, reference_noise_jacobian, zncc_min_std,
+                                              normalized_reference, normalized_reference_jacobian))
+                return false;
+              reference_noise_jacobian = normalized_reference_jacobian;
+            }
+            else if (!normalizePatchValues(reference_patch.data() + patch_size_total * level, patch_size_total, zncc_min_std,
+                                           normalized_reference))
               return false;
             Eigen::VectorXd residual = normalized_current - normalized_reference;
             const double sqrt_robust_weight =
                 normalizedPatchRobustSqrtWeight(residual, zncc_robust_en && !tukey_robust_en,
                                                 zncc_huber_delta);
             normalized_patch_weight = sqrt_robust_weight;
-            reference_noise_jacobian = normalized_reference_jacobian;
             for (int row = 0; row < patch_size_total; ++row)
               accumulateObservation(normalized_current_jacobian.row(row).transpose(), residual[row], row);
             return true;
@@ -7805,41 +7820,15 @@ void VIOManager::computeJacobianAndUpdateEKF()
           }
           if (local_dof == 0) continue;
           patch_jacobian.conservativeResize(local_dof, Eigen::NoChange);
-          patch_nuisance.conservativeResize(local_dof, Eigen::NoChange);
           patch_residual.conservativeResize(local_dof);
           patch_weights.conservativeResize(local_dof);
-          Eigen::MatrixXd nuisance_root(local_dof, 9);
-          try
-          {
-            nuisance_root.leftCols(6) = patch_nuisance.leftCols(6) *
-                estimator_covariance::positiveSemidefiniteRoot(usage_reference->birth_pose_cov_);
-            nuisance_root.rightCols(3) = patch_nuisance.rightCols(3) *
-                estimator_covariance::positiveSemidefiniteRoot(point->covariance_);
-          }
-          catch (const std::exception &error)
-          {
-            if (invalid_patch_covariances++ == 0)
-              printf("\033[1;31m[ COV VIO ] Invalid reference/landmark covariance: %s; patch rejected.\033[0m\n", error.what());
-            continue;
-          }
-          // Reference pose and landmark errors can be correlated. Bound their
-          // joint contribution rather than adding them as independent states.
-          const double reference_trace_root = nuisance_root.leftCols(6).norm();
-          const double point_trace_root = nuisance_root.rightCols(3).norm();
-          const double nuisance_trace_root = reference_trace_root + point_trace_root;
-          if (reference_trace_root > 0.0)
-            nuisance_root.leftCols(6) *= std::sqrt(nuisance_trace_root / reference_trace_root);
-          if (point_trace_root > 0.0)
-            nuisance_root.rightCols(3) *= std::sqrt(nuisance_trace_root / point_trace_root);
-          const Eigen::VectorXd noise = Eigen::VectorXd::Constant(local_dof, measurement_cov);
           const Eigen::MatrixXd weighted_j = patch_weights.asDiagonal() * patch_jacobian;
           const Eigen::VectorXd weighted_r = patch_weights.asDiagonal() * patch_residual;
-          const Eigen::MatrixXd weighted_u = patch_weights.asDiagonal() * nuisance_root;
-          const Eigen::MatrixXd r_inv_j = estimator_covariance::solveIndependentPlusShared(noise, weighted_u, weighted_j);
-          // Retain the legacy information scaling expected by the solver and
-          // usage counters. The same nuisance model now weights the update.
-          local_hessian = measurement_cov * estimator_covariance::symmetric(weighted_j.transpose() * r_inv_j);
-          local_gradient = measurement_cov * r_inv_j.transpose() * weighted_r;
+          // Restore the original independent-pixel photometric likelihood.
+          // measurement_cov is applied once when assembling the filter update.
+          // Reference/map uncertainty remains confined to the optional NIS gate.
+          local_hessian.noalias() = weighted_j.transpose() * weighted_j;
+          local_gradient.noalias() = weighted_j.transpose() * weighted_r;
           local_pose_information = local_hessian.topLeftCorner<6, 6>();
           if (!visual_map_manage_en)
           {
@@ -7879,8 +7868,33 @@ void VIOManager::computeJacobianAndUpdateEKF()
             continue;
           }
           double nis = std::numeric_limits<double>::quiet_NaN();
-          if (visual_ref_nis_en)
+          if (compute_reference_nis)
           {
+            patch_nuisance.conservativeResize(local_dof, Eigen::NoChange);
+            Eigen::MatrixXd nuisance_root(local_dof, 9);
+            try
+            {
+              nuisance_root.leftCols(6) = patch_nuisance.leftCols(6) *
+                  estimator_covariance::positiveSemidefiniteRoot(usage_reference->birth_pose_cov_);
+              nuisance_root.rightCols(3) = patch_nuisance.rightCols(3) *
+                  estimator_covariance::positiveSemidefiniteRoot(point->covariance_);
+            }
+            catch (const std::exception &error)
+            {
+              if (invalid_patch_covariances++ == 0)
+                printf("\033[1;31m[ COV VIO ] Invalid reference/landmark covariance: %s; patch rejected.\033[0m\n", error.what());
+              continue;
+            }
+            // Reference pose and landmark errors can be correlated. Bound their
+            // joint contribution rather than adding them as independent states.
+            const double reference_trace_root = nuisance_root.leftCols(6).norm();
+            const double point_trace_root = nuisance_root.rightCols(3).norm();
+            const double nuisance_trace_root = reference_trace_root + point_trace_root;
+            if (reference_trace_root > 0.0)
+              nuisance_root.leftCols(6) *= std::sqrt(nuisance_trace_root / reference_trace_root);
+            if (point_trace_root > 0.0)
+              nuisance_root.rightCols(3) *= std::sqrt(nuisance_trace_root / point_trace_root);
+            const Eigen::VectorXd noise = Eigen::VectorXd::Constant(local_dof, measurement_cov);
             // Raw (pre-robustification) residuals, with actual current-state,
             // reference-pose and landmark Jacobians in residual coordinates.
             const Eigen::MatrixXd prior = fullCovToSolve(iteration_prior_cov);
