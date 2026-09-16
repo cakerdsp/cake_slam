@@ -1075,7 +1075,7 @@ void LIVMapper::savePoseEvaluation(const char *stage)
     }
     fout_pose_evaluation
         << "# pose_covariance_v1; raw estimator covariance, not an online NEES value\n"
-        << "# covariance_model=full_joseph_tangent_shared_map_v2; imu_noise_model=" << imu_noise_model << '\n'
+        << "# covariance_model=full_joseph_tangent_independent_map_v3; imu_noise_model=" << imu_noise_model << '\n'
         << "# Health comments: full_cov timestamp stage dimension min_eigenvalue max_eigenvalue max_asymmetry\n"
         << "# Pose: IMU origin in estimator world W; quaternion xyzw rotates IMU to W.\n"
         << "# Error order: dtheta_I_x dtheta_I_y dtheta_I_z dp_W_x dp_W_y dp_W_z.\n"

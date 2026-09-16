@@ -122,12 +122,6 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   if (evalsReal(evalsMin) < planer_threshold_ &&
       evalsReal[evalsMid] - evalsReal[evalsMin] > eigen_gap_floor)
   {
-    struct ScanContribution
-    {
-      Eigen::Matrix<double, 6, 6> jacobian = Eigen::Matrix<double, 6, 6>::Zero();
-      std::shared_ptr<const ScanPoseUncertainty> uncertainty;
-    };
-    std::unordered_map<const ScanPoseUncertainty *, ScanContribution> scan_contributions;
     for (int i = 0; i < points.size(); i++)
     {
       Eigen::Matrix<double, 6, 3> J;
@@ -150,27 +144,10 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
       }
       J.block<3, 3>(0, 0) = evecs * F;
       J.block<3, 3>(3, 0) = J_Q;
-      if (points[i].scan_uncertainty)
-      {
-        plane->plane_var_ += J * points[i].var_nostate * J.transpose();
-        auto &scan = scan_contributions[points[i].scan_uncertainty.get()];
-        scan.uncertainty = points[i].scan_uncertainty;
-        scan.jacobian.noalias() += J * points[i].pose_jacobian;
-      }
-      else
-      {
-        plane->plane_var_ += J * points[i].var * J.transpose();
-      }
+      // Restore the baseline independent-point plane covariance model.
+      // Each point still uses the corrected world-frame covariance propagation.
+      plane->plane_var_.noalias() += J * points[i].var * J.transpose();
     }
-    std::vector<Eigen::MatrixXd> shared_terms;
-    for (const auto &entry : scan_contributions)
-    {
-      const auto &scan = entry.second;
-      shared_terms.push_back(scan.jacobian * scan.uncertainty->covariance * scan.jacobian.transpose());
-    }
-    // Preserve exact within-scan correlation. Between scans we do not retain
-    // pose cross-covariances; use a covariance bound, not false independence.
-    plane->plane_var_ += estimator_covariance::unknownCorrelationBound(shared_terms, 6);
     plane->plane_var_ = estimator_covariance::symmetric(plane->plane_var_);
 
     plane->normal_ << evecs(0, evalsMin), evecs(1, evalsMin), evecs(2, evalsMin);
@@ -522,9 +499,6 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     MatrixXd Hsub(effct_feat_num_, 6);
     MatrixXd Hsub_T_R_inv(6, effct_feat_num_);
     VectorXd meas_vec(effct_feat_num_);
-    MatrixXd plane_jacobians(effct_feat_num_, 6);
-    VectorXd independent_variances(effct_feat_num_);
-    std::unordered_map<int, std::vector<int>> plane_groups;
     meas_vec.setZero();
     for (int i = 0; i < effct_feat_num_; i++)
     {
@@ -543,56 +517,21 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       J_nq.tail<3>() = -ptpl.normal_.transpose();
       const M3D r_wl = state_.rot_end * extR_;
       const M3D var = r_wl * ptpl.body_cov_ * r_wl.transpose();
-      plane_jacobians.row(i) = J_nq;
-      independent_variances[i] = 0.001 + (ptpl.normal_.transpose() * var * ptpl.normal_)(0, 0);
-      plane_groups[ptpl.plane_id_].push_back(i);
+      // Baseline scalar point-to-plane noise; no cross-plane inflation.
+      const double variance = 0.001 + (J_nq * ptpl.plane_var_ * J_nq.transpose())(0, 0) +
+                              (ptpl.normal_.transpose() * var * ptpl.normal_)(0, 0);
+      if (!std::isfinite(variance) || variance <= 0.0)
+      {
+        printf("\033[1;31m[ COV LIO ] Invalid point-to-plane variance; update rejected.\033[0m\n");
+        state_ = state_propagat;
+        return;
+      }
 
       /*** calculate the Measuremnt Jacobian matrix H ***/
       V3D A(point_crossmat * state_.rot_end.transpose() * ptpl_list_[i].normal_);
       Hsub.row(i) << VEC_FROM_ARRAY(A), ptpl_list_[i].normal_[0], ptpl_list_[i].normal_[1], ptpl_list_[i].normal_[2];
+      Hsub_T_R_inv.col(i) = Hsub.row(i).transpose() / variance;
       meas_vec(i) = -ptpl_list_[i].dis_to_plane_;
-    }
-    // One plane is a shared random variable for all its residuals. Retain that
-    // low-rank covariance; different planes can also share source scan errors.
-    // A block covariance bound covers their unknown cross-correlations.
-    double sum_root_trace = 0.0;
-    std::unordered_map<int, double> root_traces;
-    for (const auto &group : plane_groups)
-    {
-      double trace = 0.0;
-      for (int index : group.second)
-        trace += std::max(0.0, (plane_jacobians.row(index) * ptpl_list_[index].plane_var_ *
-                               plane_jacobians.row(index).transpose())(0, 0));
-      root_traces[group.first] = std::sqrt(trace);
-      sum_root_trace += std::sqrt(trace);
-    }
-    try
-    {
-      for (const auto &group : plane_groups)
-      {
-        const auto &indices = group.second;
-        const int count = static_cast<int>(indices.size());
-        MatrixXd h(count, 6), j_plane(count, 6);
-        VectorXd variances(count);
-        for (int row = 0; row < count; ++row)
-        {
-          h.row(row) = Hsub.row(indices[row]);
-          j_plane.row(row) = plane_jacobians.row(indices[row]);
-          variances[row] = independent_variances[indices[row]];
-        }
-        const double root_trace = root_traces[group.first];
-        const double bound_scale = root_trace > 0.0 ? sum_root_trace / root_trace : 1.0;
-        const MatrixXd u = j_plane * estimator_covariance::positiveSemidefiniteRoot(
-            bound_scale * ptpl_list_[indices.front()].plane_var_);
-        const MatrixXd weighted_h = estimator_covariance::solveIndependentPlusShared(variances, u, h);
-        for (int row = 0; row < count; ++row) Hsub_T_R_inv.col(indices[row]) = weighted_h.row(row).transpose();
-      }
-    }
-    catch (const std::exception &error)
-    {
-      printf("\033[1;31m[ COV LIO ] Plane covariance rejected: %s\033[0m\n", error.what());
-      state_ = state_propagat;
-      return;
     }
     EKF_stop_flg = false;
     flg_EKF_converged = false;
