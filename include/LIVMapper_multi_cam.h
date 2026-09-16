@@ -191,6 +191,7 @@ public:
   double zncc_huber_delta = 0.5;
   bool tukey_robust_en = false;
   bool usage_stats_en = false;
+  bool estimator_debug_en = false;
   int usage_stats_window = 100;
   bool photometric_selection_en = true;
   bool photometric_selection_shared_errors = true;

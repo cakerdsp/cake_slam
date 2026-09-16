@@ -446,6 +446,8 @@ void VoxelMapManager::RefreshWorldPoints()
 
 void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
+  last_update_status_ = "no_iterations";
+  last_update_residuals_ = 0;
   PrepareScanCovariances();
 
   vector<pointWithVar>().swap(pv_list_);
@@ -500,6 +502,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     effct_feat_num_ = ptpl_list_.size();
     if (effct_feat_num_ == 0)
     {
+      last_update_status_ = "no_matches";
       state_ = state_propagat;
       return;
     }
@@ -580,6 +583,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     catch (const std::exception &error)
     {
       printf("\033[1;31m[ COV LIO ] Plane covariance rejected: %s\033[0m\n", error.what());
+      last_update_status_ = "plane_cov_rejected";
       state_ = state_propagat;
       return;
     }
@@ -612,6 +616,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     catch (const std::exception &error)
     {
       printf("\033[1;31m[ COV LIO ] Update rejected: %s\033[0m\n", error.what());
+      last_update_status_ = "solve_rejected";
       state_ = state_propagat;
       return;
     }
@@ -635,6 +640,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       // _state.cov = (I_STATE - G) * _state.cov;
 
       state_.cov = final_posterior_covariance;
+      last_update_status_ = "updated";
+      last_update_residuals_ = effct_feat_num_;
       // total_distance += (_state.pos_end - position_last).norm();
       position_last_ = state_.pos_end;
       geoQuat_ = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));

@@ -7076,10 +7076,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
 {
   compute_jacobian_time = update_ekf_time = 0.0;
   vio_linearized_residual_count_ = 0;
+  vio_update_status_ = "no_observations";
+  vio_final_residual_count_ = 0;
+  int rollback_final_residual_count = 0;
   int invalid_patch_covariances = 0;
   int total_observations = 0;
   for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
   if (total_observations == 0) return;
+  vio_update_status_ = "no_usable_residuals";
   const double measurement_cov = photometricNoiseCovariance();
   if (!std::isfinite(measurement_cov) || measurement_cov <= 0.0)
     throw std::runtime_error("photometric residual covariance must be finite and positive");
@@ -8054,6 +8058,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
           catch (const std::exception &exception)
           {
             printf("\033[1;31m[ PHOTO SELECT ] Frame rejected: %s; visual prior retained.\033[0m\n", exception.what());
+            vio_update_status_ = "selection_rejected";
+            vio_final_residual_count_ = 0;
             *state = state_before_visual_update;
             G.setZero();
             syncCameraExtrinsicsFromState(*state);
@@ -8449,6 +8455,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
         usage_final_residuals_cross = rollback_usage_final_residuals_cross;
         usage_final_residuals_current_cross = rollback_usage_final_residuals_current_cross;
         final_posterior_covariance = rollback_posterior_covariance;
+        vio_final_residual_count_ = rollback_final_residual_count;
         syncCameraExtrinsicsFromState(*state);
         break;
       }
@@ -8500,6 +8507,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
       rollback_last_max_trans_update_cm = last_max_trans_update_cm;
       rollback_last_max_time_update_ms = last_max_time_update_ms;
       rollback_posterior_covariance = final_posterior_covariance;
+      rollback_final_residual_count = vio_final_residual_count_;
       estimator_covariance::Update covariance_update;
       std::vector<int> active_update_indices;
       for (int index : solve_to_full)
@@ -8538,6 +8546,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
         syncCameraExtrinsicsFromState(*state);
         for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
         printf("\033[1;31m[ COV VIO ] System factorization rejected: %s\033[0m\n", solve_error.c_str());
+        vio_update_status_ = "solve_rejected";
+        vio_final_residual_count_ = 0;
         return;
       }
       G = covariance_update.gain_times_jacobian;
@@ -8558,6 +8568,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
           syncCameraExtrinsicsFromState(*state);
           for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
           printf("\033[1;31m[ COV VIO ] Frozen-calibration solve rejected: %s\033[0m\n", solve_error.c_str());
+          vio_update_status_ = "calibration_solve_rejected";
+          vio_final_residual_count_ = 0;
           return;
         }
         G = covariance_update.gain_times_jacobian;
@@ -8618,6 +8630,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
       }
       final_posterior_covariance = state->resetCovariance(covariance_update.covariance, solution);
       *state += solution;
+      vio_final_residual_count_ = measurement_count;
       syncCameraExtrinsicsFromState(*state);
       update_ekf_time += omp_get_wtime() - update_start;
       double max_extrinsic_update = 0.0;
@@ -8650,6 +8663,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
   }
   state->cov = final_posterior_covariance.rows() == state->stateDim()
                    ? final_posterior_covariance : cov_before_visual_update;
+  vio_update_status_ = vio_final_residual_count_ > 0 ? "updated" : "no_update";
 
   recordUsagePoseFrameInfo(usage_prior_cov, state->cov, usage_final_h_base,
                            usage_final_h_same, usage_final_h_cross, usage_final_h_current_cross,

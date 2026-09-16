@@ -301,6 +301,8 @@ image_save:
   interval: 1
 
 debug:
+  # Print actual LIO/VIO corrections and covariance scales during drift diagnosis.
+  estimator_en: true
   plot_time: -10.0
   frame_cnt: 6
   # Follow up to eight camera-0 debug probes; each probe saves at most 12 paired observations.

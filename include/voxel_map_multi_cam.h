@@ -218,6 +218,9 @@ public:
 
   int feats_down_size_;
   int effct_feat_num_;
+  // Diagnostics only: reset on every StateEstimation call, including failures.
+  const char *last_update_status_ = "not_run";
+  int last_update_residuals_ = 0;
   std::vector<M3D> cross_mat_list_;
   std::vector<M3D> body_cov_list_;
   std::vector<pointWithVar> pv_list_;

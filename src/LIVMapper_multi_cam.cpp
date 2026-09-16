@@ -30,6 +30,25 @@ void suppressRosInfoLogs(const ros::NodeHandle &nh)
   (void)nh;
 }
 
+// Read-only stage diagnostics. Sigma is the RMS marginal standard deviation,
+// not trajectory error or NEES. Report changes relative to this stage's input.
+void printEstimatorStep(const char *stage, double timestamp, const char *status,
+                        int residuals, const StatesGroup &before,
+                        const StatesGroup &after, double elapsed_ms)
+{
+  const double dp = (after.pos_end - before.pos_end).norm();
+  const double dr = Eigen::AngleAxisd(before.rot_end.transpose() * after.rot_end).angle() / kDegToRad;
+  const double dv = (after.vel_end - before.vel_end).norm();
+  auto sigma = [](const StatesGroup &value, int index) {
+    const double variance = value.cov.block<3, 3>(index, index).trace() / 3.0;
+    return variance >= 0.0 ? std::sqrt(variance) : std::numeric_limits<double>::quiet_NaN();
+  };
+  printf("\033[1;36m[ EST STEP ] stage=%s t=%.9f status=%s used_residuals=%d dp_m=%.6g dR_deg=%.6g dv_mps=%.6g sigma_p_m=%.6g->%.6g sigma_R_deg=%.6g->%.6g ms=%.3f\033[0m\n",
+         stage, timestamp, status, residuals, dp, dr, dv,
+         sigma(before, 3), sigma(after, 3), sigma(before, 0) / kDegToRad,
+         sigma(after, 0) / kDegToRad, elapsed_ms);
+}
+
 bool hasLaterCompleteImageGroupLocked(const std::map<uint64_t, PendingImageGroup> &pending_images,
                                       uint64_t stamp_ns)
 {
@@ -177,6 +196,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<int>("common.lidar_en", 1);
   try_declare.template operator()<int>("common.num_cameras", 1);
   try_declare.template operator()<bool>("common.require_all_cameras", true);
+  try_declare.template operator()<bool>("debug.estimator_en", false);
   try_declare.template operator()<bool>("vio.photometric_selection_en", true);
   try_declare.template operator()<bool>("vio.photometric_selection_shared_errors", true);
   try_declare.template operator()<int>("vio.photometric_selection_candidate_budget", 600);
@@ -357,6 +377,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "common.lidar_en", lidar_en);
   getRosParam(this->node, "common.num_cameras", num_cameras);
   getRosParam(this->node, "common.require_all_cameras", require_all_cameras);
+  getRosParam(this->node, "debug.estimator_en", estimator_debug_en);
   getRosParam(this->node, "vio.photometric_selection_en", photometric_selection_en);
   getRosParam(this->node, "vio.photometric_selection_shared_errors", photometric_selection_shared_errors);
   getRosParam(this->node, "vio.photometric_selection_candidate_budget", photometric_selection_candidate_budget);
@@ -894,6 +915,14 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->optical_flow_f_threshold = optical_flow_f_threshold;
   vio_manager->optical_flow_flow_back = optical_flow_flow_back;
   vio_manager->initializeVIO();
+  printf("\033[1;33m[ EST CONFIG ] trace=v1 build=%s_%s ns=%s img=%d lidar=%d frontend=%d selection=%d shared=%d virtual=%d raw_model_J=%d IC=%d map_manage=%d cross_ref=%d current_cross=%d exposure=%d photo_cov=%.6g lio_iterations=%d trace_en=%d\033[0m\n",
+         __DATE__, __TIME__, this->node.getNamespace().c_str(), img_en, lidar_en, frontend_mode,
+         vio_manager->photometric_selection_en, vio_manager->photometric_selection_shared_errors,
+         vio_manager->virtual_fisheye_patch_en, vio_manager->raw_camera_model_jacobian_en,
+         vio_manager->inverse_composition_en, vio_manager->visual_map_manage_en,
+         vio_manager->cross_camera_reference_en, vio_manager->cross_camera_current_residual_en,
+         vio_manager->exposure_estimate_en, vio_manager->photometricNoiseCovariance(),
+         voxelmap_manager->config_setting_.max_iterations_, estimator_debug_en);
 
   p_imu->set_extrinsic(extT, extR);
   p_imu->set_gyr_cov_scale(V3D(gyr_cov, gyr_cov, gyr_cov));
@@ -1207,6 +1236,11 @@ void LIVMapper::handleVIO()
     vio_manager->plot_flag = false;
   }
 
+  std::unique_ptr<StatesGroup> debug_vio_prior;
+  if (estimator_debug_en) debug_vio_prior.reset(new StatesGroup(_state));
+  const double debug_vio_start = omp_get_wtime();
+  vio_manager->vio_update_status_ = current_frontend_mode == 0 ? "not_run" : "other_frontend";
+  vio_manager->vio_final_residual_count_ = 0;
   switch (current_frontend_mode)
   {
     case 1:
@@ -1221,6 +1255,10 @@ void LIVMapper::handleVIO()
       break;
   }
 
+  if (debug_vio_prior)
+    printEstimatorStep("VIO", LidarMeasures.last_lio_update_time, vio_manager->vio_update_status_,
+                       vio_manager->vio_final_residual_count_, *debug_vio_prior, _state,
+                       1000.0 * (omp_get_wtime() - debug_vio_start));
   savePoseEvaluation("VIO");
 
   if (imu_prop_enable)
@@ -1300,6 +1338,12 @@ void LIVMapper::handleLIO()
   _pv_list = voxelmap_manager->pv_list_;
 
   double t2 = omp_get_wtime();
+
+  if (estimator_debug_en)
+    printEstimatorStep("LIO", LidarMeasures.last_lio_update_time,
+                       initializing_map ? "map_init" : voxelmap_manager->last_update_status_,
+                       initializing_map ? 0 : voxelmap_manager->last_update_residuals_,
+                       state_propagat, _state, 1000.0 * (t2 - t1));
 
   if (imu_prop_enable)
   {

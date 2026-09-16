@@ -787,6 +787,9 @@ public:
   };
   double compute_jacobian_time, update_ekf_time;
   long long vio_linearized_residual_count_ = 0;
+  // Last retained solve only; excludes scoring passes and rejected iterations.
+  const char *vio_update_status_ = "not_run";
+  int vio_final_residual_count_ = 0;
   double ave_total = 0;
   // double ave_build_residual_time = 0;
   // double ave_ekf_time = 0;
