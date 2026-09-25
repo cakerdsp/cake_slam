@@ -15,6 +15,7 @@ which is included as part of this source code package.
 
 #include "voxel_map_multi_cam.h"
 #include "feature_multi_cam.h"
+#include "split_state_math.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -341,6 +342,7 @@ struct PerCameraData
 class VIOManager
 {
 public:
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   int grid_size;
   StatesGroup *state;
   StatesGroup *state_propagat;
@@ -779,6 +781,9 @@ public:
     int reason = REJECT_DRAW_RANGE;
   };
   double compute_jacobian_time, update_ekf_time;
+  split_state_math::Information visual_information_workspace_;
+  std::vector<split_state_math::PatchWorkspace,
+              Eigen::aligned_allocator<split_state_math::PatchWorkspace>> visual_patch_workspaces_;
   long long vio_linearized_residual_count_ = 0;
   double ave_total = 0;
   // double ave_build_residual_time = 0;

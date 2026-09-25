@@ -173,9 +173,9 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
   meas.last_lio_update_time = pcl_end_time;
   const double &pcl_end_offset_time = pcl_out.points.back().curvature / double(1000);
 
-  const int state_dim = state_inout.stateDim();
-  Eigen::MatrixXd F_x = Eigen::MatrixXd::Identity(state_dim, state_dim);
-  Eigen::MatrixXd cov_w = Eigen::MatrixXd::Zero(state_dim, state_dim);
+  propagation_workspace_.configure(state_inout.stateDim(), state_inout.velocityIndex());
+  auto &F_x = propagation_workspace_.transition;
+  auto &cov_w = propagation_workspace_.noise;
   double dt = 0;
 
   if (b_first_frame)
@@ -203,19 +203,18 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
   cov_w.setZero();
 
   F_x.block<3, 3>(0, 0) = Exp(state_inout.bias_g, -dt);
-  F_x.block<3, 3>(0, state_inout.gyroBiasIndex()) = Eye3d * dt;
-  F_x.block<3, 3>(3, state_inout.velocityIndex()) = Eye3d * dt;
+  F_x.block<3, 3>(0, 9) = Eye3d * dt;
+  F_x.block<3, 3>(3, 6) = Eye3d * dt;
   // F_x.block<3, 3>(6, 0)  = - R_imu * acc_avr_skew * dt;
   // F_x.block<3, 3>(6, 12) = - R_imu * dt;
   // F_x.block<3, 3>(6, 15) = Eye3d * dt;
 
   const double noise_dt = continuous_noise_ ? dt : dt * dt;
-  cov_w.block<3, 3>(state_inout.gyroBiasIndex(), state_inout.gyroBiasIndex()).diagonal() = cov_gyr * noise_dt;
-  cov_w.block<3, 3>(state_inout.velocityIndex(), state_inout.velocityIndex()).diagonal() = cov_acc * noise_dt;
+  cov_w.block<3, 3>(9, 9).diagonal() = cov_gyr * noise_dt;
+  cov_w.block<3, 3>(6, 6).diagonal() = cov_acc * noise_dt;
   if (cov_time_offset > 0.0 && state_inout.hasTimeOffsetStates())
-    cov_w.block(state_inout.timeOffsetBaseIndex(), state_inout.timeOffsetBaseIndex(),
-                state_inout.num_time_offset_groups, state_inout.num_time_offset_groups)
-        .diagonal().setConstant(cov_time_offset * dt);
+    propagation_workspace_.camera_noise.segment(state_inout.num_cameras, state_inout.num_time_offset_groups)
+        .setConstant(cov_time_offset * dt);
   // cov_w.block<3, 3>(6, 6) =
   //     R_imu * cov_acc.asDiagonal() * R_imu.transpose() * noise_dt;
   // cov_w.block<3, 3>(9, 9).diagonal() =
@@ -225,7 +224,7 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
 
   // std::cout << "before propagete:" << state_inout.cov.diagonal().transpose()
   //           << std::endl;
-  state_inout.cov = estimator_covariance::propagate(state_inout.cov, F_x, cov_w);
+  propagation_workspace_.propagate(state_inout.cov);
   // std::cout << "cov_w:" << cov_w.diagonal().transpose() << std::endl;
   // std::cout << "after propagete:" << state_inout.cov.diagonal().transpose()
   //           << std::endl;
@@ -320,9 +319,9 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
   V3D acc_imu(acc_s_last), angvel_avr(angvel_last), acc_avr, vel_imu(state_inout.vel_end), pos_imu(state_inout.pos_end);
   // cout << "[ IMU ] input state: " << state_inout.vel_end.transpose() << " " << state_inout.pos_end.transpose() << endl;
   M3D R_imu(state_inout.rot_end);
-  const int state_dim = state_inout.stateDim();
-  Eigen::MatrixXd F_x = Eigen::MatrixXd::Identity(state_dim, state_dim);
-  Eigen::MatrixXd cov_w = Eigen::MatrixXd::Zero(state_dim, state_dim);
+  propagation_workspace_.configure(state_inout.stateDim(), state_inout.velocityIndex());
+  auto &F_x = propagation_workspace_.transition;
+  auto &cov_w = propagation_workspace_.noise;
   double dt, dt_all = 0.0;
   double offs_t;
   // double imu_time;
@@ -404,32 +403,32 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
 
       F_x.setIdentity();
       cov_w.setZero();
+      propagation_workspace_.camera_noise.setZero();
 
       F_x.block<3, 3>(0, 0) = Exp(angvel_avr, -dt);
-      if (ba_bg_est_en) F_x.block<3, 3>(0, state_inout.gyroBiasIndex()) = -Eye3d * dt;
+      if (ba_bg_est_en) F_x.block<3, 3>(0, 9) = -Eye3d * dt;
       // F_x.block<3,3>(3,0)  = R_imu * off_vel_skew * dt;
-      F_x.block<3, 3>(3, state_inout.velocityIndex()) = Eye3d * dt;
-      F_x.block<3, 3>(state_inout.velocityIndex(), 0) = -R_imu * acc_avr_skew * dt;
-      if (ba_bg_est_en) F_x.block<3, 3>(state_inout.velocityIndex(), state_inout.accelBiasIndex()) = -R_imu * dt;
-      if (gravity_est_en) F_x.block<3, 3>(state_inout.velocityIndex(), state_inout.gravityIndex()) = Eye3d * dt;
+      F_x.block<3, 3>(3, 6) = Eye3d * dt;
+      F_x.block<3, 3>(6, 0) = -R_imu * acc_avr_skew * dt;
+      if (ba_bg_est_en) F_x.block<3, 3>(6, 12) = -R_imu * dt;
+      if (gravity_est_en) F_x.block<3, 3>(6, 15) = Eye3d * dt;
 
       // tau = 1.0 / (0.25 * sin(2 * CV_PI * 0.5 * imu_time) + 0.75);
       // F_x(6,6) = 0.25 * 2 * CV_PI * 0.5 * cos(2 * CV_PI * 0.5 * imu_time) * (-tau*tau); F_x(18,18) = 0.00001;
       if (exposure_estimate_en)
-        cov_w.block(6, 6, state_inout.num_cameras, state_inout.num_cameras).diagonal().setConstant(cov_inv_expo * dt * dt);
+        propagation_workspace_.camera_noise.head(state_inout.num_cameras).setConstant(cov_inv_expo * dt * dt);
       if (cov_time_offset > 0.0 && state_inout.hasTimeOffsetStates())
-        cov_w.block(state_inout.timeOffsetBaseIndex(), state_inout.timeOffsetBaseIndex(),
-                    state_inout.num_time_offset_groups, state_inout.num_time_offset_groups)
-            .diagonal().setConstant(cov_time_offset * dt);
+        propagation_workspace_.camera_noise.segment(state_inout.num_cameras, state_inout.num_time_offset_groups)
+            .setConstant(cov_time_offset * dt);
       // First-order discretization. Values are variances or PSDs, never standard deviations.
       const double noise_dt = continuous_noise_ ? dt : dt * dt;
       cov_w.block<3, 3>(0, 0).diagonal() = cov_gyr * noise_dt;
-      cov_w.block<3, 3>(state_inout.velocityIndex(), state_inout.velocityIndex()) =
+      cov_w.block<3, 3>(6, 6) =
           R_imu * cov_acc.asDiagonal() * R_imu.transpose() * noise_dt;
-      cov_w.block<3, 3>(state_inout.gyroBiasIndex(), state_inout.gyroBiasIndex()).diagonal() = cov_bias_gyr * noise_dt;
-      cov_w.block<3, 3>(state_inout.accelBiasIndex(), state_inout.accelBiasIndex()).diagonal() = cov_bias_acc * noise_dt;
+      cov_w.block<3, 3>(9, 9).diagonal() = cov_bias_gyr * noise_dt;
+      cov_w.block<3, 3>(12, 12).diagonal() = cov_bias_acc * noise_dt;
 
-      state_inout.cov = estimator_covariance::propagate(state_inout.cov, F_x, cov_w);
+      propagation_workspace_.propagate(state_inout.cov);
       // state_inout.cov.block<18,18>(0,0) = F_x.block<18,18>(0,0) *
       // state_inout.cov.block<18,18>(0,0) * F_x.block<18,18>(0,0).transpose() +
       // cov_w.block<18,18>(0,0);

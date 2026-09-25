@@ -16,6 +16,7 @@ which is included as part of this source code package.
 #include <Eigen/Eigen>
 #include <fstream>
 #include "common_lib_multi_cam.h"
+#include "split_state_math.h"
 #include <condition_variable>
 #include <nav_msgs/Odometry.h>
 #include <utils/so3_math.h>
@@ -70,6 +71,7 @@ public:
   int lidar_type;
 
 private:
+  split_state_math::PropagationWorkspace propagation_workspace_;
   void IMU_init(const MeasureGroup &meas, StatesGroup &state, int &N);
   void Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
   PointCloudXYZI pcl_wait_proc;

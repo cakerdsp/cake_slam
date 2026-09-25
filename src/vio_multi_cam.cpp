@@ -7077,6 +7077,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
   int total_observations = 0;
   for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
   if (total_observations == 0) return;
+  if (visual_patch_workspaces_.size() != cameras_.size())
+    visual_patch_workspaces_.resize(cameras_.size());
   const double measurement_cov = photometricNoiseCovariance();
   if (!std::isfinite(measurement_cov) || measurement_cov <= 0.0)
     throw std::runtime_error("photometric residual covariance must be finite and positive");
@@ -7310,6 +7312,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
       const int solve_dim = static_cast<int>(solve_to_full.size());
       Eigen::MatrixXd hessian = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
       Eigen::VectorXd gradient = Eigen::VectorXd::Zero(solve_dim);
+      auto &split_information = visual_information_workspace_;
+      split_information.reset(solve_dim - split_state_math::kBodyDim);
       auto addJacobianValue = [&](Eigen::VectorXd &jacobian, int full_index, double value) {
         if (full_index < 0 || full_index >= full_state_dim) return;
         const int solve_index = full_to_solve[full_index];
@@ -7318,48 +7322,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
       auto addJacobianSegment = [&](Eigen::VectorXd &jacobian, int full_index, const auto &value) {
         for (int k = 0; k < value.size(); ++k)
           addJacobianValue(jacobian, full_index + k, value[k]);
-      };
-      struct SparseResidualJacobian
-      {
-        enum : int { kMaxEntries = 32 };
-        std::array<int, kMaxEntries> index = {};
-        std::array<double, kMaxEntries> value = {};
-        int size = 0;
-
-        void clear() { size = 0; }
-
-        void add(int solve_index, double v)
-        {
-          if (solve_index < 0) return;
-          for (int k = 0; k < size; ++k)
-          {
-            if (index[k] == solve_index)
-            {
-              value[k] += v;
-              return;
-            }
-          }
-          if (size >= kMaxEntries)
-            throw std::runtime_error("SparseResidualJacobian capacity exceeded");
-          index[size] = solve_index;
-          value[size] = v;
-          ++size;
-        }
-      };
-      auto addSparseJacobianValue = [&](SparseResidualJacobian &jacobian, int full_index, double value) {
-        if (full_index < 0 || full_index >= full_state_dim) return;
-        jacobian.add(full_to_solve[full_index], value);
-      };
-      auto addSparseJacobianSegment = [&](SparseResidualJacobian &jacobian, int full_index, const auto &value) {
-        for (int k = 0; k < value.size(); ++k)
-          addSparseJacobianValue(jacobian, full_index + k, value[k]);
-      };
-      auto sparseJacobianToDense = [&](const SparseResidualJacobian &sparse_jacobian,
-                                       Eigen::VectorXd &dense_jacobian) {
-        if (dense_jacobian.size() != solve_dim) dense_jacobian.resize(solve_dim);
-        dense_jacobian.setZero();
-        for (int k = 0; k < sparse_jacobian.size; ++k)
-          dense_jacobian[sparse_jacobian.index[k]] = sparse_jacobian.value[k];
       };
       auto fullVectorToSolve = [&](const Eigen::VectorXd &full_vector) {
         Eigen::VectorXd reduced(solve_dim);
@@ -7394,22 +7356,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           usage_iter_h_current_cross = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
       }
 
-      // Reuse scratch storage across patches. Only the first local_dof rows are
-      // consumed; every accepted row is overwritten before it is read.
-      Eigen::VectorXd pixel_jacobian(solve_dim);
-      Eigen::MatrixXd local_hessian(solve_dim, solve_dim);
-      Eigen::VectorXd local_gradient(solve_dim);
-      Eigen::MatrixXd patch_jacobian(patch_size_total, solve_dim);
-      Eigen::VectorXd patch_residual(patch_size_total);
-      Eigen::VectorXd patch_weights(patch_size_total);
-      Eigen::MatrixXd weighted_j(patch_size_total, solve_dim);
-      Eigen::VectorXd weighted_r(patch_size_total);
       const bool compute_reference_nis = visual_map_manage_en && visual_ref_nis_en;
-      Eigen::MatrixXd reference_noise_jacobian;
-      Eigen::MatrixXd patch_nuisance;
-      if (compute_reference_nis) patch_nuisance.resize(patch_size_total, 9);
-      Eigen::LLT<Eigen::MatrixXd> nis_prior_llt;
-      bool nis_prior_ready = false;
 
       for (PerCameraData &ctx : cameras_)
       {
@@ -7421,6 +7368,47 @@ void VIOManager::computeJacobianAndUpdateEKF()
             ctx.camera_id >= 0 && ctx.camera_id < state->num_cameras &&
             (linearized_extrinsic_rot[ctx.camera_id] != 0 || linearized_extrinsic_trans[ctx.camera_id] != 0);
         const double current_exposure = state->inv_expo_time[ctx.camera_id];
+
+        // Only the current camera's calibration/exposure can affect a residual
+        // against a fixed historical reference. The shared 18-state body remains
+        // coupled to all cameras in the final information/covariance update.
+        std::vector<int> camera_solve_indices;
+        camera_solve_indices.reserve(8);
+        auto addCameraPatchIndex = [&](int full_index) {
+          if (full_index >= 0 && full_index < full_state_dim && full_to_solve[full_index] >= 0)
+            camera_solve_indices.push_back(full_to_solve[full_index]);
+        };
+        if (exposure_estimate_en) addCameraPatchIndex(state->exposureIndex(ctx.camera_id));
+        if (isOnlineTimeOffsetEnabledForGroup(ctx.time_offset_group))
+          addCameraPatchIndex(state->timeOffsetIndex(ctx.time_offset_group));
+        if (linearized_extrinsic_rot[ctx.camera_id])
+          for (int k = 0; k < 3; ++k) addCameraPatchIndex(state->extrinsicRotIndex(ctx.camera_id) + k);
+        if (linearized_extrinsic_trans[ctx.camera_id])
+          for (int k = 0; k < 3; ++k) addCameraPatchIndex(state->extrinsicTransIndex(ctx.camera_id) + k);
+        auto &patch_workspace = visual_patch_workspaces_[ctx.camera_id];
+        patch_workspace.configure(patch_size_total, solve_dim, camera_solve_indices, compute_reference_nis);
+        auto &pixel_jacobian = patch_workspace.pixel;
+        auto &patch_residual = patch_workspace.residual;
+        auto &patch_weights = patch_workspace.weight;
+        auto &patch_nuisance = patch_workspace.nuisance;
+        auto &reference_noise_jacobian = patch_workspace.reference_noise;
+        const int patch_dim = pixel_jacobian.size();
+        Eigen::LLT<Eigen::MatrixXd> nis_prior_llt;
+        bool nis_prior_ready = false;
+        auto addPatchJacobianValue = [&](split_state_math::PixelJacobian &jacobian, int full_index, double value) {
+          if (full_index < 0 || full_index >= full_state_dim || full_to_solve[full_index] < 0) return;
+          const int index = patch_workspace.solve_to_patch[full_to_solve[full_index]];
+          if (index < 0) throw std::logic_error("unmapped reference-patch Jacobian column");
+          if (index < 9) jacobian.motion[index] += value;
+          else jacobian.camera[index - 9] += value;
+        };
+        auto addPatchJacobianSegment = [&](split_state_math::PixelJacobian &jacobian, int full_index, const auto &value) {
+          for (int k = 0; k < value.size(); ++k) addPatchJacobianValue(jacobian, full_index + k, value[k]);
+        };
+        auto patchJacobianToDense = [&](const split_state_math::PixelJacobian &jacobian, Eigen::VectorXd &dense) {
+          dense.head<9>() = jacobian.motion;
+          dense.tail(patch_dim - 9) = jacobian.camera;
+        };
 
         for (int point_index = 0; point_index < ctx.total_points; ++point_index)
         {
@@ -7474,7 +7462,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
             const double weight = normalized_patch_weight *
                 (tukey_robust_en ? tukeySqrtWeight(residual, outlier_threshold) : 1.0);
             if (weight < 0.0 || !std::isfinite(weight) || !std::isfinite(residual) || !jacobian.allFinite()) return;
-            patch_jacobian.row(local_dof) = jacobian.transpose();
+            patch_workspace.motion.row(local_dof) = jacobian.head<9>().transpose();
+            patch_workspace.camera.row(local_dof) = jacobian.tail(patch_dim - 9).transpose();
             patch_residual[local_dof] = residual;
             patch_weights[local_dof] = weight;
             if (compute_reference_nis)
@@ -7488,10 +7477,24 @@ void VIOManager::computeJacobianAndUpdateEKF()
             patch_error += weight * weight * residual * residual;
             ++local_dof;
           };
-          auto accumulateSparseObservation =
-              [&](const SparseResidualJacobian &sparse, double residual, int patch_index) {
-            sparseJacobianToDense(sparse, pixel_jacobian);
-            accumulateObservation(pixel_jacobian, residual, patch_index);
+          auto accumulateSplitObservation =
+              [&](const split_state_math::PixelJacobian &jacobian, double residual, int patch_index) {
+            ++vio_linearized_residual_count_;
+            const double weight = normalized_patch_weight *
+                (tukey_robust_en ? tukeySqrtWeight(residual, outlier_threshold) : 1.0);
+            if (weight < 0.0 || !std::isfinite(weight) || !std::isfinite(residual)) return;
+            if (!jacobian.allFinite()) return;
+            patch_workspace.motion.row(local_dof) = jacobian.motion.transpose();
+            patch_workspace.camera.row(local_dof) = jacobian.camera.transpose();
+            patch_residual[local_dof] = residual;
+            patch_weights[local_dof] = weight;
+            if (compute_reference_nis)
+            {
+              patch_nuisance.row(local_dof) = reference_noise_jacobian.row(patch_index);
+              patch_nuisance.block<1, 3>(local_dof, 6) -= patch_workspace.motion.block<1, 3>(local_dof, 3);
+            }
+            patch_error += weight * weight * residual * residual;
+            ++local_dof;
           };
           auto accumulateNormalizedReferencePatch =
               [&](const std::vector<double> &current_values,
@@ -7528,20 +7531,13 @@ void VIOManager::computeJacobianAndUpdateEKF()
             }
             return true;
           };
-          auto addMotionTimeJacobian = [&](Eigen::VectorXd &jacobian, const MD(1, 3) &J_photo_center) {
-            addJacobianSegment(jacobian, state->velocityIndex(), (J_photo_center * ctx.dpc_dvel).transpose());
-            if (estimate_time_offset)
-            {
-              addJacobianValue(jacobian, state->timeOffsetIndex(group_id), (J_photo_center * dpc_dtd)(0, 0));
-            }
-          };
-          auto addSparseMotionTimeJacobian =
-              [&](SparseResidualJacobian &jacobian, const MD(1, 3) &J_photo_center) {
-            addSparseJacobianSegment(jacobian, state->velocityIndex(),
+          auto addPatchMotionTimeJacobian =
+              [&](split_state_math::PixelJacobian &jacobian, const MD(1, 3) &J_photo_center) {
+            addPatchJacobianSegment(jacobian, state->velocityIndex(),
                                      (J_photo_center * ctx.dpc_dvel).transpose());
             if (estimate_time_offset)
             {
-              addSparseJacobianValue(jacobian, state->timeOffsetIndex(group_id),
+              addPatchJacobianValue(jacobian, state->timeOffsetIndex(group_id),
                                      (J_photo_center * dpc_dtd)(0, 0));
             }
           };
@@ -7604,23 +7600,23 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
                 const double residual = current_exposure * current_value -
                                         reference_exposure * reference_patch[patch_size_total * level + patch_index];
-                SparseResidualJacobian jacobian;
+                auto &jacobian = patch_workspace.pixel_split;
                 jacobian.clear();
-                addSparseJacobianSegment(jacobian, 0, JdR.transpose());
-                addSparseJacobianSegment(jacobian, 3, Jdt.transpose());
-                addSparseMotionTimeJacobian(jacobian, J_photo_center);
+                addPatchJacobianSegment(jacobian, 0, JdR.transpose());
+                addPatchJacobianSegment(jacobian, 3, Jdt.transpose());
+                addPatchMotionTimeJacobian(jacobian, J_photo_center);
                 if (exposure_estimate_en)
-                  addSparseJacobianValue(jacobian, state->exposureIndex(ctx.camera_id), current_value);
+                  addPatchJacobianValue(jacobian, state->exposureIndex(ctx.camera_id), current_value);
                 if (estimate_extrinsic)
                 {
                   if (linearized_extrinsic_rot[ctx.camera_id] != 0)
-                    addSparseJacobianSegment(jacobian, state->extrinsicRotIndex(ctx.camera_id),
+                    addPatchJacobianSegment(jacobian, state->extrinsicRotIndex(ctx.camera_id),
                                              (J_photo_center * Jpc_dRcl).transpose());
                   if (linearized_extrinsic_trans[ctx.camera_id] != 0)
-                    addSparseJacobianSegment(jacobian, state->extrinsicTransIndex(ctx.camera_id),
+                    addPatchJacobianSegment(jacobian, state->extrinsicTransIndex(ctx.camera_id),
                                              J_photo_center.transpose());
                 }
-                accumulateSparseObservation(jacobian, residual, patch_index);
+                accumulateSplitObservation(jacobian, residual, patch_index);
               }
             }
             else
@@ -7638,7 +7634,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
               if (zncc_residual_en)
               {
                 normalized_current_values.resize(patch_size_total);
-                normalized_current_jacobian = Eigen::MatrixXd::Zero(patch_size_total, solve_dim);
+                normalized_current_jacobian = Eigen::MatrixXd::Zero(patch_size_total, patch_dim);
               }
               for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
               {
@@ -7684,33 +7680,33 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 const MD(1, 3) Jdp = -Jimg_Jpi_R;
                 const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
                 const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
-                SparseResidualJacobian jacobian;
+                auto &jacobian = patch_workspace.pixel_split;
                 jacobian.clear();
-                addSparseJacobianSegment(jacobian, 0, JdR.transpose());
-                addSparseJacobianSegment(jacobian, 3, Jdt.transpose());
-                addSparseMotionTimeJacobian(jacobian, Jimg_Jpi_R);
+                addPatchJacobianSegment(jacobian, 0, JdR.transpose());
+                addPatchJacobianSegment(jacobian, 3, Jdt.transpose());
+                addPatchMotionTimeJacobian(jacobian, Jimg_Jpi_R);
                 if (!zncc_residual_en && exposure_estimate_en)
-                  addSparseJacobianValue(jacobian, state->exposureIndex(ctx.camera_id), current_value);
+                  addPatchJacobianValue(jacobian, state->exposureIndex(ctx.camera_id), current_value);
                 if (estimate_extrinsic)
                 {
                   if (linearized_extrinsic_rot[ctx.camera_id] != 0)
-                    addSparseJacobianSegment(jacobian, state->extrinsicRotIndex(ctx.camera_id),
+                    addPatchJacobianSegment(jacobian, state->extrinsicRotIndex(ctx.camera_id),
                                              (Jimg_Jpi_R * Jpc_dRcl).transpose());
                   if (linearized_extrinsic_trans[ctx.camera_id] != 0)
-                    addSparseJacobianSegment(jacobian, state->extrinsicTransIndex(ctx.camera_id),
+                    addPatchJacobianSegment(jacobian, state->extrinsicTransIndex(ctx.camera_id),
                                              Jimg_Jpi_R.transpose());
                 }
                 if (zncc_residual_en)
                 {
                   normalized_current_values[patch_index] = current_value;
-                  sparseJacobianToDense(jacobian, pixel_jacobian);
+                  patchJacobianToDense(jacobian, pixel_jacobian);
                   normalized_current_jacobian.row(patch_index) = pixel_jacobian.transpose();
                 }
                 else
                 {
                   const double residual = current_exposure * current_value -
                                           reference_exposure * reference_patch[patch_size_total * level + patch_index];
-                  accumulateSparseObservation(jacobian, residual, patch_index);
+                  accumulateSplitObservation(jacobian, residual, patch_index);
                 }
               }
               if (zncc_residual_en &&
@@ -7752,7 +7748,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
             if (zncc_residual_en)
             {
               normalized_current_values.resize(patch_size_total);
-              normalized_current_jacobian = Eigen::MatrixXd::Zero(patch_size_total, solve_dim);
+              normalized_current_jacobian = Eigen::MatrixXd::Zero(patch_size_total, patch_dim);
             }
             for (int x = 0; x < patch_size; ++x)
             {
@@ -7792,33 +7788,33 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 const MD(1, 3) Jdp = -Jimg_Jpi;
                 const MD(1, 3) JdR = Jdphi * ctx.Jdphi_dR + Jdp * ctx.Jdp_dR;
                 const MD(1, 3) Jdt = Jdp * ctx.Jdp_dt;
-                SparseResidualJacobian jacobian;
+                auto &jacobian = patch_workspace.pixel_split;
                 jacobian.clear();
-                addSparseJacobianSegment(jacobian, 0, JdR.transpose());
-                addSparseJacobianSegment(jacobian, 3, Jdt.transpose());
-                addSparseMotionTimeJacobian(jacobian, Jimg_Jpi);
+                addPatchJacobianSegment(jacobian, 0, JdR.transpose());
+                addPatchJacobianSegment(jacobian, 3, Jdt.transpose());
+                addPatchMotionTimeJacobian(jacobian, Jimg_Jpi);
                 if (!zncc_residual_en && exposure_estimate_en)
-                  addSparseJacobianValue(jacobian, state->exposureIndex(ctx.camera_id), current_value);
+                  addPatchJacobianValue(jacobian, state->exposureIndex(ctx.camera_id), current_value);
                 if (estimate_extrinsic)
                 {
                   if (linearized_extrinsic_rot[ctx.camera_id] != 0)
-                    addSparseJacobianSegment(jacobian, state->extrinsicRotIndex(ctx.camera_id),
+                    addPatchJacobianSegment(jacobian, state->extrinsicRotIndex(ctx.camera_id),
                                              (Jimg_Jpi * Jpc_dRcl).transpose());
                   if (linearized_extrinsic_trans[ctx.camera_id] != 0)
-                    addSparseJacobianSegment(jacobian, state->extrinsicTransIndex(ctx.camera_id),
+                    addPatchJacobianSegment(jacobian, state->extrinsicTransIndex(ctx.camera_id),
                                              Jimg_Jpi.transpose());
                 }
                 if (zncc_residual_en)
                 {
                   normalized_current_values[patch_index] = current_value;
-                  sparseJacobianToDense(jacobian, pixel_jacobian);
+                  patchJacobianToDense(jacobian, pixel_jacobian);
                   normalized_current_jacobian.row(patch_index) = pixel_jacobian.transpose();
                 }
                 else
                 {
                   const double residual = current_exposure * current_value -
                                           reference_exposure * reference_patch[patch_size_total * level + patch_index];
-                  accumulateSparseObservation(jacobian, residual, patch_index);
+                  accumulateSplitObservation(jacobian, residual, patch_index);
                 }
               }
             }
@@ -7827,19 +7823,15 @@ void VIOManager::computeJacobianAndUpdateEKF()
               continue;
           }
           if (local_dof == 0) continue;
-          const auto active_jacobian = patch_jacobian.topRows(local_dof);
           const auto active_residual = patch_residual.head(local_dof);
-          weighted_j.topRows(local_dof).noalias() = patch_weights.head(local_dof).asDiagonal() * active_jacobian;
-          weighted_r.head(local_dof) = patch_weights.head(local_dof).asDiagonal() * active_residual;
           // Restore the original independent-pixel photometric likelihood.
           // measurement_cov is applied once when assembling the filter update.
           // Reference/map uncertainty remains confined to the optional NIS gate.
-          estimator_covariance::normalEquations(weighted_j, weighted_r, local_dof, local_hessian, local_gradient);
-          local_pose_information = local_hessian.topLeftCorner<6, 6>();
+          patch_workspace.compute(local_dof);
+          local_pose_information = patch_workspace.h_motion.topLeftCorner<6, 6>();
           if (!visual_map_manage_en)
           {
-            hessian += local_hessian;
-            gradient += local_gradient;
+            patch_workspace.addTo(split_information);
             measurement_count += local_dof;
           }
           ctx.visual_submap->errors[point_index] = patch_error;
@@ -7848,18 +7840,18 @@ void VIOManager::computeJacobianAndUpdateEKF()
             if (usage_stats_en && usage_reference != nullptr && local_dof > 0)
             {
               const bool cross_camera = usage_reference->camera_id_ != ctx.camera_id;
-              usage_iter_h_all.noalias() += local_hessian;
+              patch_workspace.addHessianTo(usage_iter_h_all);
               ++usage_iter_patches_all;
               usage_iter_residuals_all += local_dof;
               if (cross_camera)
               {
-                usage_iter_h_cross.noalias() += local_hessian;
+                patch_workspace.addHessianTo(usage_iter_h_cross);
                 ++usage_iter_patches_cross;
                 usage_iter_residuals_cross += local_dof;
               }
               else
               {
-                usage_iter_h_same.noalias() += local_hessian;
+                patch_workspace.addHessianTo(usage_iter_h_same);
                 ++usage_iter_patches_same;
                 usage_iter_residuals_same += local_dof;
               }
@@ -7904,14 +7896,23 @@ void VIOManager::computeJacobianAndUpdateEKF()
             // iteration. Factor lazily, at the first patch that needs NIS.
             if (!nis_prior_ready)
             {
-              nis_prior_llt.compute(fullCovToSolve(iteration_prior_cov));
+              // Marginalize zero Jacobian columns by selecting the covariance,
+              // not its inverse. H_local P_local H_local' equals the full form.
+              Eigen::MatrixXd patch_prior(patch_dim, patch_dim);
+              for (int r = 0; r < patch_dim; ++r)
+                for (int c = 0; c < patch_dim; ++c)
+                  patch_prior(r, c) = iteration_prior_cov(
+                      solve_to_full[patch_workspace.patch_to_solve[r]],
+                      solve_to_full[patch_workspace.patch_to_solve[c]]);
+              nis_prior_llt.compute(patch_prior);
               if (nis_prior_llt.info() != Eigen::Success)
                 throw std::runtime_error("invalid visual NIS prior covariance");
               nis_prior_ready = true;
             }
-            Eigen::MatrixXd innovation_root(local_dof, 9 + solve_dim);
+            patch_workspace.pack(local_dof);
+            Eigen::MatrixXd innovation_root(local_dof, 9 + patch_dim);
             innovation_root.leftCols(9) = nuisance_root;
-            innovation_root.rightCols(solve_dim) = active_jacobian * nis_prior_llt.matrixL();
+            innovation_root.rightCols(patch_dim) = patch_workspace.compact.topRows(local_dof) * nis_prior_llt.matrixL();
             const Eigen::MatrixXd normalized = estimator_covariance::solveIndependentPlusShared(
                 noise, innovation_root, active_residual);
             nis = active_residual.dot(normalized.col(0));
@@ -7930,18 +7931,18 @@ void VIOManager::computeJacobianAndUpdateEKF()
             if (usage_stats_en && usage_reference != nullptr && local_dof > 0)
             {
               const bool cross_camera = usage_reference->camera_id_ != ctx.camera_id;
-              usage_iter_h_all.noalias() += local_hessian;
+              patch_workspace.addHessianTo(usage_iter_h_all);
               ++usage_iter_patches_all;
               usage_iter_residuals_all += local_dof;
               if (cross_camera)
               {
-                usage_iter_h_cross.noalias() += local_hessian;
+                patch_workspace.addHessianTo(usage_iter_h_cross);
                 ++usage_iter_patches_cross;
                 usage_iter_residuals_cross += local_dof;
               }
               else
               {
-                usage_iter_h_same.noalias() += local_hessian;
+                patch_workspace.addHessianTo(usage_iter_h_same);
                 ++usage_iter_patches_same;
                 usage_iter_residuals_same += local_dof;
               }
@@ -7950,14 +7951,16 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                            usage_affine_for_stats, level, local_dof, usage_level_sse,
                                            usage_level_ncc, usage_level_valid);
             }
-            hessian.noalias() += local_hessian;
-            gradient.noalias() += local_gradient;
+            patch_workspace.addTo(split_information);
             measurement_count += local_dof;
             error += patch_error;
           }
         }
       }
 
+      // Assemble once per iteration. Directional filtering and the joint EKF
+      // still receive the complete information, including body/camera coupling.
+      split_information.dense(hessian, gradient);
       if (cross_camera_current_residual_en)
       {
         // Keep the optional current-current linearization out of this already very large hot function.

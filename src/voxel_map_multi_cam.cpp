@@ -445,13 +445,14 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   addLioBlock(state_.accelBiasIndex(), 3);
   addLioBlock(state_.gravityIndex(), 3);
   auto fullCovToLio = [&](const Eigen::MatrixXd &full_cov) {
-    Eigen::MatrixXd reduced(lio_state_dim, lio_state_dim);
+    Eigen::Matrix<double, BASE_STATE_DIM, BASE_STATE_DIM> reduced;
     for (int r = 0; r < lio_state_dim; ++r)
       for (int c = 0; c < lio_state_dim; ++c)
         reduced(r, c) = full_cov(lio_to_full[r], lio_to_full[c]);
     return reduced;
   };
-  Eigen::MatrixXd H_T_H = Eigen::MatrixXd::Zero(lio_state_dim, lio_state_dim);
+  Eigen::Matrix<double, BASE_STATE_DIM, BASE_STATE_DIM> H_T_H =
+      Eigen::Matrix<double, BASE_STATE_DIM, BASE_STATE_DIM>::Zero();
   directional_update::Result final_directional_result;
   Eigen::MatrixXd final_posterior_covariance;
 
@@ -461,7 +462,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   Eigen::Matrix<double, Eigen::Dynamic, 6> Hsub;
   Eigen::Matrix<double, 6, Eigen::Dynamic> Hsub_T_R_inv;
   Eigen::VectorXd meas_vec;
-  Eigen::VectorXd information_vector(lio_state_dim);
+  Eigen::Matrix<double, BASE_STATE_DIM, 1> information_vector;
   Eigen::MatrixXd full_information(full_state_dim, full_state_dim);
   Eigen::VectorXd full_information_vector(full_state_dim);
 
@@ -553,9 +554,9 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
     information_vector.setZero();
     information_vector.head<6>() = HTz;
-    const Eigen::MatrixXd lio_cov = fullCovToLio(iteration_prior_cov);
     if (config_setting_.directional_update_en)
     {
+      const Eigen::Matrix<double, BASE_STATE_DIM, BASE_STATE_DIM> lio_cov = fullCovToLio(iteration_prior_cov);
       directional_update::Result filtered;
       if (!directional_update::filterInformation(
               lio_cov, H_T_H, information_vector,
