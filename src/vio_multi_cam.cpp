@@ -7392,6 +7392,23 @@ void VIOManager::computeJacobianAndUpdateEKF()
           usage_iter_h_current_cross = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
       }
 
+      // Reuse scratch storage across patches. Only the first local_dof rows are
+      // consumed; every accepted row is overwritten before it is read.
+      Eigen::VectorXd pixel_jacobian(solve_dim);
+      Eigen::MatrixXd local_hessian(solve_dim, solve_dim);
+      Eigen::VectorXd local_gradient(solve_dim);
+      Eigen::MatrixXd patch_jacobian(patch_size_total, solve_dim);
+      Eigen::VectorXd patch_residual(patch_size_total);
+      Eigen::VectorXd patch_weights(patch_size_total);
+      Eigen::MatrixXd weighted_j(patch_size_total, solve_dim);
+      Eigen::VectorXd weighted_r(patch_size_total);
+      const bool compute_reference_nis = visual_map_manage_en && visual_ref_nis_en;
+      Eigen::MatrixXd reference_noise_jacobian;
+      Eigen::MatrixXd patch_nuisance;
+      if (compute_reference_nis) patch_nuisance.resize(patch_size_total, 9);
+      Eigen::LLT<Eigen::MatrixXd> nis_prior_llt;
+      bool nis_prior_ready = false;
+
       for (PerCameraData &ctx : cameras_)
       {
         if (ctx.total_points == 0 || ctx.visual_submap == nullptr || ctx.new_frame == nullptr) continue;
@@ -7436,18 +7453,12 @@ void VIOManager::computeJacobianAndUpdateEKF()
           const double reference_exposure = ctx.visual_submap->inv_expo_list[point_index];
           double patch_error = 0.0;
           const bool contributes_to_ekf = point_index >= static_cast<int>(ctx.visual_submap->contributes_to_ekf.size()) ||
-                                          ctx.visual_submap->contributes_to_ekf[point_index] != 0;
+                                           ctx.visual_submap->contributes_to_ekf[point_index] != 0;
           Eigen::Matrix<double, 6, 6> local_pose_information = Eigen::Matrix<double, 6, 6>::Zero();
-          Eigen::MatrixXd local_hessian = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
-          Eigen::VectorXd local_gradient = Eigen::VectorXd::Zero(solve_dim);
-          Eigen::MatrixXd usage_local_hessian;
-          int usage_local_dof = 0;
           int local_dof = 0;
           Feature *usage_reference = point_index < static_cast<int>(ctx.visual_submap->reference_features.size())
                                          ? ctx.visual_submap->reference_features[point_index] : nullptr;
           if (usage_reference == nullptr || point_index >= static_cast<int>(ctx.visual_submap->warp_affines.size())) continue;
-          const bool compute_reference_nis = visual_map_manage_en && visual_ref_nis_en;
-          Eigen::MatrixXd reference_noise_jacobian;
           if (compute_reference_nis)
           {
             if (!referenceUncertaintyJacobian(*usage_reference, *point, reference_patch,
@@ -7455,11 +7466,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                              reference_noise_jacobian)) continue;
             if (!zncc_residual_en) reference_noise_jacobian *= reference_exposure;
           }
-          Eigen::MatrixXd patch_jacobian = Eigen::MatrixXd::Zero(patch_size_total, solve_dim);
-          Eigen::MatrixXd patch_nuisance;
-          if (compute_reference_nis) patch_nuisance.setZero(patch_size_total, 9);
-          Eigen::VectorXd patch_residual = Eigen::VectorXd::Zero(patch_size_total);
-          Eigen::VectorXd patch_weights = Eigen::VectorXd::Ones(patch_size_total);
           double normalized_patch_weight = 1.0;
           auto accumulateObservation = [&](const Eigen::VectorXd &jacobian, double residual, int patch_index) {
             ++vio_linearized_residual_count_;
@@ -7482,9 +7488,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
           };
           auto accumulateSparseObservation =
               [&](const SparseResidualJacobian &sparse, double residual, int patch_index) {
-            Eigen::VectorXd jacobian;
-            sparseJacobianToDense(sparse, jacobian);
-            accumulateObservation(jacobian, residual, patch_index);
+            sparseJacobianToDense(sparse, pixel_jacobian);
+            accumulateObservation(pixel_jacobian, residual, patch_index);
           };
           auto accumulateNormalizedReferencePatch =
               [&](const std::vector<double> &current_values,
@@ -7515,7 +7520,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                                 zncc_huber_delta);
             normalized_patch_weight = sqrt_robust_weight;
             for (int row = 0; row < patch_size_total; ++row)
-              accumulateObservation(normalized_current_jacobian.row(row).transpose(), residual[row], row);
+            {
+              pixel_jacobian = normalized_current_jacobian.row(row).transpose();
+              accumulateObservation(pixel_jacobian, residual[row], row);
+            }
             return true;
           };
           auto addMotionTimeJacobian = [&](Eigen::VectorXd &jacobian, const MD(1, 3) &J_photo_center) {
@@ -7630,7 +7638,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 normalized_current_values.resize(patch_size_total);
                 normalized_current_jacobian = Eigen::MatrixXd::Zero(patch_size_total, solve_dim);
               }
-              Eigen::VectorXd jacobian_buf(solve_dim);
               for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
               {
                 const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
@@ -7694,8 +7701,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 if (zncc_residual_en)
                 {
                   normalized_current_values[patch_index] = current_value;
-                  sparseJacobianToDense(jacobian, jacobian_buf);
-                  normalized_current_jacobian.row(patch_index) = jacobian_buf.transpose();
+                  sparseJacobianToDense(jacobian, pixel_jacobian);
+                  normalized_current_jacobian.row(patch_index) = pixel_jacobian.transpose();
                 }
                 else
                 {
@@ -7745,7 +7752,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
               normalized_current_values.resize(patch_size_total);
               normalized_current_jacobian = Eigen::MatrixXd::Zero(patch_size_total, solve_dim);
             }
-            Eigen::VectorXd jacobian_buf(solve_dim);
             for (int x = 0; x < patch_size; ++x)
             {
               const uint8_t *img_ptr = img.data +
@@ -7803,8 +7809,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 if (zncc_residual_en)
                 {
                   normalized_current_values[patch_index] = current_value;
-                  sparseJacobianToDense(jacobian, jacobian_buf);
-                  normalized_current_jacobian.row(patch_index) = jacobian_buf.transpose();
+                  sparseJacobianToDense(jacobian, pixel_jacobian);
+                  normalized_current_jacobian.row(patch_index) = pixel_jacobian.transpose();
                 }
                 else
                 {
@@ -7819,49 +7825,46 @@ void VIOManager::computeJacobianAndUpdateEKF()
               continue;
           }
           if (local_dof == 0) continue;
-          patch_jacobian.conservativeResize(local_dof, Eigen::NoChange);
-          patch_residual.conservativeResize(local_dof);
-          patch_weights.conservativeResize(local_dof);
-          const Eigen::MatrixXd weighted_j = patch_weights.asDiagonal() * patch_jacobian;
-          const Eigen::VectorXd weighted_r = patch_weights.asDiagonal() * patch_residual;
+          const auto active_jacobian = patch_jacobian.topRows(local_dof);
+          const auto active_residual = patch_residual.head(local_dof);
+          weighted_j.topRows(local_dof).noalias() = patch_weights.head(local_dof).asDiagonal() * active_jacobian;
+          weighted_r.head(local_dof) = patch_weights.head(local_dof).asDiagonal() * active_residual;
           // Restore the original independent-pixel photometric likelihood.
           // measurement_cov is applied once when assembling the filter update.
           // Reference/map uncertainty remains confined to the optional NIS gate.
-          local_hessian.noalias() = weighted_j.transpose() * weighted_j;
-          local_gradient.noalias() = weighted_j.transpose() * weighted_r;
+          local_hessian.noalias() = weighted_j.topRows(local_dof).transpose() * weighted_j.topRows(local_dof);
+          local_gradient.noalias() = weighted_j.topRows(local_dof).transpose() * weighted_r.head(local_dof);
           local_pose_information = local_hessian.topLeftCorner<6, 6>();
           if (!visual_map_manage_en)
           {
             hessian += local_hessian;
             gradient += local_gradient;
             measurement_count += local_dof;
-            usage_local_hessian = local_hessian;
-            usage_local_dof = local_dof;
           }
           ctx.visual_submap->errors[point_index] = patch_error;
           if (!visual_map_manage_en)
           {
-            if (usage_stats_en && usage_reference != nullptr && usage_local_dof > 0)
+            if (usage_stats_en && usage_reference != nullptr && local_dof > 0)
             {
               const bool cross_camera = usage_reference->camera_id_ != ctx.camera_id;
-              usage_iter_h_all.noalias() += usage_local_hessian;
+              usage_iter_h_all.noalias() += local_hessian;
               ++usage_iter_patches_all;
-              usage_iter_residuals_all += usage_local_dof;
+              usage_iter_residuals_all += local_dof;
               if (cross_camera)
               {
-                usage_iter_h_cross.noalias() += usage_local_hessian;
+                usage_iter_h_cross.noalias() += local_hessian;
                 ++usage_iter_patches_cross;
-                usage_iter_residuals_cross += usage_local_dof;
+                usage_iter_residuals_cross += local_dof;
               }
               else
               {
-                usage_iter_h_same.noalias() += usage_local_hessian;
+                usage_iter_h_same.noalias() += local_hessian;
                 ++usage_iter_patches_same;
-                usage_iter_residuals_same += usage_local_dof;
+                usage_iter_residuals_same += local_dof;
               }
               if (iteration == 0)
                 recordUsageEkfContribution(ctx, *usage_reference, *point, usage_current_px_for_stats,
-                                           usage_affine_for_stats, level, usage_local_dof, usage_level_sse,
+                                           usage_affine_for_stats, level, local_dof, usage_level_sse,
                                            usage_level_ncc, usage_level_valid);
             }
             error += patch_error;
@@ -7870,13 +7873,12 @@ void VIOManager::computeJacobianAndUpdateEKF()
           double nis = std::numeric_limits<double>::quiet_NaN();
           if (compute_reference_nis)
           {
-            patch_nuisance.conservativeResize(local_dof, Eigen::NoChange);
             Eigen::MatrixXd nuisance_root(local_dof, 9);
             try
             {
-              nuisance_root.leftCols(6) = patch_nuisance.leftCols(6) *
+              nuisance_root.leftCols(6) = patch_nuisance.topRows(local_dof).leftCols(6) *
                   estimator_covariance::positiveSemidefiniteRoot(usage_reference->birth_pose_cov_);
-              nuisance_root.rightCols(3) = patch_nuisance.rightCols(3) *
+              nuisance_root.rightCols(3) = patch_nuisance.topRows(local_dof).rightCols(3) *
                   estimator_covariance::positiveSemidefiniteRoot(point->covariance_);
             }
             catch (const std::exception &error)
@@ -7897,16 +7899,21 @@ void VIOManager::computeJacobianAndUpdateEKF()
             const Eigen::VectorXd noise = Eigen::VectorXd::Constant(local_dof, measurement_cov);
             // Raw (pre-robustification) residuals, with actual current-state,
             // reference-pose and landmark Jacobians in residual coordinates.
-            const Eigen::MatrixXd prior = fullCovToSolve(iteration_prior_cov);
-            const Eigen::LLT<Eigen::MatrixXd> prior_llt(prior);
-            if (prior_llt.info() != Eigen::Success)
-              throw std::runtime_error("invalid visual NIS prior covariance");
+            // The prior and solve-index mapping are constant within this
+            // iteration. Factor lazily, at the first patch that needs NIS.
+            if (!nis_prior_ready)
+            {
+              nis_prior_llt.compute(fullCovToSolve(iteration_prior_cov));
+              if (nis_prior_llt.info() != Eigen::Success)
+                throw std::runtime_error("invalid visual NIS prior covariance");
+              nis_prior_ready = true;
+            }
             Eigen::MatrixXd innovation_root(local_dof, 9 + solve_dim);
             innovation_root.leftCols(9) = nuisance_root;
-            innovation_root.rightCols(solve_dim) = patch_jacobian * prior_llt.matrixL();
+            innovation_root.rightCols(solve_dim) = active_jacobian * nis_prior_llt.matrixL();
             const Eigen::MatrixXd normalized = estimator_covariance::solveIndependentPlusShared(
-                noise, innovation_root, patch_residual);
-            nis = patch_residual.dot(normalized.col(0));
+                noise, innovation_root, active_residual);
+            nis = active_residual.dot(normalized.col(0));
           }
           if (iteration == 0 && point_index < static_cast<int>(ctx.visual_submap->pose_information.size()))
           {

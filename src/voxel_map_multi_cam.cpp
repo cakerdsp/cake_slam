@@ -428,7 +428,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
   PrepareScanCovariances();
 
-  vector<pointWithVar>().swap(pv_list_);
+  pv_list_.clear();
   pv_list_.resize(feats_down_size_);
 
   int rematch_num = 0;
@@ -455,11 +455,20 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   directional_update::Result final_directional_result;
   Eigen::MatrixXd final_posterior_covariance;
 
+  // Keep scratch allocations across ICP iterations; dimensions and values are
+  // refreshed below for each new linearization.
+  pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(new pcl::PointCloud<pcl::PointXYZI>);
+  Eigen::Matrix<double, Eigen::Dynamic, 6> Hsub;
+  Eigen::Matrix<double, 6, Eigen::Dynamic> Hsub_T_R_inv;
+  Eigen::VectorXd meas_vec;
+  Eigen::VectorXd information_vector(lio_state_dim);
+  Eigen::MatrixXd full_information(full_state_dim, full_state_dim);
+  Eigen::VectorXd full_information_vector(full_state_dim);
+
   bool flg_EKF_inited, flg_EKF_converged, EKF_stop_flg = 0;
   for (int iterCount = 0; iterCount < config_setting_.max_iterations_; iterCount++)
   {
     double total_residual = 0.0;
-    pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(new pcl::PointCloud<pcl::PointXYZI>);
     TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, world_lidar);
     const Eigen::MatrixXd iteration_prior_cov = state_propagat.covarianceAt(state_);
     for (size_t i = 0; i < feats_down_body_->size(); i++)
@@ -496,10 +505,11 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
      * ***/
-    MatrixXd Hsub(effct_feat_num_, 6);
-    MatrixXd Hsub_T_R_inv(6, effct_feat_num_);
-    VectorXd meas_vec(effct_feat_num_);
+    Hsub.resize(effct_feat_num_, 6);
+    Hsub_T_R_inv.resize(6, effct_feat_num_);
+    meas_vec.resize(effct_feat_num_);
     meas_vec.setZero();
+    const M3D r_wl = state_.rot_end * extR_;
     for (int i = 0; i < effct_feat_num_; i++)
     {
       auto &ptpl = ptpl_list_[i];
@@ -515,7 +525,6 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       Eigen::Matrix<double, 1, 6> J_nq;
       J_nq.head<3>() = (point_world - ptpl.center_).transpose();
       J_nq.tail<3>() = -ptpl.normal_.transpose();
-      const M3D r_wl = state_.rot_end * extR_;
       const M3D var = r_wl * ptpl.body_cov_ * r_wl.transpose();
       // Baseline scalar point-to-plane noise; no cross-plane inflation.
       const double variance = 0.001 + (J_nq * ptpl.plane_var_ * J_nq.transpose())(0, 0) +
@@ -542,7 +551,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     if (config_setting_.directional_update_en) H_T_H.setZero();
     H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
     // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
-    Eigen::VectorXd information_vector = Eigen::VectorXd::Zero(lio_state_dim);
+    information_vector.setZero();
     information_vector.head<6>() = HTz;
     const Eigen::MatrixXd lio_cov = fullCovToLio(iteration_prior_cov);
     if (config_setting_.directional_update_en)
@@ -561,8 +570,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       information_vector = filtered.information_vector;
       final_directional_result = filtered;
     }
-    Eigen::MatrixXd full_information = Eigen::MatrixXd::Zero(full_state_dim, full_state_dim);
-    Eigen::VectorXd full_information_vector = Eigen::VectorXd::Zero(full_state_dim);
+    full_information.setZero();
+    full_information_vector.setZero();
     for (int r = 0; r < lio_state_dim; ++r)
     {
       full_information_vector[lio_to_full[r]] = information_vector[r];
@@ -634,7 +643,11 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
                                      pcl::PointCloud<pcl::PointXYZI>::Ptr &trans_cloud)
 {
-  pcl::PointCloud<pcl::PointXYZI>().swap(*trans_cloud);
+  // Reset cloud metadata as before, but retain the point buffer for reuse.
+  pcl::PointCloud<pcl::PointXYZI> empty_cloud;
+  empty_cloud.points.swap(trans_cloud->points);
+  empty_cloud.clear();
+  empty_cloud.swap(*trans_cloud);
   trans_cloud->reserve(input_cloud->size());
   for (size_t i = 0; i < input_cloud->size(); i++)
   {
