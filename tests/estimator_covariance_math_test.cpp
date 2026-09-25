@@ -174,6 +174,35 @@ void testSharedResiduals()
           "shared plane translation must not disappear as independent point count grows");
 }
 
+void testNisWorkspace()
+{
+  ec::NisWorkspace workspace;
+  // Include strided topRows views, changing ranks/row counts, and a zero root.
+  // The same workspace must not retain data from its previous observation.
+  for (int rows : {64, 7, 32, 1, 64})
+    for (int rank : {0, 9, 19, 27})
+      for (double variance : {0.002, 1.0, 3000.0})
+      {
+        const MatrixXd storage = MatrixXd::Random(64, rank);
+        const VectorXd residual_storage = VectorXd::Random(64);
+        const auto root = storage.topRows(rows);
+        const auto residual = residual_storage.head(rows);
+        const MatrixXd covariance = variance * MatrixXd::Identity(rows, rows) + root * root.transpose();
+        const double expected = residual.dot(covariance.llt().solve(residual));
+        const double actual = workspace.evaluate(variance, root, residual);
+        require(std::abs(actual - expected) <= 1.0e-8 * std::max(1.0, std::abs(expected)),
+                "cached scalar-noise NIS against dense innovation covariance");
+      }
+  const MatrixXd zero = MatrixXd::Zero(8, 19);
+  const VectorXd residual = VectorXd::Ones(8);
+  require(std::abs(workspace.evaluate(2.0, zero, residual) - 4.0) < 1.0e-12,
+          "NIS with no correlated uncertainty");
+  bool rejected = false;
+  try { workspace.evaluate(0.0, zero, residual); }
+  catch (const std::runtime_error &) { rejected = true; }
+  require(rejected, "invalid NIS variance must be rejected");
+}
+
 int main()
 {
   try
@@ -181,6 +210,7 @@ int main()
     testGeometry();
     testFullAndFrozenUpdate();
     testSharedResiduals();
+    testNisWorkspace();
     std::cout << "All estimator covariance math tests passed\n";
   }
   catch (const std::exception &error)

@@ -2,6 +2,7 @@
 #define CAKE_SPLIT_STATE_MATH_H_
 
 #include <Eigen/Dense>
+#include "estimator_covariance.h"
 #include <array>
 #include <vector>
 
@@ -57,67 +58,17 @@ struct Information
   }
 };
 
-// One reusable workspace per camera. A historical-reference residual involves
-// only this camera's parameters, not every camera in the rig.
-struct PatchWorkspace
+// Per-observation output is separate from thread-private scratch storage.
+// It is reduced in input order after all workers finish.
+struct PatchInformation
 {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-  using MotionRows = Eigen::Matrix<double, Eigen::Dynamic, kMotionDim>;
-  MotionRows motion, weighted_motion;
-  Eigen::MatrixXd camera, weighted_camera;
-  PixelJacobian pixel_split;
-  Eigen::VectorXd residual, weight, weighted_residual, pixel;
-  Eigen::MatrixXd nuisance, reference_noise, compact;
-  MotionMatrix h_motion;
-  MotionVector g_motion;
+  MotionMatrix h_motion = MotionMatrix::Zero();
+  MotionVector g_motion = MotionVector::Zero();
   Eigen::Matrix<double, kMotionDim, Eigen::Dynamic> h_cross;
   Eigen::MatrixXd h_camera;
   Eigen::VectorXd g_camera;
-  std::vector<int> camera_indices, solve_to_patch, patch_to_solve;
-
-  void configure(int rows, int solve_dim, const std::vector<int> &indices, bool need_nis)
-  {
-    camera_indices = indices;
-    const int n = indices.size();
-    motion.resize(rows, kMotionDim);
-    weighted_motion.resize(rows, kMotionDim);
-    camera.resize(rows, n);
-    weighted_camera.resize(rows, n);
-    residual.resize(rows);
-    weight.resize(rows);
-    weighted_residual.resize(rows);
-    pixel.resize(kMotionDim + n);
-    pixel_split.camera.resize(n);
-    compact.resize(rows, kMotionDim + n);
-    h_cross.resize(kMotionDim, n);
-    h_camera.resize(n, n);
-    g_camera.resize(n);
-    if (need_nis) nuisance.resize(rows, 9);
-    solve_to_patch.assign(solve_dim, -1);
-    patch_to_solve.resize(kMotionDim + n);
-    for (int i = 0; i < kMotionDim; ++i)
-      solve_to_patch[i] = patch_to_solve[i] = i;
-    for (int i = 0; i < n; ++i)
-    {
-      solve_to_patch[indices[i]] = kMotionDim + i;
-      patch_to_solve[kMotionDim + i] = indices[i];
-    }
-  }
-
-  void compute(int rows)
-  {
-    weighted_motion.topRows(rows).noalias() = weight.head(rows).asDiagonal() * motion.topRows(rows);
-    weighted_residual.head(rows) = weight.head(rows).asDiagonal() * residual.head(rows);
-    h_motion.noalias() = weighted_motion.topRows(rows).transpose() * weighted_motion.topRows(rows);
-    g_motion.noalias() = weighted_motion.topRows(rows).transpose() * weighted_residual.head(rows);
-    if (camera.cols() != 0)
-    {
-      weighted_camera.topRows(rows).noalias() = weight.head(rows).asDiagonal() * camera.topRows(rows);
-      h_cross.noalias() = weighted_motion.topRows(rows).transpose() * weighted_camera.topRows(rows);
-      h_camera.noalias() = weighted_camera.topRows(rows).transpose() * weighted_camera.topRows(rows);
-      g_camera.noalias() = weighted_camera.topRows(rows).transpose() * weighted_residual.head(rows);
-    }
-  }
+  std::vector<int> camera_indices;
 
   void addTo(Information &information) const
   {
@@ -143,6 +94,72 @@ struct PatchWorkspace
       h.block<1, kMotionDim>(ci, 0) += h_cross.col(i).transpose();
       for (int j = 0; j < static_cast<int>(camera_indices.size()); ++j)
         h(ci, camera_indices[j]) += h_camera(i, j);
+    }
+  }
+
+};
+
+// One reusable workspace per camera and worker. A historical-reference residual involves
+// only this camera's parameters, not every camera in the rig.
+struct PatchWorkspace : PatchInformation
+{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  using MotionRows = Eigen::Matrix<double, Eigen::Dynamic, kMotionDim>;
+  MotionRows motion, weighted_motion;
+  Eigen::MatrixXd camera, weighted_camera;
+  PixelJacobian pixel_split;
+  Eigen::VectorXd residual, weight, weighted_residual, pixel;
+  Eigen::MatrixXd nuisance, reference_noise, compact;
+  Eigen::MatrixXd nuisance_root, innovation_root;
+  estimator_covariance::NisWorkspace nis;
+  std::vector<int> solve_to_patch, patch_to_solve;
+
+  void configure(int rows, int solve_dim, const std::vector<int> &indices, bool need_nis)
+  {
+    camera_indices = indices;
+    const int n = indices.size();
+    motion.resize(rows, kMotionDim);
+    weighted_motion.resize(rows, kMotionDim);
+    camera.resize(rows, n);
+    weighted_camera.resize(rows, n);
+    residual.resize(rows);
+    weight.resize(rows);
+    weighted_residual.resize(rows);
+    pixel.resize(kMotionDim + n);
+    pixel_split.camera.resize(n);
+    compact.resize(rows, kMotionDim + n);
+    h_cross.resize(kMotionDim, n);
+    h_camera.resize(n, n);
+    g_camera.resize(n);
+    if (need_nis)
+    {
+      nuisance.resize(rows, 9);
+      nuisance_root.resize(rows, 9);
+      innovation_root.resize(rows, 9 + kMotionDim + n);
+    }
+    solve_to_patch.assign(solve_dim, -1);
+    patch_to_solve.resize(kMotionDim + n);
+    for (int i = 0; i < kMotionDim; ++i)
+      solve_to_patch[i] = patch_to_solve[i] = i;
+    for (int i = 0; i < n; ++i)
+    {
+      solve_to_patch[indices[i]] = kMotionDim + i;
+      patch_to_solve[kMotionDim + i] = indices[i];
+    }
+  }
+
+  void compute(int rows)
+  {
+    weighted_motion.topRows(rows).noalias() = weight.head(rows).asDiagonal() * motion.topRows(rows);
+    weighted_residual.head(rows) = weight.head(rows).asDiagonal() * residual.head(rows);
+    h_motion.noalias() = weighted_motion.topRows(rows).transpose() * weighted_motion.topRows(rows);
+    g_motion.noalias() = weighted_motion.topRows(rows).transpose() * weighted_residual.head(rows);
+    if (camera.cols() != 0)
+    {
+      weighted_camera.topRows(rows).noalias() = weight.head(rows).asDiagonal() * camera.topRows(rows);
+      h_cross.noalias() = weighted_motion.topRows(rows).transpose() * weighted_camera.topRows(rows);
+      h_camera.noalias() = weighted_camera.topRows(rows).transpose() * weighted_camera.topRows(rows);
+      g_camera.noalias() = weighted_camera.topRows(rows).transpose() * weighted_residual.head(rows);
     }
   }
 

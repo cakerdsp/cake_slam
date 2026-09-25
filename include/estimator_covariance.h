@@ -310,5 +310,39 @@ inline Eigen::MatrixXd solveIndependentPlusShared(const Eigen::VectorXd &d,
   if (llt.info() != Eigen::Success) throw std::runtime_error("correlated residual factorization failed");
   return di_b - di_u * llt.solve(u.transpose() * di_b);
 }
+
+// Scalar-noise NIS. Reuse the small Woodbury system and avoid constructing
+// diagonal noise matrices or a residual-sized inverse. The ridge objective
+// below equals r' (variance I + U U')^-1 r without subtracting large scalars.
+struct NisWorkspace
+{
+  Eigen::MatrixXd system;
+  Eigen::LLT<Eigen::MatrixXd> factor;
+  Eigen::VectorXd rhs, latent, remaining;
+
+  double evaluate(double variance, const Eigen::Ref<const Eigen::MatrixXd> &u,
+                  const Eigen::Ref<const Eigen::VectorXd> &residual)
+  {
+    if (!std::isfinite(variance) || variance <= 0.0 || u.rows() != residual.size() ||
+        !u.allFinite() || !residual.allFinite())
+      throw std::runtime_error("invalid NIS covariance or residual");
+    if (u.cols() == 0) return residual.squaredNorm() / variance;
+    system.resize(u.cols(), u.cols());
+    system.noalias() = u.transpose() * u;
+    system /= variance;
+    system.diagonal().array() += 1.0;
+    factor.compute(system);
+    if (factor.info() != Eigen::Success)
+      throw std::runtime_error("NIS covariance factorization failed");
+    rhs.resize(u.cols());
+    rhs.noalias() = u.transpose() * residual;
+    rhs /= variance;
+    latent = factor.solve(rhs);
+    remaining.resize(residual.size());
+    remaining.noalias() = u * latent;
+    remaining -= residual;
+    return remaining.squaredNorm() / variance + latent.squaredNorm();
+  }
+};
 } // namespace estimator_covariance
 #endif

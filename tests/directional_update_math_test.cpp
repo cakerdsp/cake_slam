@@ -81,6 +81,53 @@ int main()
     assert(near(filtered_component1 + filtered_component2, filtered.information, 1.0e-9));
   }
 
+  // Compare every fixed-size specialization and the dynamic fallback with
+  // the original normalized-coordinate likelihood and component transforms.
+  for (int n : {6, 18, 19, 20, 21, 28})
+  {
+    const Eigen::MatrixXd a = Eigen::MatrixXd::Random(n, n);
+    const Eigen::MatrixXd prior = a * a.transpose() + 0.5 * Eigen::MatrixXd::Identity(n, n);
+    const Eigen::MatrixXd h1 = 0.12 * Eigen::MatrixXd::Random(n, n);
+    const Eigen::MatrixXd h2 = 0.12 * Eigen::MatrixXd::Random(n, n);
+    const Eigen::MatrixXd c1 = h1.transpose() * h1, c2 = h2.transpose() * h2;
+    const Eigen::MatrixXd information = c1 + c2;
+    const Eigen::VectorXd vector = Eigen::VectorXd::Random(n);
+    directional_update::Result filtered;
+    assert(directional_update::filterInformation(prior, information, vector, 0.05, 0.50, filtered, true));
+    const Eigen::MatrixXd l = prior.llt().matrixL();
+    const Eigen::MatrixXd normalized = l.transpose() * information * l;
+    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(
+        directional_update::symmetrize(normalized));
+    const Eigen::MatrixXd u = solver.eigenvectors();
+    Eigen::VectorXd weights(n), eigenvalues = solver.eigenvalues().cwiseMax(0.0);
+    for (int i = 0; i < n; ++i)
+    {
+      const double rho = eigenvalues[i] / (1.0 + eigenvalues[i]);
+      weights[i] = std::clamp((rho - 0.05) / 0.45, 0.0, 1.0);
+    }
+    const Eigen::MatrixXd normalized_h = u * (weights.array() * eigenvalues.array()).matrix().asDiagonal() * u.transpose();
+    const Eigen::MatrixXd left = l.transpose().triangularView<Eigen::Upper>().solve(normalized_h);
+    const Eigen::MatrixXd expected_h = l.transpose().triangularView<Eigen::Upper>().solve(left.transpose()).transpose();
+    const Eigen::VectorXd normalized_g = u * weights.asDiagonal() * u.transpose() * l.transpose() * vector;
+    const Eigen::VectorXd expected_g = l.transpose().triangularView<Eigen::Upper>().solve(normalized_g);
+    assert(near(filtered.information, expected_h, 1.0e-9));
+    assert(near(filtered.information_vector, expected_g, 1.0e-9));
+    assert(near(filtered.weights, weights, 1.0e-9));
+    Eigen::MatrixXd filtered_c1, filtered_c2, uncached_c1;
+    std::string error;
+    assert(directional_update::filterInformationComponent(c1, filtered, filtered_c1, error));
+    assert(directional_update::filterInformationComponent(c2, filtered, filtered_c2, error));
+    assert(near(Eigen::MatrixXd(filtered_c1 + filtered_c2), filtered.information, 1.0e-9));
+    const Eigen::MatrixXd gate = u * weights.cwiseSqrt().asDiagonal() * u.transpose();
+    const Eigen::MatrixXd normalized_c1 = gate * l.transpose() * c1 * l * gate;
+    const Eigen::MatrixXd left_c1 = l.transpose().triangularView<Eigen::Upper>().solve(normalized_c1);
+    const Eigen::MatrixXd expected_c1 = l.transpose().triangularView<Eigen::Upper>().solve(left_c1.transpose()).transpose();
+    assert(near(filtered_c1, expected_c1, 1.0e-9));
+    filtered.component_transform.resize(0, 0);
+    assert(directional_update::filterInformationComponent(c1, filtered, uncached_c1, error));
+    assert(near(filtered_c1, uncached_c1, 1.0e-9));
+  }
+
   std::cout << "directional_update_math_test passed\n";
   return 0;
 }

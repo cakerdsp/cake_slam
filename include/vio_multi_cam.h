@@ -21,6 +21,7 @@ which is included as part of this source code package.
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <limits>
 #include <map>
 #include <memory>
@@ -781,9 +782,47 @@ public:
     int reason = REJECT_DRAW_RANGE;
   };
   double compute_jacobian_time, update_ekf_time;
+  double visual_parallel_time_ = 0.0, visual_reduce_time_ = 0.0;
+  double visual_nis_worker_time_ = 0.0, visual_directional_time_ = 0.0;
+  int visual_linearization_threads_ = 1;
+  struct VisualPatchResult
+  {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    split_state_math::PatchInformation information;
+    // Reference and map geometry are frozen during one visual solve.
+    Eigen::MatrixXd reference_jacobian;
+    Eigen::Matrix<double, 6, 6> reference_root = Eigen::Matrix<double, 6, 6>::Zero();
+    Eigen::Matrix3d point_root = Eigen::Matrix3d::Zero();
+    int reference_level = -1;
+    bool reference_valid = false, roots_ready = false;
+    std::string covariance_error;
+    int linearized = 0, dof = 0;
+    bool has_error = false, evidence = false, accepted = false, invalid_covariance = false;
+    double error = 0.0, nis = 0.0, nis_time = 0.0;
+    V2D current_px = V2D::Zero();
+    Matrix2d affine = Matrix2d::Zero();
+    bool usage_valid = false;
+    double usage_ncc = 0.0, usage_sse = 0.0;
+    std::exception_ptr failure;
+    void resetFrame()
+    {
+      reference_level = -1;
+      reference_valid = roots_ready = false;
+      covariance_error.clear();
+    }
+    void resetIteration()
+    {
+      linearized = dof = 0;
+      has_error = evidence = accepted = invalid_covariance = false;
+      error = nis_time = 0.0;
+      nis = std::numeric_limits<double>::quiet_NaN();
+      failure = nullptr;
+    }
+  };
   split_state_math::Information visual_information_workspace_;
   std::vector<split_state_math::PatchWorkspace,
               Eigen::aligned_allocator<split_state_math::PatchWorkspace>> visual_patch_workspaces_;
+  std::vector<std::vector<VisualPatchResult, Eigen::aligned_allocator<VisualPatchResult>>> visual_patch_results_;
   long long vio_linearized_residual_count_ = 0;
   double ave_total = 0;
   // double ave_build_residual_time = 0;
