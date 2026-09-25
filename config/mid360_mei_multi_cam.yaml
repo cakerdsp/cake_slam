@@ -11,7 +11,7 @@ common:
   directional_full_variance_reduction: 0.80
   lid_topic: "/livox/lidar"
   imu_topic: "/livox/imu"
-  img_en: 0
+  img_en: 1
   lidar_en: 1
   ros_driver_bug_fix: false
 
@@ -88,7 +88,7 @@ time_offset:
 preprocess:
   image_downclock_en: true
   image_downclock_factor: 2
-  point_filter_num: 1
+  point_filter_num: 5
   filter_size_surf: 0.1
   lidar_type: 7
   scan_line: 4
@@ -142,7 +142,7 @@ vio:
   # reference selection, or deleting map objects while the raw-path abort is traced.
   visual_ref_post_ekf_build_en: true
 
-  visual_map_manage_en: false
+  visual_map_manage_en: true
   visual_map_manage_log_en: false
   visual_map_manage_shadow_en: false
   visual_ref_current_select_en: true
@@ -159,13 +159,13 @@ vio:
   visual_ref_validate_min_tests: 3
   visual_ref_validate_min_ratio: 0.67
   visual_ref_retire_reject_count: 5
-  visual_ref_max_count: 8
-  visual_ref_coverage_angle_deg: 10.0
+  visual_ref_max_count: 4
+  visual_ref_coverage_angle_deg: 20.0
   visual_ref_max_anisotropy: 8.0
   visual_ref_nis_max_per_dof: 3.0
   visual_point_seed_min_tests: 3
   visual_point_seed_min_ratio: 0.67
-  visual_point_footprint_iou: 0.80
+  visual_point_footprint_iou: 0.60
   visual_point_information_retain: 0.90
   visual_point_suspect_reject_count: 8
   visual_point_stale_frames: 200
@@ -184,7 +184,7 @@ vio:
   # scale matches mid360 lio.voxel_size so footprint association stays coherent.
   
   visual_geom_filter_en: true
-  visual_geom_filter_log_en: true
+  visual_geom_filter_log_en: false
   visual_geom_filter_require_point_cov: true
   visual_geom_filter_voxel_size: 0.5
   visual_geom_filter_min_plane_points: 5
@@ -283,7 +283,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "mocap4_nees_onlylio_off"
+  seq_name: "mocap21_mem_on"
   pose_output_en: true
 
 pcd_save:
