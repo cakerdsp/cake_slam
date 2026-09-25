@@ -16,9 +16,12 @@ namespace estimator_covariance
 using Matrix6 = Eigen::Matrix<double, 6, 6>;
 using PointJacobian = Eigen::Matrix<double, 3, 6>;
 
-inline Eigen::MatrixXd symmetric(const Eigen::MatrixXd &a)
+template <typename Derived>
+inline typename Derived::PlainObject symmetric(const Eigen::MatrixBase<Derived> &a)
 {
-  return (0.5 * (a + a.transpose())).eval();
+  // Evaluate products once before using both the matrix and its transpose.
+  const typename Derived::PlainObject evaluated = a;
+  return (0.5 * (evaluated + evaluated.transpose())).eval();
 }
 
 inline Eigen::Matrix3d skew(const Eigen::Vector3d &v)
@@ -50,18 +53,97 @@ inline Eigen::Matrix3d rightJacobian(const Eigen::Vector3d &v)
 // With d = current boxminus prior, Jr(d) transports the prior covariance
 // into the current tangent space. With d = injected correction, the same
 // Jacobian resets a local posterior into the corrected state's tangent space.
+template <int Dimension>
+inline Eigen::MatrixXd transportImpl(const Eigen::MatrixXd &p, const Eigen::VectorXd &d,
+                                     const std::vector<int> &rotation_indices)
+{
+  using Matrix = Eigen::Matrix<double, Dimension, Dimension>;
+  const Matrix covariance = p;
+  Matrix j = Matrix::Identity(p.rows(), p.cols());
+  for (int index : rotation_indices)
+  {
+    if (index < 0 || index + 3 > p.rows()) throw std::invalid_argument("invalid rotation covariance index");
+    j.template block<3, 3>(index, index) = rightJacobian(d.segment<3>(index));
+  }
+  return symmetric(j * covariance * j.transpose());
+}
+
 inline Eigen::MatrixXd transport(const Eigen::MatrixXd &p, const Eigen::VectorXd &d,
                                  const std::vector<int> &rotation_indices)
 {
   if (p.rows() != p.cols() || d.size() != p.rows() || !p.allFinite() || !d.allFinite())
     throw std::invalid_argument("covariance transport dimension mismatch");
-  Eigen::MatrixXd j = Eigen::MatrixXd::Identity(p.rows(), p.cols());
-  for (int index : rotation_indices)
+  switch (p.rows())
   {
-    if (index < 0 || index + 3 > p.rows()) throw std::invalid_argument("invalid rotation covariance index");
-    j.block<3, 3>(index, index) = rightJacobian(d.segment<3>(index));
+    case 19: return transportImpl<19>(p, d, rotation_indices);
+    case 20: return transportImpl<20>(p, d, rotation_indices);
+    case 21: return transportImpl<21>(p, d, rotation_indices);
+    default: return transportImpl<Eigen::Dynamic>(p, d, rotation_indices);
   }
-  return symmetric(j * p * j.transpose());
+}
+
+// Compact one/two/three-camera states use fixed-size arithmetic. The dynamic
+// interface is retained for online-calibration layouts and larger camera rigs.
+template <int Dimension>
+inline Eigen::MatrixXd propagateImpl(const Eigen::MatrixXd &p, const Eigen::MatrixXd &f,
+                                     const Eigen::MatrixXd &q)
+{
+  using Matrix = Eigen::Matrix<double, Dimension, Dimension>;
+  const Matrix covariance = p;
+  const Matrix transition = f;
+  const Matrix noise = q;
+  return symmetric(transition * covariance * transition.transpose() + noise);
+}
+
+inline Eigen::MatrixXd propagate(const Eigen::MatrixXd &p, const Eigen::MatrixXd &f,
+                                 const Eigen::MatrixXd &q)
+{
+  switch (p.rows())
+  {
+    case 19: return propagateImpl<19>(p, f, q);
+    case 20: return propagateImpl<20>(p, f, q);
+    case 21: return propagateImpl<21>(p, f, q);
+    default: return symmetric(f * p * f.transpose() + q);
+  }
+}
+
+inline bool isPositiveDefinite(const Eigen::MatrixXd &p)
+{
+  switch (p.rows())
+  {
+    case 19: return Eigen::LLT<Eigen::Matrix<double, 19, 19>>(p).info() == Eigen::Success;
+    case 20: return Eigen::LLT<Eigen::Matrix<double, 20, 20>>(p).info() == Eigen::Success;
+    case 21: return Eigen::LLT<Eigen::Matrix<double, 21, 21>>(p).info() == Eigen::Success;
+    default: return Eigen::LLT<Eigen::MatrixXd>(p).info() == Eigen::Success;
+  }
+}
+
+template <int Dimension>
+inline void normalEquationsFixed(const Eigen::MatrixXd &weighted_j, const Eigen::VectorXd &weighted_r,
+                                  int rows, Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient)
+{
+  // Map the existing workspace without allocating or changing its column stride.
+  using Jacobian = Eigen::Matrix<double, Eigen::Dynamic, Dimension>;
+  const Eigen::Map<const Jacobian> j(weighted_j.data(), weighted_j.rows(), Dimension);
+  const Eigen::Matrix<double, Dimension, Dimension> h = j.topRows(rows).transpose() * j.topRows(rows);
+  const Eigen::Matrix<double, Dimension, 1> g = j.topRows(rows).transpose() * weighted_r.head(rows);
+  hessian = h;
+  gradient = g;
+}
+
+inline void normalEquations(const Eigen::MatrixXd &weighted_j, const Eigen::VectorXd &weighted_r,
+                            int rows, Eigen::MatrixXd &hessian, Eigen::VectorXd &gradient)
+{
+  switch (weighted_j.cols())
+  {
+    case 19: normalEquationsFixed<19>(weighted_j, weighted_r, rows, hessian, gradient); break;
+    case 20: normalEquationsFixed<20>(weighted_j, weighted_r, rows, hessian, gradient); break;
+    case 21: normalEquationsFixed<21>(weighted_j, weighted_r, rows, hessian, gradient); break;
+    default:
+      hessian.noalias() = weighted_j.topRows(rows).transpose() * weighted_j.topRows(rows);
+      gradient.noalias() = weighted_j.topRows(rows).transpose() * weighted_r.head(rows);
+      break;
+  }
 }
 
 inline PointJacobian pointJacobian(const Eigen::Matrix3d &r_wi, const Eigen::Vector3d &p_i)
@@ -123,6 +205,46 @@ struct Update
 // H' R^-1 H and H' R^-1 (z-h) are supplied in full state coordinates.
 // Zero gain rows freeze means, while Joseph's formula still updates both
 // cross-covariance blocks. Restoring old rows/columns is not a Schmidt update.
+template <int Dimension>
+inline Update updateImpl(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &information,
+                         const Eigen::VectorXd &information_vector,
+                         const Eigen::VectorXd &prior_delta, const std::vector<int> &active)
+{
+  using Matrix = Eigen::Matrix<double, Dimension, Dimension>;
+  using Vector = Eigen::Matrix<double, Dimension, 1>;
+  const int n = static_cast<int>(prior.rows());
+  const Matrix p = symmetric(Matrix(prior));
+  const Matrix info = symmetric(Matrix(information));
+  const Matrix identity = Matrix::Identity(n, n);
+  const Eigen::LLT<Matrix> prior_llt(p);
+  if (prior_llt.info() != Eigen::Success) throw std::runtime_error("full prior covariance is not positive definite");
+  const Eigen::LLT<Matrix> posterior_llt(symmetric(prior_llt.solve(identity) + info));
+  if (posterior_llt.info() != Eigen::Success) throw std::runtime_error("posterior information is not positive definite");
+  const Matrix b = posterior_llt.solve(identity);
+  Matrix selected_b = Matrix::Zero(n, n);
+  Vector selected_prior = Vector::Zero(n);
+  for (int index : active)
+  {
+    if (index < 0 || index >= n) throw std::invalid_argument("invalid active covariance index");
+    selected_b.row(index) = b.row(index);
+    selected_prior[index] = prior_delta[index];
+  }
+  const Matrix gain_times_jacobian = selected_b * info;
+  const Vector rhs = information_vector;
+  const Vector delta = prior_delta;
+  const Vector correction = selected_b * rhs + selected_prior - gain_times_jacobian * delta;
+  const Matrix a = identity - gain_times_jacobian;
+  const Matrix covariance = symmetric(a * p * a.transpose() + selected_b * info * selected_b.transpose());
+  if (!correction.allFinite() || !covariance.allFinite() ||
+      Eigen::LLT<Matrix>(covariance).info() != Eigen::Success)
+    throw std::runtime_error("invalid full posterior covariance");
+  Update result;
+  result.gain_times_jacobian = gain_times_jacobian;
+  result.correction = correction;
+  result.covariance = covariance;
+  return result;
+}
+
 inline Update update(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &information,
                      const Eigen::VectorXd &information_vector,
                      const Eigen::VectorXd &prior_delta, const std::vector<int> &active)
@@ -133,31 +255,13 @@ inline Update update(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &inform
       !prior.allFinite() || !information.allFinite() ||
       !information_vector.allFinite() || !prior_delta.allFinite())
     throw std::runtime_error("invalid covariance update input");
-  const Eigen::MatrixXd p = symmetric(prior);
-  const Eigen::MatrixXd info = symmetric(information);
-  const Eigen::MatrixXd identity = Eigen::MatrixXd::Identity(n, n);
-  const Eigen::LLT<Eigen::MatrixXd> prior_llt(p);
-  if (prior_llt.info() != Eigen::Success) throw std::runtime_error("full prior covariance is not positive definite");
-  const Eigen::LLT<Eigen::MatrixXd> posterior_llt(symmetric(prior_llt.solve(identity) + info));
-  if (posterior_llt.info() != Eigen::Success) throw std::runtime_error("posterior information is not positive definite");
-  const Eigen::MatrixXd b = posterior_llt.solve(identity);
-  Eigen::MatrixXd selected_b = Eigen::MatrixXd::Zero(n, n);
-  Eigen::VectorXd selected_prior = Eigen::VectorXd::Zero(n);
-  for (int index : active)
+  switch (n)
   {
-    if (index < 0 || index >= n) throw std::invalid_argument("invalid active covariance index");
-    selected_b.row(index) = b.row(index);
-    selected_prior[index] = prior_delta[index];
+    case 19: return updateImpl<19>(prior, information, information_vector, prior_delta, active);
+    case 20: return updateImpl<20>(prior, information, information_vector, prior_delta, active);
+    case 21: return updateImpl<21>(prior, information, information_vector, prior_delta, active);
+    default: return updateImpl<Eigen::Dynamic>(prior, information, information_vector, prior_delta, active);
   }
-  Update result;
-  result.gain_times_jacobian = selected_b * info;
-  result.correction = selected_b * information_vector + selected_prior - result.gain_times_jacobian * prior_delta;
-  const Eigen::MatrixXd a = identity - result.gain_times_jacobian;
-  result.covariance = symmetric(a * p * a.transpose() + selected_b * info * selected_b.transpose());
-  if (!result.correction.allFinite() || !result.covariance.allFinite() ||
-      Eigen::LLT<Eigen::MatrixXd>(result.covariance).info() != Eigen::Success)
-    throw std::runtime_error("invalid full posterior covariance");
-  return result;
 }
 
 // Covariance upper bound for a sum of vectors whose cross-correlations are

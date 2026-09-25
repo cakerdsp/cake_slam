@@ -122,10 +122,18 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh, std::string node_name)
   p_imu.reset(new ImuProcess());
 
   readParameters(this->node);
-  _state.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset);
-  state_propagat.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset);
-  imu_propagate.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset);
-  latest_ekf_state.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset);
+  _state.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset,
+                          online_extrinsic_en, online_time_offset_en);
+  state_propagat.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset,
+                                  online_extrinsic_en, online_time_offset_en);
+  imu_propagate.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset,
+                                 online_extrinsic_en, online_time_offset_en);
+  latest_ekf_state.configureCameras(num_cameras, inv_expo_time_init, num_time_offset_groups, img_time_offset,
+                                    online_extrinsic_en, online_time_offset_en);
+  printf("\033[1;36m[ State Layout ] dim=%d base=18 exposure=%d extrinsic=%d time_offset=%d covariance_kernels=%s\033[0m\n",
+         _state.stateDim(), num_cameras, _state.hasExtrinsicStates() ? 6 * num_cameras : 0,
+         _state.timeOffsetStateCount(),
+         (_state.stateDim() >= 19 && _state.stateDim() <= 21) ? "fixed" : "dynamic");
   auto apply_time_offset_init = [this](StatesGroup &state_value) {
     for (int group_id = 0; group_id < state_value.num_time_offset_groups; ++group_id)
     {

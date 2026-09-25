@@ -191,6 +191,8 @@ struct StatesGroup
     this->gravity = b.gravity;
     this->num_cameras = b.num_cameras;
     this->num_time_offset_groups = b.num_time_offset_groups;
+    this->estimate_extrinsics = b.estimate_extrinsics;
+    this->estimate_time_offsets = b.estimate_time_offsets;
     this->inv_expo_time = b.inv_expo_time;
     this->time_offset = b.time_offset;
     this->time_offset_prior = b.time_offset_prior;
@@ -211,6 +213,8 @@ struct StatesGroup
     this->gravity = b.gravity;
     this->num_cameras = b.num_cameras;
     this->num_time_offset_groups = b.num_time_offset_groups;
+    this->estimate_extrinsics = b.estimate_extrinsics;
+    this->estimate_time_offsets = b.estimate_time_offsets;
     this->inv_expo_time = b.inv_expo_time;
     this->time_offset = b.time_offset;
     this->time_offset_prior = b.time_offset_prior;
@@ -222,23 +226,26 @@ struct StatesGroup
     return *this;
   };
 
-  int stateDim() const { return BASE_STATE_DIM + num_cameras + num_time_offset_groups + 6 * num_cameras; }
+  bool hasExtrinsicStates() const { return estimate_extrinsics; }
+  bool hasTimeOffsetStates() const { return estimate_time_offsets; }
+  int timeOffsetStateCount() const { return estimate_time_offsets ? num_time_offset_groups : 0; }
+  int stateDim() const { return BASE_STATE_DIM + num_cameras + timeOffsetStateCount() + (estimate_extrinsics ? 6 * num_cameras : 0); }
   int exposureIndex(int camera_id) const { return 6 + camera_id; }
   int timeOffsetBaseIndex() const { return 6 + num_cameras; }
-  int timeOffsetIndex(int group_id) const { return timeOffsetBaseIndex() + group_id; }
-  int velocityIndex() const { return 6 + num_cameras + num_time_offset_groups; }
-  int gyroBiasIndex() const { return 9 + num_cameras + num_time_offset_groups; }
-  int accelBiasIndex() const { return 12 + num_cameras + num_time_offset_groups; }
-  int gravityIndex() const { return 15 + num_cameras + num_time_offset_groups; }
-  int extrinsicBaseIndex() const { return BASE_STATE_DIM + num_cameras + num_time_offset_groups; }
-  int extrinsicIndex(int camera_id) const { return extrinsicBaseIndex() + 6 * camera_id; }
+  int timeOffsetIndex(int group_id) const { return estimate_time_offsets ? timeOffsetBaseIndex() + group_id : -1; }
+  int velocityIndex() const { return 6 + num_cameras + timeOffsetStateCount(); }
+  int gyroBiasIndex() const { return 9 + num_cameras + timeOffsetStateCount(); }
+  int accelBiasIndex() const { return 12 + num_cameras + timeOffsetStateCount(); }
+  int gravityIndex() const { return 15 + num_cameras + timeOffsetStateCount(); }
+  int extrinsicBaseIndex() const { return BASE_STATE_DIM + num_cameras + timeOffsetStateCount(); }
+  int extrinsicIndex(int camera_id) const { return estimate_extrinsics ? extrinsicBaseIndex() + 6 * camera_id : -1; }
   int extrinsicRotIndex(int camera_id) const { return extrinsicIndex(camera_id); }
-  int extrinsicTransIndex(int camera_id) const { return extrinsicIndex(camera_id) + 3; }
+  int extrinsicTransIndex(int camera_id) const { return estimate_extrinsics ? extrinsicIndex(camera_id) + 3 : -1; }
 
   std::vector<int> rotationIndices() const
   {
     std::vector<int> indices{0};
-    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+    for (int camera_id = 0; estimate_extrinsics && camera_id < num_cameras; ++camera_id)
       indices.push_back(extrinsicRotIndex(camera_id));
     return indices;
   }
@@ -255,12 +262,17 @@ struct StatesGroup
   }
 
   void configureCameras(int camera_count, double inv_expo_init = 1.0,
-                        int time_offset_group_count = 1, double time_offset_init = 0.0)
+                        int time_offset_group_count = 1, double time_offset_init = 0.0,
+                        bool online_extrinsics = true, bool online_time_offsets = true)
   {
     if (camera_count < 1) throw std::invalid_argument("StatesGroup requires at least one camera");
     if (time_offset_group_count < 1) throw std::invalid_argument("StatesGroup requires at least one time-offset group");
     num_cameras = camera_count;
     num_time_offset_groups = time_offset_group_count;
+    // The layout is fixed at startup. Calibration values remain available even
+    // when they do not occupy error-state or covariance entries.
+    estimate_extrinsics = online_extrinsics;
+    estimate_time_offsets = online_time_offsets;
     inv_expo_time = Eigen::VectorXd::Constant(num_cameras, inv_expo_init);
     time_offset = Eigen::VectorXd::Constant(num_time_offset_groups, time_offset_init);
     time_offset_prior = time_offset;
@@ -270,10 +282,11 @@ struct StatesGroup
     Pcl_prior = Pcl;
     cov = Eigen::MatrixXd::Identity(stateDim(), stateDim()) * INIT_COV;
     cov.block(6, 6, num_cameras, num_cameras) = Eigen::MatrixXd::Identity(num_cameras, num_cameras) * 0.00001;
-    cov.block(timeOffsetBaseIndex(), timeOffsetBaseIndex(), num_time_offset_groups, num_time_offset_groups) =
-        Eigen::MatrixXd::Identity(num_time_offset_groups, num_time_offset_groups) * 1.0e-6;
+    if (estimate_time_offsets)
+      cov.block(timeOffsetBaseIndex(), timeOffsetBaseIndex(), num_time_offset_groups, num_time_offset_groups) =
+          Eigen::MatrixXd::Identity(num_time_offset_groups, num_time_offset_groups) * 1.0e-6;
     cov.block(gyroBiasIndex(), gyroBiasIndex(), 9, 9) = Eigen::MatrixXd::Identity(9, 9) * 0.00001;
-    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+    for (int camera_id = 0; estimate_extrinsics && camera_id < num_cameras; ++camera_id)
     {
       cov.block<3, 3>(extrinsicRotIndex(camera_id), extrinsicRotIndex(camera_id)).setIdentity();
       cov.block<3, 3>(extrinsicRotIndex(camera_id), extrinsicRotIndex(camera_id)) *= 1.0e-6;
@@ -310,6 +323,7 @@ struct StatesGroup
   void setTimeOffsetCovariance(int group_id, double var)
   {
     if (group_id < 0 || group_id >= num_time_offset_groups) throw std::out_of_range("invalid time-offset covariance index");
+    if (!estimate_time_offsets) return;
     if (cov.rows() != stateDim() || cov.cols() != stateDim())
       cov = Eigen::MatrixXd::Identity(stateDim(), stateDim()) * INIT_COV;
     cov(timeOffsetIndex(group_id), timeOffsetIndex(group_id)) = var;
@@ -318,6 +332,7 @@ struct StatesGroup
   void setCameraExtrinsicCovariance(int camera_id, double rot_var, double trans_var)
   {
     if (camera_id < 0 || camera_id >= num_cameras) throw std::out_of_range("invalid camera extrinsic covariance index");
+    if (!estimate_extrinsics) return;
     if (cov.rows() != stateDim() || cov.cols() != stateDim())
       cov = Eigen::MatrixXd::Identity(stateDim(), stateDim()) * INIT_COV;
     cov.block<3, 3>(extrinsicRotIndex(camera_id), extrinsicRotIndex(camera_id)).setIdentity();
@@ -338,12 +353,13 @@ struct StatesGroup
     a.rot_end = this->rot_end * Exp(state_add(0, 0), state_add(1, 0), state_add(2, 0));
     a.pos_end = this->pos_end + state_add.block<3, 1>(3, 0);
     a.inv_expo_time = this->inv_expo_time + state_add.segment(6, num_cameras);
-    a.time_offset = this->time_offset + state_add.segment(timeOffsetBaseIndex(), num_time_offset_groups);
+    if (estimate_time_offsets)
+      a.time_offset = this->time_offset + state_add.segment(timeOffsetBaseIndex(), num_time_offset_groups);
     a.vel_end = this->vel_end + state_add.segment<3>(velocityIndex());
     a.bias_g = this->bias_g + state_add.segment<3>(gyroBiasIndex());
     a.bias_a = this->bias_a + state_add.segment<3>(accelBiasIndex());
     a.gravity = this->gravity + state_add.segment<3>(gravityIndex());
-    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+    for (int camera_id = 0; estimate_extrinsics && camera_id < num_cameras; ++camera_id)
     {
       const int ridx = extrinsicRotIndex(camera_id);
       const int tidx = extrinsicTransIndex(camera_id);
@@ -360,12 +376,13 @@ struct StatesGroup
     this->rot_end = this->rot_end * Exp(state_add(0, 0), state_add(1, 0), state_add(2, 0));
     this->pos_end += state_add.block<3, 1>(3, 0);
     this->inv_expo_time += state_add.segment(6, num_cameras);
-    this->time_offset += state_add.segment(timeOffsetBaseIndex(), num_time_offset_groups);
+    if (estimate_time_offsets)
+      this->time_offset += state_add.segment(timeOffsetBaseIndex(), num_time_offset_groups);
     this->vel_end += state_add.segment<3>(velocityIndex());
     this->bias_g += state_add.segment<3>(gyroBiasIndex());
     this->bias_a += state_add.segment<3>(accelBiasIndex());
     this->gravity += state_add.segment<3>(gravityIndex());
-    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+    for (int camera_id = 0; estimate_extrinsics && camera_id < num_cameras; ++camera_id)
     {
       const int ridx = extrinsicRotIndex(camera_id);
       const int tidx = extrinsicTransIndex(camera_id);
@@ -380,17 +397,20 @@ struct StatesGroup
     if (num_cameras != b.num_cameras) throw std::invalid_argument("StatesGroup camera counts do not match");
     if (num_time_offset_groups != b.num_time_offset_groups)
       throw std::invalid_argument("StatesGroup time-offset group counts do not match");
+    if (estimate_extrinsics != b.estimate_extrinsics || estimate_time_offsets != b.estimate_time_offsets)
+      throw std::invalid_argument("StatesGroup calibration layouts do not match");
     Eigen::VectorXd a(stateDim());
     M3D rotd(b.rot_end.transpose() * this->rot_end);
     a.block<3, 1>(0, 0) = Log(rotd);
     a.block<3, 1>(3, 0) = this->pos_end - b.pos_end;
     a.segment(6, num_cameras) = this->inv_expo_time - b.inv_expo_time;
-    a.segment(timeOffsetBaseIndex(), num_time_offset_groups) = this->time_offset - b.time_offset;
+    if (estimate_time_offsets)
+      a.segment(timeOffsetBaseIndex(), num_time_offset_groups) = this->time_offset - b.time_offset;
     a.segment<3>(velocityIndex()) = this->vel_end - b.vel_end;
     a.segment<3>(gyroBiasIndex()) = this->bias_g - b.bias_g;
     a.segment<3>(accelBiasIndex()) = this->bias_a - b.bias_a;
     a.segment<3>(gravityIndex()) = this->gravity - b.gravity;
-    for (int camera_id = 0; camera_id < num_cameras; ++camera_id)
+    for (int camera_id = 0; estimate_extrinsics && camera_id < num_cameras; ++camera_id)
     {
       const int ridx = extrinsicRotIndex(camera_id);
       const int tidx = extrinsicTransIndex(camera_id);
@@ -413,6 +433,8 @@ struct StatesGroup
   V3D vel_end;                              // the estimated velocity at the end lidar point (world frame)
   int num_cameras = 1;
   int num_time_offset_groups = 1;
+  bool estimate_extrinsics = true;
+  bool estimate_time_offsets = true;
   Eigen::VectorXd inv_expo_time;             // Per-camera estimated inverse exposure time.
   Eigen::VectorXd time_offset;               // Per-group camera time offset w.r.t. LiDAR/IMU clock.
   Eigen::VectorXd time_offset_prior;         // Initial/manual prior for each time-offset group.

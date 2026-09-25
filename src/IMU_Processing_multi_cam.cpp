@@ -212,7 +212,7 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
   const double noise_dt = continuous_noise_ ? dt : dt * dt;
   cov_w.block<3, 3>(state_inout.gyroBiasIndex(), state_inout.gyroBiasIndex()).diagonal() = cov_gyr * noise_dt;
   cov_w.block<3, 3>(state_inout.velocityIndex(), state_inout.velocityIndex()).diagonal() = cov_acc * noise_dt;
-  if (cov_time_offset > 0.0 && state_inout.num_time_offset_groups > 0)
+  if (cov_time_offset > 0.0 && state_inout.hasTimeOffsetStates())
     cov_w.block(state_inout.timeOffsetBaseIndex(), state_inout.timeOffsetBaseIndex(),
                 state_inout.num_time_offset_groups, state_inout.num_time_offset_groups)
         .diagonal().setConstant(cov_time_offset * dt);
@@ -225,7 +225,7 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
 
   // std::cout << "before propagete:" << state_inout.cov.diagonal().transpose()
   //           << std::endl;
-  state_inout.cov = estimator_covariance::symmetric(F_x * state_inout.cov * F_x.transpose() + cov_w);
+  state_inout.cov = estimator_covariance::propagate(state_inout.cov, F_x, cov_w);
   // std::cout << "cov_w:" << cov_w.diagonal().transpose() << std::endl;
   // std::cout << "after propagete:" << state_inout.cov.diagonal().transpose()
   //           << std::endl;
@@ -417,7 +417,7 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
       // F_x(6,6) = 0.25 * 2 * CV_PI * 0.5 * cos(2 * CV_PI * 0.5 * imu_time) * (-tau*tau); F_x(18,18) = 0.00001;
       if (exposure_estimate_en)
         cov_w.block(6, 6, state_inout.num_cameras, state_inout.num_cameras).diagonal().setConstant(cov_inv_expo * dt * dt);
-      if (cov_time_offset > 0.0 && state_inout.num_time_offset_groups > 0)
+      if (cov_time_offset > 0.0 && state_inout.hasTimeOffsetStates())
         cov_w.block(state_inout.timeOffsetBaseIndex(), state_inout.timeOffsetBaseIndex(),
                     state_inout.num_time_offset_groups, state_inout.num_time_offset_groups)
             .diagonal().setConstant(cov_time_offset * dt);
@@ -429,7 +429,7 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
       cov_w.block<3, 3>(state_inout.gyroBiasIndex(), state_inout.gyroBiasIndex()).diagonal() = cov_bias_gyr * noise_dt;
       cov_w.block<3, 3>(state_inout.accelBiasIndex(), state_inout.accelBiasIndex()).diagonal() = cov_bias_acc * noise_dt;
 
-      state_inout.cov = estimator_covariance::symmetric(F_x * state_inout.cov * F_x.transpose() + cov_w);
+      state_inout.cov = estimator_covariance::propagate(state_inout.cov, F_x, cov_w);
       // state_inout.cov.block<18,18>(0,0) = F_x.block<18,18>(0,0) *
       // state_inout.cov.block<18,18>(0,0) * F_x.block<18,18>(0,0).transpose() +
       // cov_w.block<18,18>(0,0);

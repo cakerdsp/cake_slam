@@ -635,7 +635,8 @@ void VIOManager::syncCameraExtrinsicsFromState(const StatesGroup &state_value)
 
 bool VIOManager::isOnlineExtrinsicEnabledForCamera(int camera_id) const
 {
-  if (!online_extrinsic_en || camera_id < 0 || camera_id >= numCameras()) return false;
+  if (!online_extrinsic_en || state == nullptr || !state->hasExtrinsicStates() ||
+      camera_id < 0 || camera_id >= numCameras()) return false;
   if (online_extrinsic_camera_mask.empty()) return true;
   if (camera_id >= static_cast<int>(online_extrinsic_camera_mask.size())) return false;
   return online_extrinsic_camera_mask[camera_id] != 0;
@@ -643,7 +644,7 @@ bool VIOManager::isOnlineExtrinsicEnabledForCamera(int camera_id) const
 
 bool VIOManager::isOnlineTimeOffsetEnabledForGroup(int group_id) const
 {
-  if (!online_time_offset_en || state == nullptr || group_id < 0 ||
+  if (!online_time_offset_en || state == nullptr || !state->hasTimeOffsetStates() || group_id < 0 ||
       group_id >= state->num_time_offset_groups)
     return false;
   if (online_time_offset_group_mask.empty()) return true;
@@ -747,7 +748,7 @@ void VIOManager::deactivateCalibrationBlocks(Eigen::MatrixXd &hessian, Eigen::Ve
     hessian.col(index).setZero();
     gradient[index] = 0.0;
   };
-  if (deactivate_extrinsic)
+  if (deactivate_extrinsic && state->hasExtrinsicStates())
   {
     for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
     {
@@ -756,7 +757,8 @@ void VIOManager::deactivateCalibrationBlocks(Eigen::MatrixXd &hessian, Eigen::Ve
   }
   for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
   {
-    if (group_id < static_cast<int>(deactivate_time_groups.size()) && deactivate_time_groups[group_id])
+    if (state->hasTimeOffsetStates() &&
+        group_id < static_cast<int>(deactivate_time_groups.size()) && deactivate_time_groups[group_id])
       zeroIndex(state->timeOffsetIndex(group_id));
   }
 }
@@ -779,12 +781,12 @@ void VIOManager::deactivateInactiveCalibrationBlocks(
                             active_extrinsic_rot[camera_id] != 0;
     const bool trans_active = camera_id < static_cast<int>(active_extrinsic_trans.size()) &&
                               active_extrinsic_trans[camera_id] != 0;
-    if (!rot_active)
+    if (state->hasExtrinsicStates() && !rot_active)
     {
       const int ridx = state->extrinsicRotIndex(camera_id);
       for (int k = 0; k < 3; ++k) zeroIndex(ridx + k);
     }
-    if (!trans_active)
+    if (state->hasExtrinsicStates() && !trans_active)
     {
       const int tidx = state->extrinsicTransIndex(camera_id);
       for (int k = 0; k < 3; ++k) zeroIndex(tidx + k);
@@ -794,7 +796,7 @@ void VIOManager::deactivateInactiveCalibrationBlocks(
   {
     const bool active = group_id < static_cast<int>(active_time_groups.size()) &&
                         active_time_groups[group_id] != 0;
-    if (!active) zeroIndex(state->timeOffsetIndex(group_id));
+    if (state->hasTimeOffsetStates() && !active) zeroIndex(state->timeOffsetIndex(group_id));
   }
 }
 
@@ -4926,13 +4928,13 @@ void VIOManager::printOnlineCalibrationStatsTable(int frame_id) const
       {
         const int ridx = state->extrinsicRotIndex(camera_id);
         const int tidx = state->extrinsicTransIndex(camera_id);
-        if (ridx + 2 < state->cov.rows())
+        if (ridx >= 0 && ridx + 2 < state->cov.rows())
         {
           const double rot_var =
               (state->cov(ridx, ridx) + state->cov(ridx + 1, ridx + 1) + state->cov(ridx + 2, ridx + 2)) / 3.0;
           rot_sigma_deg = safeSigma(rot_var) * kRadiansToDegrees;
         }
-        if (tidx + 2 < state->cov.rows())
+        if (tidx >= 0 && tidx + 2 < state->cov.rows())
         {
           const double trans_var =
               (state->cov(tidx, tidx) + state->cov(tidx + 1, tidx + 1) + state->cov(tidx + 2, tidx + 2)) / 3.0;
@@ -4995,7 +4997,7 @@ void VIOManager::printOnlineCalibrationStatsTable(int frame_id) const
       if (cov_valid)
       {
         const int idx = state->timeOffsetIndex(group_id);
-        if (idx < state->cov.rows()) sigma_ms = safeSigma(state->cov(idx, idx)) * 1.0e3;
+        if (idx >= 0 && idx < state->cov.rows()) sigma_ms = safeSigma(state->cov(idx, idx)) * 1.0e3;
       }
       printf("\033[1;35m| group=%d en=%d active=%d accepts=%lld tracks=%d avg_px_vel=%.6f td=%.6f delta=%.6f last=%.6f sigma=%.6f |\033[0m\n",
              group_id, enabled ? 1 : 0, active, accepts, tracks, avg_pixel_velocity,
@@ -7172,7 +7174,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
       const int full_state_dim = state->stateDim();
       const Eigen::MatrixXd iteration_prior_cov = state_before_visual_update.covarianceAt(*state);
       if (!iteration_prior_cov.allFinite() ||
-          Eigen::LLT<Eigen::MatrixXd>(iteration_prior_cov).info() != Eigen::Success)
+          !estimator_covariance::isPositiveDefinite(iteration_prior_cov))
       {
         printf("\033[1;31m[ COV VIO ] Full prior covariance is invalid; update rejected.\033[0m\n");
         *state = state_before_visual_update;
@@ -7832,8 +7834,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           // Restore the original independent-pixel photometric likelihood.
           // measurement_cov is applied once when assembling the filter update.
           // Reference/map uncertainty remains confined to the optional NIS gate.
-          local_hessian.noalias() = weighted_j.topRows(local_dof).transpose() * weighted_j.topRows(local_dof);
-          local_gradient.noalias() = weighted_j.topRows(local_dof).transpose() * weighted_r.head(local_dof);
+          estimator_covariance::normalEquations(weighted_j, weighted_r, local_dof, local_hessian, local_gradient);
           local_pose_information = local_hessian.topLeftCorner<6, 6>();
           if (!visual_map_manage_en)
           {
@@ -8454,8 +8455,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
         {
           const int rotation = state->extrinsicRotIndex(camera_id);
           const int translation = state->extrinsicTransIndex(camera_id);
-          if (index >= rotation && index < rotation + 3) active = active_extrinsic_rot[camera_id] != 0;
-          if (index >= translation && index < translation + 3) active = active_extrinsic_trans[camera_id] != 0;
+          if (rotation >= 0 && index >= rotation && index < rotation + 3) active = active_extrinsic_rot[camera_id] != 0;
+          if (translation >= 0 && index >= translation && index < translation + 3) active = active_extrinsic_trans[camera_id] != 0;
         }
         for (int group_id = 0; group_id < state->num_time_offset_groups; ++group_id)
           if (index == state->timeOffsetIndex(group_id)) active = active_time_groups[group_id] != 0;
@@ -8507,7 +8508,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
         }
         G = covariance_update.gain_times_jacobian;
         solution = covariance_update.correction;
-        for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
+        for (int camera_id = 0; state->hasExtrinsicStates() && camera_id < state->num_cameras; ++camera_id)
         {
           solution.segment<3>(state->extrinsicRotIndex(camera_id)).setZero();
           solution.segment<3>(state->extrinsicTransIndex(camera_id)).setZero();
