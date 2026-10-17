@@ -149,6 +149,8 @@ vio:
   # virtual_width/height and sphere LUT fields are not read by this project;
   # ax/ay=120 maps to the current virtual_focal_length parameter.
   virtual_fisheye_patch_en: true
+  # Distance/scale reference maintenance and matched sampling/filtering; false keeps the legacy path.
+  virtual_adaptive_sampling_en: false
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false

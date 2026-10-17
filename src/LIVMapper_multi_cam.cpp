@@ -205,6 +205,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<int>("vio.patch_pyrimid_level", 3);
   try_declare.template operator()<int>("vio.patch_size", 8);
   try_declare.template operator()<bool>("vio.virtual_fisheye_patch_en", false);
+  try_declare.template operator()<bool>("vio.virtual_adaptive_sampling_en", false);
   try_declare.template operator()<bool>("vio.virtual_sparse_patch_en", false);
   try_declare.template operator()<bool>("vio.virtual_s2_optimize_en", false);
   try_declare.template operator()<bool>("vio.virtual_raw_score_select_en", false);
@@ -460,6 +461,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "vio.patch_pyrimid_level", patch_pyrimid_level);
   getRosParam(this->node, "vio.patch_size", patch_size);
   getRosParam(this->node, "vio.virtual_fisheye_patch_en", virtual_fisheye_patch_en);
+  getRosParam(this->node, "vio.virtual_adaptive_sampling_en", virtual_adaptive_sampling_en);
   getRosParam(this->node, "vio.virtual_sparse_patch_en", virtual_sparse_patch_en);
   getRosParam(this->node, "vio.virtual_s2_optimize_en", virtual_s2_optimize_en);
   getRosParam(this->node, "vio.virtual_raw_score_select_en", virtual_raw_score_select_en);
@@ -778,6 +780,7 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->grid_n_height = grid_n_height;
   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
   vio_manager->virtual_fisheye_patch_en = virtual_fisheye_patch_en;
+  vio_manager->virtual_adaptive_sampling_en = virtual_adaptive_sampling_en;
   vio_manager->virtual_sparse_patch_en = virtual_sparse_patch_en;
   vio_manager->virtual_s2_optimize_en = virtual_s2_optimize_en;
   vio_manager->virtual_raw_score_select_en = virtual_raw_score_select_en;

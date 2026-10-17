@@ -878,6 +878,15 @@ void VIOManager::initializeVIO()
     raw_camera_model_jacobian_en = false;
   }
 
+  if (virtual_adaptive_sampling_en &&
+      (!virtual_fisheye_patch_en || virtual_sparse_patch_en || virtual_s2_optimize_en ||
+       inverse_composition_en || virtual_patch_resampling_mode != "pull_exact" ||
+       normalizeVirtualInterpMode(virtual_interp_mode) != "bilinear" || ref_patch_dump_en))
+    throw std::runtime_error("virtual_adaptive_sampling_en requires virtual pull_exact/bilinear, forward update, dense support, and ref_patch_dump_en=false");
+  if (virtual_adaptive_sampling_en)
+    printf("[ VIO Adaptive Sampling Init ] enabled; pitch=[0.25,4] in canonical pixels; managed_refs=%d shadow=%d\n",
+           visual_map_manage_en ? 1 : 0, visual_map_manage_shadow_en ? 1 : 0);
+
   if (virtual_fisheye_patch_en)
   {
     if (virtual_focal_length <= 0.0) throw std::runtime_error("virtual_focal_length must be positive");
@@ -2251,6 +2260,188 @@ bool VIOManager::buildVirtualSupportPatch(const PerCameraData &ctx, const cv::Ma
   return splat_valid;
 }
 
+bool VIOManager::rawFromVirtualJacobian(const PerCameraData &ctx, const M3D &R_c_from_v,
+                                       Matrix2d &jacobian) const
+{
+  MD(2, 3) projection;
+  if (!computeCameraModelProjectionJacobianForContext(ctx, R_c_from_v.col(2), projection)) return false;
+  jacobian = projection * R_c_from_v.leftCols<2>() / virtual_focal_length;
+  return jacobian.allFinite();
+}
+
+bool VIOManager::sampleAdaptiveVirtualValue(const VirtualPatchImage &support, const V2D &px, float &value) const
+{
+  const V2D center(virtual_support_radius, virtual_support_radius);
+  const V2D stored = center + (px - center) / support.grid_step;
+  return interpolateVirtualFloat(support.values, support.valid_mask, stored.x(), stored.y(), value);
+}
+
+bool VIOManager::sampleAdaptiveVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px,
+                                                       double step, float &value, V2D &gradient) const
+{
+  float left, right, up, down;
+  if (!(step > 0.0) || !sampleAdaptiveVirtualValue(support, px, value) ||
+      !sampleAdaptiveVirtualValue(support, px - V2D(step, 0.0), left) ||
+      !sampleAdaptiveVirtualValue(support, px + V2D(step, 0.0), right) ||
+      !sampleAdaptiveVirtualValue(support, px - V2D(0.0, step), up) ||
+      !sampleAdaptiveVirtualValue(support, px + V2D(0.0, step), down)) return false;
+  // Gradient in the original f0 virtual coordinates, not in storage pixels.
+  gradient << (right - left) / (2.0 * step), (down - up) / (2.0 * step);
+  return gradient.allFinite();
+}
+
+bool VIOManager::buildAdaptiveVirtualSupport(const PerCameraData &ctx,
+                                             const virtual_sampling::FilteredImage &image,
+                                             const M3D &R_c_from_v, double pitch,
+                                             const cv::Point &origin, VirtualPatchImage &output) const
+{
+  output.grid_step = pitch;
+  output.R_c_from_v = R_c_from_v;
+  output.R_v_from_c = R_c_from_v.transpose();
+  output.values = cv::Mat(virtual_support_size, virtual_support_size, CV_32FC1,
+                         cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+  output.valid_mask = cv::Mat::zeros(virtual_support_size, virtual_support_size, CV_8UC1);
+  if (!(pitch > 0.0) || !std::isfinite(pitch)) return false;
+  int valid = 0;
+  for (int y = 0; y < virtual_support_size; ++y)
+    for (int x = 0; x < virtual_support_size; ++x)
+    {
+      const V3D ray((x - virtual_support_radius) * pitch / virtual_focal_length,
+                    (y - virtual_support_radius) * pitch / virtual_focal_length, 1.0);
+      V2D raw;
+      float value;
+      if (!projectRawFisheyeIfValid(ctx, R_c_from_v * ray, 1, raw) ||
+          !image.sample(raw.x() - origin.x, raw.y() - origin.y, value)) continue;
+      output.values.at<float>(y, x) = value;
+      output.valid_mask.at<uchar>(y, x) = 255;
+      ++valid;
+    }
+  output.valid = valid > 0;
+  return output.valid;
+}
+
+bool VIOManager::prepareAdaptiveTrack(PerCameraData &ctx, Feature &reference,
+                                      VirtualTrackPatch &track, vector<float> &warped)
+{
+  if (!ctx.adaptive_image_pyramid || reference.camera_id_ < 0 || reference.camera_id_ >= numCameras()) return false;
+  const PerCameraData &ref_ctx = cameras_[reference.camera_id_];
+  if (reference.point_ == nullptr) return false;
+  // Legacy affine construction includes Feature::level_. Adaptive coordinates
+  // are canonical f0 pixels, so recompute at level zero rather than counting
+  // the reference pyramid scale twice. Keep legacy geometry on any fallback.
+  Matrix2d affine;
+  const SE3d relative = track.T_vcur_w_seed * reference.T_v_w_.inverse();
+  const V3D point_ref = reference.T_v_w_ * reference.point_->pos_;
+  const bool affine_ok = normal_en
+      ? getWarpMatrixAffineHomographyVirtual(point_ref, reference.T_v_w_.rotationMatrix() * reference.point_->normal_,
+                                              relative, 0, affine)
+      : getWarpMatrixAffineVirtual(point_ref, relative, 0, 0, patch_size_half, affine);
+  if (!affine_ok) return false;
+  // The continuous pitch already accounts for magnification. Applying the
+  // legacy determinant-based search level as well would count it twice.
+  const int search_level = 0;
+  Matrix2d d_ref, d_cur;
+  if (!rawFromVirtualJacobian(ref_ctx, reference.R_c_from_v_, d_ref) ||
+      !rawFromVirtualJacobian(ctx, track.R_ccur_from_vcur_seed, d_cur)) return false;
+  const auto plan = virtual_sampling::makePlan(d_ref, d_cur, affine);
+  if (!plan.valid) return false;
+  std::shared_ptr<virtual_sampling::ImagePyramid> ref_pyramid;
+  {
+    std::lock_guard<std::mutex> lock(reference.virtual_support_mutex_);
+    if (reference.virtual_source_roi_.empty()) return false;
+    if (!reference.adaptive_image_pyramid_)
+      reference.adaptive_image_pyramid_ = std::make_shared<virtual_sampling::ImagePyramid>(reference.virtual_source_roi_);
+    ref_pyramid = reference.adaptive_image_pyramid_;
+  }
+  std::vector<VirtualPatchImage> supports(patch_pyrimid_level);
+  std::vector<float> samples(patch_pyrimid_level * patch_size_total);
+  const Matrix2d inverse = affine.inverse();
+  const V2D center(virtual_support_radius, virtual_support_radius);
+  for (int level = 0; level < patch_pyrimid_level; ++level)
+  {
+    const double scale = static_cast<double>(1 << (level + search_level));
+    const double pitch = plan.pitch * scale;
+    // Coarser solver levels need filtering BEFORE their wider samples too.
+    const auto extraSigma = [scale](double sigma) {
+      return std::sqrt(std::max(0.0, (sigma * sigma + 0.25) * scale * scale - 0.25));
+    };
+    virtual_sampling::FilteredImage ref_image, cur_image;
+    if (!ref_pyramid->prepare(extraSigma(plan.sigma_ref), ref_image) ||
+        !ctx.adaptive_image_pyramid->prepare(extraSigma(plan.sigma_cur), cur_image) ||
+        !buildAdaptiveVirtualSupport(ctx, cur_image, track.R_ccur_from_vcur_seed, pitch,
+                                     cv::Point(), supports[level])) return false;
+    for (int k = 0; k < patch_size_total; ++k)
+    {
+      const V2D offset = core_patch_offsets_[k].cast<double>() * pitch;
+      const V2D ref_px = center + inverse * offset;
+      V2D raw;
+      float current;
+      V2D gradient;
+      if (!projectRawFisheyeIfValid(ref_ctx, reference.R_c_from_v_ * virtualCam2World(ref_px), 1, raw) ||
+          !ref_image.sample(raw.x() - reference.virtual_source_origin_.x,
+                            raw.y() - reference.virtual_source_origin_.y, samples[level * patch_size_total + k]) ||
+          !sampleAdaptiveVirtualValueAndGradient(supports[level], center + offset, pitch, current, gradient)) return false;
+    }
+  }
+  // Commit only a complete pair. A failed plan leaves the legacy track intact.
+  track.sampling_pitch = plan.pitch;
+  track.A_cur_ref = affine;
+  track.search_level = search_level;
+  track.adaptive_supports = std::move(supports);
+  warped = std::move(samples);
+  return true;
+}
+
+bool VIOManager::buildAdaptiveCurrentPair(const PerCameraData &source, const PerCameraData &target,
+                                          const VirtualTrackPatch &source_track, const VirtualTrackPatch &target_track,
+                                          CurrentCrossCameraPair &pair) const
+{
+  if (!source.adaptive_image_pyramid || !target.adaptive_image_pyramid) return false;
+  Matrix2d d_source, d_target;
+  if (!rawFromVirtualJacobian(source, source_track.R_ccur_from_vcur_seed, d_source) ||
+      !rawFromVirtualJacobian(target, target_track.R_ccur_from_vcur_seed, d_target)) return false;
+  const auto plan = virtual_sampling::makePlan(d_source, d_target, pair.A_target_source);
+  if (!plan.valid) return false;
+  const Matrix2d inverse = pair.A_target_source.inverse();
+  // Never decimate the intermediate source support more coarsely than its
+  // finest mapped common-grid direction. Extreme anisotropy falls back if
+  // the bounded support cannot contain the warped square.
+  const double source_stretch = Eigen::JacobiSVD<Matrix2d>(inverse).singularValues()[1];
+  if (!(source_stretch > 0.0) || !std::isfinite(source_stretch)) return false;
+  std::vector<VirtualPatchImage> source_supports(patch_pyrimid_level), target_supports(patch_pyrimid_level);
+  const V2D center(virtual_support_radius, virtual_support_radius);
+  for (int level = 0; level < patch_pyrimid_level; ++level)
+  {
+    const double scale = static_cast<double>(1 << level);
+    const double pitch = plan.pitch * scale;
+    const auto extraSigma = [scale](double sigma) {
+      return std::sqrt(std::max(0.0, (sigma * sigma + 0.25) * scale * scale - 0.25));
+    };
+    virtual_sampling::FilteredImage source_image, target_image;
+    if (!source.adaptive_image_pyramid->prepare(extraSigma(plan.sigma_ref), source_image) ||
+        !target.adaptive_image_pyramid->prepare(extraSigma(plan.sigma_cur), target_image) ||
+        !buildAdaptiveVirtualSupport(source, source_image, source_track.R_ccur_from_vcur_seed,
+                                     pitch * source_stretch, cv::Point(), source_supports[level]) ||
+        !buildAdaptiveVirtualSupport(target, target_image, target_track.R_ccur_from_vcur_seed,
+                                     pitch, cv::Point(), target_supports[level])) return false;
+    for (int k = 0; k < patch_size_total; ++k)
+    {
+      const V2D offset = core_patch_offsets_[k].cast<double>() * pitch;
+      float value;
+      V2D gradient;
+      if (!sampleAdaptiveVirtualValueAndGradient(source_supports[level], center + inverse * offset,
+                                                  pitch * source_stretch, value, gradient) ||
+          !sampleAdaptiveVirtualValueAndGradient(target_supports[level], center + offset,
+                                                  pitch, value, gradient)) return false;
+    }
+  }
+  pair.sampling_pitch = plan.pitch;
+  pair.search_level = 0;
+  pair.adaptive_source_supports = std::move(source_supports);
+  pair.adaptive_target_supports = std::move(target_supports);
+  return true;
+}
+
 bool VIOManager::captureVirtualReferenceSource(const PerCameraData &ctx, const cv::Mat &raw_img,
                                                const V2D &raw_center_px, const M3D &R_c_from_v,
                                                cv::Mat &raw_roi, cv::Point &raw_origin) const
@@ -2299,11 +2490,28 @@ bool VIOManager::captureVirtualReferenceSource(const PerCameraData &ctx, const c
   }
 
   const int interp_margin = interpolationBorderMargin(virtual_interp_mode_enum);
-  const int x0 = std::max(0, static_cast<int>(std::floor(min_u)) - interp_margin);
-  const int y0 = std::max(0, static_cast<int>(std::floor(min_v)) - interp_margin);
-  const int x1 = std::min(raw_img.cols, static_cast<int>(std::ceil(max_u)) + interp_margin + 1);
-  const int y1 = std::min(raw_img.rows, static_cast<int>(std::ceil(max_v)) + interp_margin + 1);
+  int x0 = std::max(0, static_cast<int>(std::floor(min_u)) - interp_margin);
+  int y0 = std::max(0, static_cast<int>(std::floor(min_v)) - interp_margin);
+  int x1 = std::min(raw_img.cols, static_cast<int>(std::ceil(max_u)) + interp_margin + 1);
+  int y1 = std::min(raw_img.rows, static_cast<int>(std::ceil(max_v)) + interp_margin + 1);
   if (x0 >= x1 || y0 >= y1) return false;
+
+  if (virtual_adaptive_sampling_en)
+  {
+    // Retain a bounded extra neighbourhood for resampling at future scales.
+    // 32-aligned origins keep every pyrDown level in the full-image phase.
+    // Preserve the original ROI even when it is already larger than the budget.
+    const int cx = static_cast<int>(raw_center_px.x());
+    const int cy = static_cast<int>(raw_center_px.y());
+    const int hx = std::min(112, std::max(cx - x0, x1 - cx) * 4 + 64);
+    const int hy = std::min(112, std::max(cy - y0, y1 - cy) * 4 + 64);
+    x0 = std::max(0, std::min(x0, cx - hx));
+    y0 = std::max(0, std::min(y0, cy - hy));
+    x0 = (x0 / 32) * 32;
+    y0 = (y0 / 32) * 32;
+    x1 = std::min(raw_img.cols, std::max(x1, cx + hx + 1));
+    y1 = std::min(raw_img.rows, std::max(y1, cy + hy + 1));
+  }
 
   raw_origin = cv::Point(x0, y0);
   raw_roi = raw_img(cv::Rect(x0, y0, x1 - x0, y1 - y0)).clone();
@@ -2337,7 +2545,7 @@ bool VIOManager::materializeVirtualReferenceSupport(Feature &feature, bool &mate
   }
 
   feature.img_ = support.values;
-  feature.virtual_source_roi_.release();
+  if (!virtual_adaptive_sampling_en) feature.virtual_source_roi_.release();
   feature.virtual_support_materialized_ = true;
   materialized_now = true;
   return true;
@@ -2486,6 +2694,13 @@ void VIOManager::computeVirtualProjectionJacobian(const V3D &p_v, MD(2, 3) &J) c
 bool VIOManager::sampleVirtualCorePatch(const VirtualPatchImage &support, const V2D &center, int scale, float *patch) const
 {
   if (!support.valid || patch == nullptr) return false;
+  if (support.grid_step != 1.0)
+  {
+    for (int k = 0; k < patch_size_total; ++k)
+      if (!sampleAdaptiveVirtualValue(support, center + core_patch_offsets_[k].cast<double>() *
+                                       (scale * support.grid_step), patch[k])) return false;
+    return true;
+  }
   for (int y = 0; y < patch_size; ++y)
   {
     for (int x = 0; x < patch_size; ++x)
@@ -2647,7 +2862,7 @@ bool VIOManager::createVirtualFeaturePatch(const PerCameraData &ctx, const cv::M
   T_v_w = composeVirtualPose(R_v_from_c, T_c_w);
   const V2D center(virtual_support_radius, virtual_support_radius);
 
-  if (virtual_sparse_patch_en)
+  if (virtual_sparse_patch_en || virtual_adaptive_sampling_en)
   {
     if (!buildSparseVirtualReferenceCorePatch(ctx, raw_img, raw_center_px, R_v_from_c, R_c_from_v, core_patch)) return false;
     return captureVirtualReferenceSource(ctx, raw_img, raw_center_px, R_c_from_v,
@@ -3210,11 +3425,25 @@ void VIOManager::dumpRuntimeSupportObservation(const PerCameraData &ctx, const V
   const V2D ref_support_center(virtual_support_radius, virtual_support_radius);
   const V3D point_vcur = track.T_vcur_w_seed * point.pos_;
   const V2D cur_support_center = virtualProject(point_vcur);
-  const cv::Mat ref_support_display = makeMarkedFloatMatDisplay(ref_ftr.img_, cv::Mat(), ref_support_center);
+  const bool adaptive = !track.adaptive_supports.empty();
+  const VirtualPatchImage &display_support = adaptive ? track.adaptive_supports[0] : track.cur_support;
+  const V2D display_center = adaptive
+      ? (ref_support_center + (cur_support_center - ref_support_center) / display_support.grid_step).eval()
+      : cur_support_center;
+  const cv::Mat ref_support_display = adaptive
+      ? makeFloatPatchDisplay(warped_reference, patch_size, 0)
+      : makeMarkedFloatMatDisplay(ref_ftr.img_, cv::Mat(), ref_support_center);
   const cv::Mat cur_support_display =
-      makeMarkedFloatMatDisplay(track.cur_support.values, track.cur_support.valid_mask, cur_support_center);
+      makeMarkedFloatMatDisplay(display_support.values, display_support.valid_mask, display_center);
   const cv::Mat warped_ref_display = makeFloatPatchDisplay(warped_reference, patch_size, 0);
   const cv::Mat current_core_display = makeFloatPatchDisplay(current_core, patch_size, 0);
+  if (adaptive)
+  {
+    std::ofstream metadata(updates_dir / (base + "_sampling.txt"));
+    metadata << "adaptive=1\npitch_canonical=" << track.sampling_pitch
+             << "\nreference_support=filtered_warped_core_level0\n"
+             << "current_support=filtered_adaptive_grid_level0\n";
+  }
 
   const bool ref_saved = writeImageIfAvailable(ref_support_path, ref_support_display);
   const bool cur_saved = writeImageIfAvailable(cur_support_path, cur_support_display);
@@ -5011,6 +5240,10 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
                                                     const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
                                                     int raw_score_point_quota)
 {
+  // One cache per current camera frame, shared by historical/current pairs.
+  // No allocation or filter operation in the disabled path.
+  if (virtual_adaptive_sampling_en)
+    ctx.adaptive_image_pyramid = std::make_shared<virtual_sampling::ImagePyramid>(img);
   ctx.visual_submap->reset();
   ctx.total_points = 0;
   if (ref_patch_dump_en && ctx.camera_id == kRefPatchDumpCameraId)
@@ -5218,6 +5451,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     double ref_materialize_time = 0.0;
     double warp_time = 0.0;
     double current_core_time = 0.0;
+    double adaptive_time = 0.0;
+    bool adaptive_attempted = false;
     int search_level = -1;
     int warp_fail_pyramid_level = -1;
     int rejection = 0;
@@ -5543,7 +5778,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     result.track.search_level = getBestSearchLevel(result.track.A_cur_ref, virtual_max_search_level);
     result.search_level = result.track.search_level;
 
-    if (virtual_sparse_patch_en)
+    if (virtual_sparse_patch_en || virtual_adaptive_sampling_en)
     {
       const double materialize_start = omp_get_wtime();
       if (!materializeVirtualReferenceSupport(*ref_ftr, result.ref_materialized))
@@ -5557,7 +5792,16 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
 
     const double warp_start = omp_get_wtime();
     result.warped_reference.assign(warp_len, 0.0f);
-    for (int pyramid_level = 0; pyramid_level < patch_pyrimid_level; ++pyramid_level)
+    bool adaptive_ready = false;
+    if (virtual_adaptive_sampling_en)
+    {
+      result.adaptive_attempted = true;
+      const double adaptive_start = omp_get_wtime();
+      adaptive_ready = prepareAdaptiveTrack(ctx, *ref_ftr, result.track, result.warped_reference);
+      result.adaptive_time = omp_get_wtime() - adaptive_start;
+      result.search_level = result.track.search_level;
+    }
+    for (int pyramid_level = 0; !adaptive_ready && pyramid_level < patch_pyrimid_level; ++pyramid_level)
     {
       // Reuse the stored reference support instead of regenerating it every frame.
       if (!warpAffineVirtual(result.track.A_cur_ref, ref_ftr->img_, ref_ftr->level_, result.track.search_level, pyramid_level,
@@ -5571,7 +5815,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     result.warp_time = omp_get_wtime() - warp_start;
     if (result.rejection != 0) continue;
 
-    if (!virtual_sparse_patch_en)
+    if (!virtual_sparse_patch_en && (!adaptive_ready || cross_camera_current_residual_en))
     {
       // The affine warp and warped reference depend only on geometry and the
       // immutable reference support. Reject them before constructing the more
@@ -5605,7 +5849,9 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       continue;
     }
     const V2D virtual_center = virtualProject(point_vcur);
-    const bool current_core_ok = virtual_sparse_patch_en
+    const bool current_core_ok = adaptive_ready
+        ? sampleVirtualCorePatch(result.track.adaptive_supports[0], virtual_center, 1, current_core_all.data())
+        : virtual_sparse_patch_en
         ? sampleSparseVirtualCorePatch(ctx, img, result.track.R_ccur_from_vcur_seed,
                                        virtual_center, 1, current_core_all.data())
         : sampleVirtualCorePatch(result.track.cur_support, virtual_center, 1, current_core_all.data());
@@ -5621,7 +5867,10 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
       {
         const int scale = 1 << pyramid_level;
-        const bool level_ok = virtual_sparse_patch_en
+        const bool level_ok = adaptive_ready
+            ? sampleVirtualCorePatch(result.track.adaptive_supports[pyramid_level], virtual_center, 1,
+                                      current_core_all.data() + patch_size_total * pyramid_level)
+            : virtual_sparse_patch_en
             ? sampleSparseVirtualCorePatch(ctx, img, result.track.R_ccur_from_vcur_seed,
                                            virtual_center, scale,
                                            current_core_all.data() + patch_size_total * pyramid_level)
@@ -5767,6 +6016,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
   vector<int> virtual_warp_fail_pyramid_level_count(std::max(patch_pyrimid_level, 1), 0);
   std::set<VisualPoint *> accepted_managed_points;
   std::set<VisualPoint *> fallback_allowed_points;
+  int adaptive_attempted = 0, adaptive_prepared = 0, adaptive_accepted = 0;
+  double adaptive_time_sum = 0.0, adaptive_pitch_sum = 0.0;
   for (int candidate_index = 0; candidate_index < static_cast<int>(candidates.size()); ++candidate_index)
   {
     const VirtualCandidate &collect_candidate = candidates[candidate_index];
@@ -5777,6 +6028,20 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       ++visual_map_manage_stats_.fallback_attempted;
     }
     VirtualCandidateResult &result = results[candidate_index];
+    if (result.adaptive_attempted)
+    {
+      ++adaptive_attempted;
+      adaptive_time_sum += result.adaptive_time;
+      if (!result.track.adaptive_supports.empty())
+      {
+        ++adaptive_prepared;
+        if (result.valid)
+        {
+          ++adaptive_accepted;
+          adaptive_pitch_sum += result.track.sampling_pitch;
+        }
+      }
+    }
     if (usage_stats_en)
     {
       const VirtualCandidate &candidate = candidates[candidate_index];
@@ -5927,6 +6192,10 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
          virtual_parallel_track_time_, build_virtual_support_time_, virtual_affine_time_, virtual_warp_time_,
          virtual_current_core_time_, virtual_result_collect_time_);
   printf("[ VIO Virtual Timing Note ] *_sum accumulates per-candidate time across OpenMP workers; wall fields are real elapsed time.\n");
+  if (virtual_adaptive_sampling_en)
+    printf("[ VIO Adaptive Sampling ] cam=%d attempted=%d prepared=%d fallback=%d accepted=%d pitch_mean=%.4f prepare_sum=%.6f s\n",
+           ctx.camera_id, adaptive_attempted, adaptive_prepared, adaptive_attempted - adaptive_prepared,
+           adaptive_accepted, adaptive_accepted ? adaptive_pitch_sum / adaptive_accepted : 0.0, adaptive_time_sum);
   if (virtual_sparse_patch_en)
     printf("[ VIO Virtual Sparse ] ref_materialized=%d ref_fail=%d ref_materialize_sum=%.6f s\n",
            virtual_ref_support_materialized_count_, virtual_ref_support_materialize_fail_count_,
@@ -6768,6 +7037,8 @@ void VIOManager::buildCurrentCrossCameraPairs()
 {
   current_cross_camera_pairs_.clear();
   if (!cross_camera_current_residual_en || numCameras() < 2) return;
+  int adaptive_attempted = 0, adaptive_prepared = 0;
+  double adaptive_time_sum = 0.0;
 
   struct AcceptedObservation
   {
@@ -6906,6 +7177,25 @@ void VIOManager::buildCurrentCrossCameraPairs()
           pair.footprint_bin = usageFootprintBin(pair.A_target_source);
           pair.anisotropy_bin = usageAnisotropyBin(pair.A_target_source);
           const Matrix2d A_source_target = pair.A_target_source.inverse();
+          bool adaptive_pair = false;
+          if (virtual_adaptive_sampling_en && virtual_fisheye_patch_en && !virtual_s2_optimize_en &&
+              source_track != nullptr && target_track != nullptr)
+          {
+            ++adaptive_attempted;
+            const double adaptive_start = omp_get_wtime();
+            adaptive_pair = buildAdaptiveCurrentPair(source, target, *source_track, *target_track, pair) &&
+                            std::isfinite(pair.sampling_pitch) && pair.sampling_pitch > 0.0 &&
+                            pair.adaptive_source_supports.size() == static_cast<size_t>(metric_levels) &&
+                            pair.adaptive_target_supports.size() == static_cast<size_t>(metric_levels);
+            adaptive_time_sum += omp_get_wtime() - adaptive_start;
+            if (adaptive_pair) ++adaptive_prepared;
+          }
+          if (!adaptive_pair)
+          {
+            pair.sampling_pitch = 1.0;
+            pair.adaptive_source_supports.clear();
+            pair.adaptive_target_supports.clear();
+          }
           std::vector<float> source_patch(patch_size_total);
           std::vector<float> target_patch(patch_size_total);
           for (int level = 0; level < metric_levels; ++level)
@@ -6915,7 +7205,8 @@ void VIOManager::buildCurrentCrossCameraPairs()
             double sse = 0.0;
             for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
             {
-              const V2D target_offset = (core_patch_offsets_[patch_index] * static_cast<float>(scale)).cast<double>();
+              V2D target_offset = (core_patch_offsets_[patch_index] * static_cast<float>(scale)).cast<double>();
+              if (adaptive_pair) target_offset *= pair.sampling_pitch;
               const V2D source_offset = A_source_target * target_offset;
               float source_value = 0.0f;
               float target_value = 0.0f;
@@ -6923,16 +7214,20 @@ void VIOManager::buildCurrentCrossCameraPairs()
               {
                 const cv::Mat &source_img = source.new_frame->img_;
                 const cv::Mat &target_img = target.new_frame->img_;
-                const bool source_ok = virtual_sparse_patch_en
-                    ? sampleSparseVirtualValue(source, source_img, source_track->R_ccur_from_vcur_seed,
-                                               source_center + source_offset, source_value)
-                    : interpolateVirtualFloat(source_track->cur_support.values, source_track->cur_support.valid_mask,
-                                              source_center[0] + source_offset[0], source_center[1] + source_offset[1], source_value);
-                const bool target_ok = virtual_sparse_patch_en
-                    ? sampleSparseVirtualValue(target, target_img, target_track->R_ccur_from_vcur_seed,
-                                               target_center + target_offset, target_value)
-                    : interpolateVirtualFloat(target_track->cur_support.values, target_track->cur_support.valid_mask,
-                                              target_center[0] + target_offset[0], target_center[1] + target_offset[1], target_value);
+                const bool source_ok = adaptive_pair
+                    ? sampleAdaptiveVirtualValue(pair.adaptive_source_supports[level], source_center + source_offset, source_value)
+                    : (virtual_sparse_patch_en
+                           ? sampleSparseVirtualValue(source, source_img, source_track->R_ccur_from_vcur_seed,
+                                                      source_center + source_offset, source_value)
+                           : interpolateVirtualFloat(source_track->cur_support.values, source_track->cur_support.valid_mask,
+                                                     source_center[0] + source_offset[0], source_center[1] + source_offset[1], source_value));
+                const bool target_ok = adaptive_pair
+                    ? sampleAdaptiveVirtualValue(pair.adaptive_target_supports[level], target_center + target_offset, target_value)
+                    : (virtual_sparse_patch_en
+                           ? sampleSparseVirtualValue(target, target_img, target_track->R_ccur_from_vcur_seed,
+                                                      target_center + target_offset, target_value)
+                           : interpolateVirtualFloat(target_track->cur_support.values, target_track->cur_support.valid_mask,
+                                                     target_center[0] + target_offset[0], target_center[1] + target_offset[1], target_value));
                 level_ok = source_ok && target_ok;
               }
               else
@@ -7027,12 +7322,15 @@ void VIOManager::buildCurrentCrossCameraPairs()
     if (pair.accepted) ++accepted_pair_count[pair.point];
   for (CurrentCrossCameraPair &pair : current_cross_camera_pairs_)
     if (pair.accepted) pair.hessian_weight = 1.0 / std::max(1, accepted_pair_count[pair.point]);
+  if (virtual_adaptive_sampling_en)
+    printf("[ VIO Adaptive Current Pair ] attempted=%d prepared=%d fallback=%d prepare_wall=%.6f s\n",
+           adaptive_attempted, adaptive_prepared, adaptive_attempted - adaptive_prepared, adaptive_time_sum);
 }
 
 bool VIOManager::referenceUncertaintyJacobian(
     const Feature &reference, const VisualPoint &point,
     const std::vector<float> &warped_patch, const Matrix2d &affine,
-    int level, int scale, Eigen::MatrixXd &jacobian) const
+    int level, double scale, Eigen::MatrixXd &jacobian) const
 {
   if (reference.camera_id_ < 0 || reference.camera_id_ >= numCameras() ||
       patch_size < 2 || level < 0 || scale <= 0 || !affine.allFinite() ||
@@ -7470,6 +7768,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
             const int pyramid_level = level + search_level;
             const int scale = 1 << pyramid_level;
             const double inv_scale = 1.0 / scale;
+            const bool adaptive_track = virtual_adaptive_sampling_en &&
+                point_index < static_cast<int>(ctx.visual_submap->virtual_track_patches.size()) &&
+                level < static_cast<int>(ctx.visual_submap->virtual_track_patches[point_index].adaptive_supports.size());
+            const double sampling_pitch = adaptive_track
+                ? ctx.visual_submap->virtual_track_patches[point_index].sampling_pitch : 1.0;
             const std::vector<float> &reference_patch = ctx.visual_submap->warp_patch[point_index];
             const double reference_exposure = ctx.visual_submap->inv_expo_list[point_index];
             double patch_error = 0.0;
@@ -7486,7 +7789,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
               {
                 result.reference_valid = referenceUncertaintyJacobian(
                     *usage_reference, *point, reference_patch,
-                    ctx.visual_submap->warp_affines[point_index], level, scale, result.reference_jacobian);
+                    ctx.visual_submap->warp_affines[point_index], level, scale * sampling_pitch, result.reference_jacobian);
                 if (result.reference_valid && !zncc_residual_en)
                   result.reference_jacobian *= reference_exposure;
                 result.reference_level = level;
@@ -7682,7 +7985,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 }
                 for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
                 {
-                  const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale);
+                  const V2F offset = core_patch_offsets_[patch_index] * static_cast<float>(scale * sampling_pitch);
                   const int cache_row = point_index * patch_size_total + patch_index;
                   float current_value = 0.0f;
                   MD(1, 2) Jimg;
@@ -7701,7 +8004,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   else
                   {
                     V2D image_gradient;
-                    const bool current_gradient_ok = virtual_sparse_patch_en
+                    const bool current_gradient_ok = adaptive_track
+                        ? sampleAdaptiveVirtualValueAndGradient(track.adaptive_supports[level],
+                                                                 center + offset.cast<double>(), scale * sampling_pitch,
+                                                                 current_value, image_gradient)
+                        : virtual_sparse_patch_en
                         ? sampleSparseVirtualValueAndGradient(ctx, img, track.R_ccur_from_vcur_seed,
                                                               center + offset.cast<double>(), scale,
                                                               current_value, image_gradient)
@@ -7717,7 +8024,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
                       continue;
                     }
                     Jimg << image_gradient[0], image_gradient[1];
-                    Jimg *= (zncc_residual_en ? 1.0 : current_exposure) * inv_scale;
+                    Jimg *= (zncc_residual_en ? 1.0 : current_exposure) * (adaptive_track ? 1.0 : inv_scale);
                   }
                   const MD(1, 3) Jimg_Jpi_R = Jimg * Jdpi * track.R_vcur_from_ccur_seed;
                   const MD(1, 3) Jdphi = Jimg_Jpi_R * point_c_hat;
@@ -8063,6 +8370,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
           source_track = &source.visual_submap->virtual_track_patches[pair.source_submap_index];
           target_track = &target.visual_submap->virtual_track_patches[pair.target_submap_index];
         }
+        const bool adaptive_pair = virtual_adaptive_sampling_en && virtual_fisheye_patch_en &&
+                                   !virtual_s2_optimize_en &&
+                                   std::isfinite(pair.sampling_pitch) && pair.sampling_pitch > 0.0 &&
+                                   level < static_cast<int>(pair.adaptive_source_supports.size()) &&
+                                   level < static_cast<int>(pair.adaptive_target_supports.size());
 
         auto linearizeCurrentSample = [&](PerCameraData &ctx, const VirtualTrackPatch *track,
                                           const V2D &offset, float &value, Eigen::VectorXd &jacobian) -> bool {
@@ -8104,14 +8416,25 @@ void VIOManager::computeJacobianAndUpdateEKF()
               if (point_v[2] <= virtual_min_z) return false;
               const V2D center = virtualProject(point_v);
               V2D gradient;
-              const bool sample_ok = virtual_sparse_patch_en
-                  ? sampleSparseVirtualValueAndGradient(ctx, ctx.new_frame->img_, track->R_ccur_from_vcur_seed,
-                                                        center + offset, scale, value, gradient)
-                  : sampleVirtualValueAndGradient(track->cur_support, center + offset, scale, value, gradient);
+              bool sample_ok = false;
+              if (adaptive_pair)
+              {
+                const VirtualPatchImage &support = ctx.camera_id == pair.source_camera_id
+                    ? pair.adaptive_source_supports[level] : pair.adaptive_target_supports[level];
+                sample_ok = sampleAdaptiveVirtualValueAndGradient(
+                    support, center + offset, support.grid_step, value, gradient);
+              }
+              else
+              {
+                sample_ok = virtual_sparse_patch_en
+                    ? sampleSparseVirtualValueAndGradient(ctx, ctx.new_frame->img_, track->R_ccur_from_vcur_seed,
+                                                          center + offset, scale, value, gradient)
+                    : sampleVirtualValueAndGradient(track->cur_support, center + offset, scale, value, gradient);
+              }
               if (!sample_ok) return false;
               MD(1, 2) Jimg;
               Jimg << gradient[0], gradient[1];
-              Jimg *= exposure / scale;
+              Jimg *= adaptive_pair ? exposure : exposure / scale;
               MD(2, 3) Jdpi;
               computeVirtualProjectionJacobian(point_v, Jdpi);
               J_photo_center = Jimg * Jdpi * track->R_vcur_from_ccur_seed;
@@ -8202,7 +8525,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
         Eigen::VectorXd target_jacobian(solve_dim);
         for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
         {
-          const V2D target_offset = (core_patch_offsets_[patch_index] * static_cast<float>(scale)).cast<double>();
+          V2D target_offset = (core_patch_offsets_[patch_index] * static_cast<float>(scale)).cast<double>();
+          if (adaptive_pair) target_offset *= pair.sampling_pitch;
           const V2D source_offset = A_source_target * target_offset;
           float source_value = 0.0f;
           float target_value = 0.0f;
@@ -9022,7 +9346,20 @@ std::vector<Feature *> VIOManager::selectManagedReferenceCandidates(const PerCam
   }
 
   const bool allow_candidate = visual_point_seed_validation_en && point.state_ == VisualPoint::State::SEED;
-  const V3D current_direction = (ctx.new_frame->pos() - point.pos_).normalized();
+  const V3D current_view = ctx.new_frame->pos() - point.pos_;
+  const double current_range = virtual_adaptive_sampling_en ? current_view.norm() : 0.0;
+  if (virtual_adaptive_sampling_en &&
+      (!current_view.array().isFinite().all() || !std::isfinite(current_range) || current_range <= 1.0e-9))
+    return selected;
+  const V3D current_direction = current_view.normalized();
+  const double coverage_angle = visual_ref_coverage_angle_deg / kRadiansToDegrees;
+  constexpr double coverage_log_range = virtual_sampling::kLogScaleCoverage;
+  auto log_range_gap = [&](const Feature *feature) {
+    const double reference_range = (feature->pos() - point.pos_).norm();
+    if (!std::isfinite(reference_range) || reference_range <= 1.0e-9)
+      return std::numeric_limits<double>::infinity();
+    return std::fabs(std::log(reference_range) - std::log(current_range));
+  };
   std::vector<std::pair<double, Feature *>> ranked_validated;
   std::vector<std::pair<double, Feature *>> ranked_candidate;
   ranked_validated.reserve(point.obs_.size());
@@ -9034,6 +9371,7 @@ std::vector<Feature *> VIOManager::selectManagedReferenceCandidates(const PerCam
     if (!cross_camera_reference_en && feature->camera_id_ != ctx.camera_id) continue;
     if (virtual_fisheye_patch_en && !feature->virtual_patch_valid_) continue;
     V3D reference_direction = feature->view_direction_w_;
+    if (virtual_adaptive_sampling_en) reference_direction = feature->pos() - point.pos_;
     if (!reference_direction.array().isFinite().all() || reference_direction.norm() <= 1.0e-9)
       reference_direction = feature->pos() - point.pos_;
     if (!reference_direction.array().isFinite().all() || reference_direction.norm() <= 1.0e-9) continue;
@@ -9044,21 +9382,40 @@ std::vector<Feature *> VIOManager::selectManagedReferenceCandidates(const PerCam
     else if (feature->ref_state_ == Feature::RefState::CANDIDATE)
       ranked_candidate.emplace_back(angle, feature);
   }
-  auto rank = [](auto &items) {
-    std::stable_sort(items.begin(), items.end(), [](const auto &lhs, const auto &rhs) {
+  auto precedes = [&](const auto &lhs, const auto &rhs) {
+    if (virtual_adaptive_sampling_en)
+    {
+      // Use angle bins so the scale tie-break remains a strict ordering.
+      const double angle_bin_width = std::max(coverage_angle, 1.0e-9);
+      const double lhs_angle_bin = std::floor(lhs.first / angle_bin_width);
+      const double rhs_angle_bin = std::floor(rhs.first / angle_bin_width);
+      if (lhs_angle_bin != rhs_angle_bin) return lhs_angle_bin < rhs_angle_bin;
+      const double lhs_scale_gap = log_range_gap(lhs.second);
+      const double rhs_scale_gap = log_range_gap(rhs.second);
+      if (lhs_scale_gap != rhs_scale_gap) return lhs_scale_gap < rhs_scale_gap;
+    }
     if (lhs.first != rhs.first) return lhs.first < rhs.first;
     return lhs.second->accepted_test_count_ > rhs.second->accepted_test_count_;
-    });
+  };
+  auto rank = [&](auto &items) {
+    std::stable_sort(items.begin(), items.end(), precedes);
   };
   rank(ranked_validated);
   rank(ranked_candidate);
 
   std::vector<std::pair<double, Feature *>> ranked;
-  const double coverage_angle = visual_ref_coverage_angle_deg / kRadiansToDegrees;
-  const bool candidate_needed = allow_candidate || ranked_validated.empty() ||
-                                (!ranked_candidate.empty() &&
-                                 ranked_validated.front().first > coverage_angle &&
-                                 ranked_candidate.front().first < ranked_validated.front().first);
+  bool candidate_needed = allow_candidate || ranked_validated.empty() ||
+                          (!ranked_candidate.empty() &&
+                           ranked_validated.front().first > coverage_angle &&
+                           ranked_candidate.front().first < ranked_validated.front().first);
+  if (virtual_adaptive_sampling_en && !ranked_validated.empty() && !ranked_candidate.empty())
+  {
+    const auto &validated = ranked_validated.front();
+    const bool validated_covers = validated.first <= coverage_angle &&
+                                  log_range_gap(validated.second) <= coverage_log_range;
+    candidate_needed = allow_candidate ||
+                       (!validated_covers && precedes(ranked_candidate.front(), validated));
+  }
   if (candidate_needed) ranked.insert(ranked.end(), ranked_candidate.begin(), ranked_candidate.end());
   ranked.insert(ranked.end(), ranked_validated.begin(), ranked_validated.end());
   for (const auto &item : ranked)
@@ -9461,19 +9818,32 @@ bool VIOManager::shouldCreateManagedReference(const PerCameraData &ctx,
   const auto singular = svd.singularValues();
   if (!singular.array().isFinite().all() || singular[1] <= 1.0e-9) return false;
   if (singular[0] / singular[1] > visual_ref_max_anisotropy) return true;
-  const V3D current_direction = (ctx.new_frame->pos() - point.pos_).normalized();
+  const V3D current_view = ctx.new_frame->pos() - point.pos_;
+  const double current_range = virtual_adaptive_sampling_en ? current_view.norm() : 0.0;
+  if (virtual_adaptive_sampling_en &&
+      (!current_view.array().isFinite().all() || !std::isfinite(current_range) || current_range <= 1.0e-9))
+    return false;
+  const V3D current_direction = current_view.normalized();
   const double threshold = visual_ref_coverage_angle_deg / kRadiansToDegrees;
   for (Feature *feature : point.obs_)
   {
     if (feature == nullptr || feature->pending_delete_ || feature->ref_state_ == Feature::RefState::RETIRED) continue;
     if (!cross_camera_reference_en && feature->camera_id_ != ctx.camera_id) continue;
     V3D direction = feature->view_direction_w_;
+    if (virtual_adaptive_sampling_en) direction = feature->pos() - point.pos_;
     if (!direction.array().isFinite().all() || direction.norm() <= 1.0e-9)
       direction = feature->pos() - point.pos_;
     if (!direction.array().isFinite().all() || direction.norm() <= 1.0e-9) continue;
     direction.normalize();
     const double angle = std::acos(std::clamp(current_direction.dot(direction), -1.0, 1.0));
-    if (angle <= threshold) return false;
+    if (angle <= threshold)
+    {
+      if (!virtual_adaptive_sampling_en) return false;
+      // Range covers geometric scale diversity, not camera-dependent pixel bandwidth.
+      const double reference_range = (feature->pos() - point.pos_).norm();
+      if (virtual_sampling::distanceScaleCovered(reference_range, current_range))
+        return false;
+    }
   }
   return true;
 }
@@ -9491,10 +9861,47 @@ void VIOManager::manageReferenceBank(VisualPoint &point)
   if (static_cast<int>(refs.size()) <= visual_ref_max_count) return;
 
   const double threshold = visual_ref_coverage_angle_deg / kRadiansToDegrees;
+  constexpr double coverage_log_range = virtual_sampling::kLogScaleCoverage;
   std::set<Feature *> kept;
   std::vector<V3D> samples = point.view_samples_;
+  std::vector<double> sample_log_ranges;
+  if (virtual_adaptive_sampling_en)
+  {
+    sample_log_ranges.assign(samples.size(), std::numeric_limits<double>::quiet_NaN());
+    // Historical view samples have no range. Keep their angle coverage and add
+    // joint angle/range samples from references using the current landmark position.
+    for (Feature *feature : refs)
+    {
+      const V3D view = feature->pos() - point.pos_;
+      const double range = view.norm();
+      if (!view.array().isFinite().all() || !std::isfinite(range) || range <= 1.0e-9) continue;
+      samples.push_back(view / range);
+      sample_log_ranges.push_back(std::log(range));
+    }
+  }
   if (samples.empty())
     for (Feature *feature : refs) samples.push_back(feature->view_direction_w_);
+  if (virtual_adaptive_sampling_en)
+    sample_log_ranges.resize(samples.size(), std::numeric_limits<double>::quiet_NaN());
+  auto covers_sample = [&](const Feature *feature, size_t index) {
+    V3D direction = feature->view_direction_w_;
+    double log_range = std::numeric_limits<double>::quiet_NaN();
+    if (virtual_adaptive_sampling_en)
+    {
+      const V3D view = feature->pos() - point.pos_;
+      const double range = view.norm();
+      if (view.array().isFinite().all() && std::isfinite(range) && range > 1.0e-9)
+      {
+        direction = view / range;
+        log_range = std::log(range);
+      }
+    }
+    const double angle = std::acos(std::clamp(direction.dot(samples[index]), -1.0, 1.0));
+    if (!(angle <= threshold)) return false;
+    return !virtual_adaptive_sampling_en || !std::isfinite(sample_log_ranges[index]) ||
+           (std::isfinite(log_range) &&
+            std::fabs(log_range - sample_log_ranges[index]) <= coverage_log_range);
+  };
   std::vector<uint8_t> covered(samples.size(), 0);
   while (static_cast<int>(kept.size()) < visual_ref_max_count)
   {
@@ -9508,9 +9915,7 @@ void VIOManager::manageReferenceBank(VisualPoint &point)
       for (size_t i = 0; i < samples.size(); ++i)
       {
         if (covered[i]) continue;
-        const double angle = std::acos(std::clamp(candidate->view_direction_w_.dot(
-            samples[i]), -1.0, 1.0));
-        if (angle <= threshold) ++gain;
+        if (covers_sample(candidate, i)) ++gain;
       }
       if (gain > best_gain || (gain == best_gain && candidate->accepted_test_count_ > best_success))
       {
@@ -9523,9 +9928,7 @@ void VIOManager::manageReferenceBank(VisualPoint &point)
     kept.insert(best);
     for (size_t i = 0; i < samples.size(); ++i)
     {
-      const double angle = std::acos(std::clamp(best->view_direction_w_.dot(
-          samples[i]), -1.0, 1.0));
-      if (angle <= threshold) covered[i] = 1;
+      if (covers_sample(best, i)) covered[i] = 1;
     }
     if (std::all_of(covered.begin(), covered.end(), [](uint8_t value) { return value != 0; })) break;
   }
@@ -9780,7 +10183,7 @@ void VIOManager::commitPendingNewPoints(
                                      pending.corrected_timestamp, pending.td_used,
                                      pending.exposure_time_offset, pending.time_offset_group,
                                      pending.Rwi_ref, pending.Pwi_ref, pending.extrinsic_version);
-      if (pending.virtual_patch_valid && virtual_sparse_patch_en)
+      if (pending.virtual_patch_valid && (virtual_sparse_patch_en || virtual_adaptive_sampling_en))
       {
         feature->virtual_source_roi_ = pending.img;
         feature->virtual_source_origin_ = pending.virtual_source_origin;
@@ -9900,7 +10303,7 @@ void VIOManager::updateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Mat 
                                    ctx.new_frame->corrected_timestamp_, ctx.new_frame->td_used_,
                                    ctx.new_frame->exposure_time_offset_, ctx.new_frame->time_offset_group_,
                                    ctx.Rwi, ctx.Pwi, extrinsic_version_);
-    if (virtual_sparse_patch_en)
+    if (virtual_sparse_patch_en || virtual_adaptive_sampling_en)
     {
       ftr_new->virtual_source_roi_ = virtual_support_img;
       ftr_new->virtual_source_origin_ = virtual_source_origin;

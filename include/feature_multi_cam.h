@@ -18,6 +18,9 @@ which is included as part of this source code package.
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <memory>
+
+namespace virtual_sampling { class ImagePyramid; }
 
 // A salient image region tracked using either a raw image patch or a local
 // virtual pinhole patch. The existing raw-camera fields keep their semantics.
@@ -72,11 +75,13 @@ struct Feature
   Matrix3d R_v_from_c_;          //!< {}^V R_C.
   Matrix3d R_c_from_v_;          //!< {}^C R_V = ({}^V R_C)^T.
   bool virtual_patch_valid_;
-  cv::Mat virtual_source_roi_;   //!< Raw grayscale source retained until lazy support materialization.
+  cv::Mat virtual_source_roi_;   //!< Lazy source; retained for the reference lifetime in adaptive mode.
   cv::Point virtual_source_origin_;
   bool virtual_support_materialized_;
   bool virtual_support_materialization_failed_;
   mutable std::mutex virtual_support_mutex_;
+  // Allocated only in adaptive mode; immutable raw ROI owns the pyramid source.
+  std::shared_ptr<virtual_sampling::ImagePyramid> adaptive_image_pyramid_;
 
   RefState ref_state_;
   uint64_t ref_id_;

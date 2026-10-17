@@ -16,6 +16,8 @@ which is included as part of this source code package.
 #include "voxel_map_multi_cam.h"
 #include "feature_multi_cam.h"
 #include "split_state_math.h"
+#include "adaptive_image_pyramid.h"
+#include "virtual_sampling.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -47,6 +49,7 @@ struct VirtualPatchImage
 
   cv::Mat values;        //!< CV_32FC1 local virtual support image.
   cv::Mat valid_mask;    //!< CV_8UC1 validity mask for values.
+  double grid_step = 1.0;  //!< Support-grid spacing in canonical virtual coordinates.
   M3D R_v_from_c = M3D::Identity();  //!< {}^V R_C.
   M3D R_c_from_v = M3D::Identity();  //!< {}^C R_V.
   SE3d T_v_w_seed;            //!< {}^V T_W at submap construction.
@@ -63,6 +66,8 @@ struct VirtualTrackPatch
   SE3d T_vcur_w_seed;
   Matrix2d A_cur_ref = Matrix2d::Identity();
   int search_level = 0;
+  double sampling_pitch = 1.0;
+  std::vector<VirtualPatchImage> adaptive_supports;
   bool valid = false;
 };
 
@@ -336,6 +341,7 @@ struct PerCameraData
   cv::Mat img_cp;
   cv::Mat img_rgb;
   cv::Mat img_test;
+  std::shared_ptr<virtual_sampling::ImagePyramid> adaptive_image_pyramid;
   std::vector<std::pair<cv::Point2f, int>> rejected_visual_points_for_draw;
   FixedTemplateGradientCache fixed_template_cache;
 };
@@ -361,6 +367,7 @@ public:
   bool tukey_robust_en = false;
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
+  bool virtual_adaptive_sampling_en = false;
   bool virtual_s2_optimize_en = false;
   bool visual_ref_post_ekf_build_en = false;
   bool visual_map_manage_en = false;
@@ -702,6 +709,9 @@ public:
     int target_submap_index = -1;
     int search_level = 0;
     Matrix2d A_target_source = Matrix2d::Identity();
+    double sampling_pitch = 1.0;
+    std::vector<VirtualPatchImage> adaptive_source_supports;
+    std::vector<VirtualPatchImage> adaptive_target_supports;
     std::vector<double> sse_levels;
     std::vector<double> ncc_levels;
     std::vector<uint8_t> level_valid;
@@ -932,7 +942,7 @@ public:
   void computeJacobianAndUpdateEKF();
   bool referenceUncertaintyJacobian(const Feature &reference, const VisualPoint &point,
                                     const std::vector<float> &warped_patch, const Matrix2d &affine,
-                                    int level, int scale, Eigen::MatrixXd &jacobian) const;
+                                    int level, double scale, Eigen::MatrixXd &jacobian) const;
   void buildCurrentCrossCameraPairs();
   bool interpolateReferenceFeature(const Feature &reference, const V2D &px, float &value) const;
   bool computeWarpedReferenceGradient(const Feature &reference, const Matrix2d &A_cur_ref,
@@ -1034,6 +1044,23 @@ public:
   bool sampleSparseVirtualValueAndGradient(const PerCameraData &ctx, const cv::Mat &raw_img,
                                            const M3D &R_c_from_v, const V2D &px, int scale,
                                            float &value, V2D &gradient) const;
+  bool rawFromVirtualJacobian(const PerCameraData &ctx, const M3D &R_c_from_v,
+                              Matrix2d &jacobian) const;
+  bool sampleAdaptiveVirtualValue(const VirtualPatchImage &support, const V2D &px,
+                                  float &value) const;
+  bool sampleAdaptiveVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px,
+                                             double canonical_step, float &value,
+                                             V2D &gradient) const;
+  bool buildAdaptiveVirtualSupport(const PerCameraData &ctx,
+                                    const virtual_sampling::FilteredImage &filtered,
+                                    const M3D &R_c_from_v, double pitch,
+                                    const cv::Point &raw_origin, VirtualPatchImage &output) const;
+  bool prepareAdaptiveTrack(PerCameraData &ctx, Feature &reference,
+                             VirtualTrackPatch &track, std::vector<float> &warped_patch);
+  bool buildAdaptiveCurrentPair(const PerCameraData &source_ctx, const PerCameraData &target_ctx,
+                                 const VirtualTrackPatch &source_track,
+                                 const VirtualTrackPatch &target_track,
+                                 CurrentCrossCameraPair &pair) const;
   bool sampleVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px, int scale, float &value, V2D &gradient) const;
   bool sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V2D &px, int scale, float &value, V2D &gradient) const;
   SE3d composeVirtualPose(const M3D &R_v_from_c, const SE3d &T_c_w) const;
