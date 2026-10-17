@@ -1,12 +1,12 @@
 common:
   # This launch defaults to the single raw MEI camera0 stream.
-  num_cameras: 2
+  num_cameras: 3
   require_all_cameras: true
   multi_cam_sync_queue_size: 5
   multi_cam_sync_tolerance_ms: 40.0
   # Prior-normalized directional filtering for both sequential LIO and VIO updates.
   # false preserves the original estimator path exactly.
-  directional_update_en: false
+  directional_update_en: true
   directional_drop_variance_reduction: 0.05
   directional_full_variance_reduction: 0.80
   lid_topic: "/livox/lidar"
@@ -67,8 +67,27 @@ cameras:
     Rcl: [ -0.717462,  -0.695831,   0.032667, -0.026026,  -0.020086,  -0.999459, 0.696111,  -0.717925,  -0.003699]
     Pcl: [  0.017541,   0.039816,  -0.033913]
     online_extrinsic_en: true
-    time_offset_group: 1
+    time_offset_group: 0
     online_time_offset_en: true
+
+  camera2:
+    img_topic: "/fisheye/bright/image_raw"
+    camera_ns: "camera2"
+    image_undistort_en: false
+    raw_camera_ns: "camera2"
+
+    # 根据当前 camera0 外参和四相机标定关系推算的初值
+    Rcl: [-0.703941137,  0.710201625,  0.008973701,
+          -0.010987587,  0.001743915, -0.999938114,
+          -0.710173323, -0.703996173,  0.006575788]
+    Pcl: [-0.017651174, 0.023066408, -0.026854246]
+
+    online_extrinsic_en: true
+    time_offset_group: 0
+    online_time_offset_en: true
+
+
+  
 
 extrin_calib:
   # LiDAR to IMU: P_imu = R_imu_lidar * P_lidar + t_imu_lidar
@@ -88,7 +107,7 @@ time_offset:
 preprocess:
   image_downclock_en: true
   image_downclock_factor: 2
-  point_filter_num: 5
+  point_filter_num: 15
   filter_size_surf: 0.1
   lidar_type: 7
   scan_line: 4
@@ -122,14 +141,14 @@ vio:
   usage_stats_window: 100
   img_point_cov: 1000
   grid_size: 5
-  grid_n_height: 17
+  grid_n_height: 15
   patch_size: 8
   patch_pyrimid_level: 2
 
   # Adapted from the original cam0 virtual-patch values:
   # virtual_width/height and sphere LUT fields are not read by this project;
   # ax/ay=120 maps to the current virtual_focal_length parameter.
-  virtual_fisheye_patch_en: false
+  virtual_fisheye_patch_en: true
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
@@ -149,7 +168,7 @@ vio:
   visual_ref_fallback_en: true
   visual_ref_lifecycle_en: true
   visual_ref_view_coverage_en: true
-  visual_ref_nis_en: false
+  visual_ref_nis_en: true
   visual_point_seed_validation_en: true
   visual_point_footprint_redundancy_en: true
   visual_point_information_prune_en: true
@@ -283,7 +302,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "mocap21_mem_on"
+  seq_name: "mocap13_ours3"
   pose_output_en: true
 
 pcd_save:
