@@ -141,7 +141,7 @@ time_offset:
 preprocess:
   image_downclock_en: false
   image_downclock_factor: 1
-  point_filter_num: 5
+  point_filter_num: 20
   filter_size_surf: 0.1
   lidar_type: 2
   scan_line: 32
@@ -164,7 +164,7 @@ vio:
   zncc_residual_en: false
   zncc_min_std: 5.0
   zncc_residual_cov: 1.0
-  zncc_robust_en: true
+  zncc_robust_en: false
   zncc_huber_delta: 0.5
   # Omni-LIVO-style per-residual Tukey weighting; uses outlier_threshold as cutoff.
   # When enabled, this overrides the ZNCC patch-level Huber weighting above.
@@ -329,7 +329,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "gate_03_cake"
+  seq_name: "street03_r3live"
   pose_output_en: true
 
 pcd_save:

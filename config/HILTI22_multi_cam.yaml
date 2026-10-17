@@ -1,7 +1,7 @@
 common:
   # This launch defaults to the single camera0 stream. Increase only after
   # validating the remaining camera intrinsics and enabling contiguous entries.
-  num_cameras: 2
+  num_cameras: 3
   require_all_cameras: true
   multi_cam_sync_queue_size: 5
   multi_cam_sync_tolerance_ms: 40.0
@@ -103,7 +103,7 @@ time_offset:
 preprocess:
   image_downclock_en: true
   image_downclock_factor: 4
-  point_filter_num: 5
+  point_filter_num: 10
   filter_size_surf: 0.1
   lidar_type: 5
   scan_line: 32
@@ -144,7 +144,7 @@ vio:
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
   virtual_raw_score_select_en: true
-  max_total_points: 300
+  max_total_points: 500
   points_per_camera_min: 50
   points_per_camera_max: 150
   # Advanced visual reference/landmark management. Start HILTI22 in shadow
@@ -282,7 +282,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "exp04_cake2rt"
+  seq_name: "exp07_r3live"
   pose_output_en: true
 
 pcd_save:
