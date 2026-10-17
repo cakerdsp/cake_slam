@@ -2384,6 +2384,7 @@ bool VIOManager::prepareAdaptiveTrack(PerCameraData &ctx, Feature &reference,
     }
   }
   // Commit only a complete pair. A failed plan leaves the legacy track intact.
+  track.legacy_search_level = track.search_level;
   track.sampling_pitch = plan.pitch;
   track.A_cur_ref = affine;
   track.search_level = search_level;
@@ -7174,6 +7175,19 @@ void VIOManager::buildCurrentCrossCameraPairs()
 
         if (affine_ok)
         {
+          // Historical adaptive tracks use search_level=0. A current-pair
+          // fallback still samples their legacy supports, so retain the
+          // original search scale rather than inheriting that adaptive zero.
+          int fallback_search_level = pair.search_level;
+          if (virtual_adaptive_sampling_en && source_track != nullptr && target_track != nullptr)
+          {
+            const int source_legacy = source_track->adaptive_supports.empty()
+                ? source_search : source_track->legacy_search_level;
+            const int target_legacy = target_track->adaptive_supports.empty()
+                ? target_search : target_track->legacy_search_level;
+            fallback_search_level = std::max(0, std::max(source_legacy, target_legacy));
+            if (fallback_search_level + metric_levels - 1 >= 30) continue;
+          }
           pair.footprint_bin = usageFootprintBin(pair.A_target_source);
           pair.anisotropy_bin = usageAnisotropyBin(pair.A_target_source);
           const Matrix2d A_source_target = pair.A_target_source.inverse();
@@ -7192,6 +7206,7 @@ void VIOManager::buildCurrentCrossCameraPairs()
           }
           if (!adaptive_pair)
           {
+            pair.search_level = fallback_search_level;
             pair.sampling_pitch = 1.0;
             pair.adaptive_source_supports.clear();
             pair.adaptive_target_supports.clear();

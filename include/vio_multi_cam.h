@@ -66,6 +66,8 @@ struct VirtualTrackPatch
   SE3d T_vcur_w_seed;
   Matrix2d A_cur_ref = Matrix2d::Identity();
   int search_level = 0;
+  // Preserved before adaptive sampling replaces search_level with zero.
+  int legacy_search_level = 0;
   double sampling_pitch = 1.0;
   std::vector<VirtualPatchImage> adaptive_supports;
   bool valid = false;
