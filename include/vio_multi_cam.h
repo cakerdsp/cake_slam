@@ -18,6 +18,7 @@ which is included as part of this source code package.
 #include "split_state_math.h"
 #include "adaptive_image_pyramid.h"
 #include "virtual_sampling.h"
+#include "pose_affine_warp.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -56,6 +57,13 @@ struct VirtualPatchImage
   bool valid = false;
 };
 
+struct PoseAffineTrack
+{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  pose_affine_warp::Geometry geometry;
+  Matrix2d seed_inverse = Matrix2d::Identity();
+};
+
 struct VirtualTrackPatch
 {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -70,6 +78,7 @@ struct VirtualTrackPatch
   int legacy_search_level = 0;
   double sampling_pitch = 1.0;
   std::vector<VirtualPatchImage> adaptive_supports;
+  std::shared_ptr<const PoseAffineTrack> pose_affine;
   bool valid = false;
 };
 
@@ -370,6 +379,7 @@ public:
   bool virtual_fisheye_patch_en = false;
   bool virtual_sparse_patch_en = false;
   bool virtual_adaptive_sampling_en = false;
+  bool virtual_pose_affine_en = false;
   bool virtual_s2_optimize_en = false;
   bool visual_ref_post_ekf_build_en = false;
   bool visual_map_manage_en = false;
@@ -711,6 +721,9 @@ public:
     int target_submap_index = -1;
     int search_level = 0;
     Matrix2d A_target_source = Matrix2d::Identity();
+    std::shared_ptr<const PoseAffineTrack> source_pose_affine;
+    std::shared_ptr<const PoseAffineTrack> target_pose_affine;
+    Matrix2d pose_affine_seed_inverse = Matrix2d::Identity();
     double sampling_pitch = 1.0;
     std::vector<VirtualPatchImage> adaptive_source_supports;
     std::vector<VirtualPatchImage> adaptive_target_supports;
@@ -797,6 +810,7 @@ public:
   double visual_parallel_time_ = 0.0, visual_reduce_time_ = 0.0;
   double visual_nis_worker_time_ = 0.0, visual_directional_time_ = 0.0;
   int visual_linearization_threads_ = 1;
+  bool pose_affine_update_rejected_ = false;
   struct VisualPatchResult
   {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -810,6 +824,7 @@ public:
     std::string covariance_error;
     int linearized = 0, dof = 0;
     bool has_error = false, evidence = false, accepted = false, invalid_covariance = false;
+    bool pose_affine_invalid = false;
     double error = 0.0, nis = 0.0, nis_time = 0.0;
     V2D current_px = V2D::Zero();
     Matrix2d affine = Matrix2d::Zero();
@@ -826,6 +841,7 @@ public:
     {
       linearized = dof = 0;
       has_error = evidence = accepted = invalid_covariance = false;
+      pose_affine_invalid = false;
       error = nis_time = 0.0;
       nis = std::numeric_limits<double>::quiet_NaN();
       failure = nullptr;
@@ -1035,6 +1051,13 @@ public:
                                             int level_ref, Matrix2d &A_cur_ref) const;
   bool warpAffineVirtual(const Matrix2d &A_cur_ref, const cv::Mat &virtual_ref_img, int level_ref, int search_level,
                          int pyramid_level, int halfpatch_size, float *patch) const;
+  std::shared_ptr<const PoseAffineTrack> preparePoseAffineTrack(
+      const PerCameraData &ctx, const SE3d &reference_pose, const V3D &point_ref,
+      const V3D &normal_ref, int reference_level, bool use_plane,
+      const M3D &virtual_from_camera) const;
+  bool evaluatePoseAffineTrack(const PoseAffineTrack &track, const StatesGroup &value,
+                               pose_affine_warp::Evaluation &evaluation) const;
+  bool poseAffineSamplesValid(int level, const StatesGroup &candidate);
   bool sampleVirtualCorePatch(const VirtualPatchImage &support, const V2D &center, int scale, float *patch) const;
   bool sampleSparseVirtualValue(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v,
                                 const V2D &px, float &value) const;

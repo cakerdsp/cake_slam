@@ -150,7 +150,13 @@ vio:
   # ax/ay=120 maps to the current virtual_focal_length parameter.
   virtual_fisheye_patch_en: true
   # Distance/scale reference maintenance and matched sampling/filtering; false keeps the legacy path.
+<<<<<<< HEAD
   virtual_adaptive_sampling_en: true
+=======
+  virtual_adaptive_sampling_en: false
+  # Pose-dependent affine warp and pose Jacobian; independent of adaptive sampling.
+  virtual_pose_affine_en: false
+>>>>>>> 9079f47246a44ba65c4ccaa6ea0c6d5dd60dcdf1
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
