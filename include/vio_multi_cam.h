@@ -1008,9 +1008,13 @@ public:
                                      const M3D &R_c_from_v, cv::Mat &raw_roi, cv::Point &raw_origin) const;
   bool materializeVirtualReferenceSupport(Feature &feature, bool &materialized_now);
   bool interpolateRawVirtualImage(const cv::Mat &img, double u, double v, float &value) const;
-  bool interpolateFloatVirtualImage(const cv::Mat &img, const cv::Mat *valid_mask, double u, double v, float &value) const;
-  bool interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value) const;
-  bool interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value) const;
+  // Optional analytic gradient is supported only for bilinear interpolation.
+  bool interpolateFloatVirtualImage(const cv::Mat &img, const cv::Mat *valid_mask, double u, double v, float &value,
+                                    V2D *bilinear_gradient = nullptr) const;
+  bool interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value,
+                               V2D *bilinear_gradient = nullptr) const;
+  bool interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value,
+                                     V2D *bilinear_gradient = nullptr) const;
   V2D virtualProject(const V3D &p_v) const;
   V3D virtualCam2World(const V2D &px_v) const;
   bool createVirtualFeaturePatch(const PerCameraData &ctx, const cv::Mat &raw_img, const SE3d &T_c_w,

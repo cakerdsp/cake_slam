@@ -2288,6 +2288,19 @@ bool VIOManager::sampleAdaptiveVirtualValue(const VirtualPatchImage &support, co
 bool VIOManager::sampleAdaptiveVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px,
                                                        double step, float &value, V2D &gradient) const
 {
+  if (virtual_interp_mode_enum == VirtualInterpMode::BILINEAR)
+  {
+    if (!(step > 0.0) || !std::isfinite(step) ||
+        !(support.grid_step > 0.0) || !std::isfinite(support.grid_step)) return false;
+    const V2D center(virtual_support_radius, virtual_support_radius);
+    const V2D stored = center + (px - center) / support.grid_step;
+    if (!interpolateVirtualFloat(support.values, support.valid_mask, stored.x(), stored.y(), value, &gradient))
+      return false;
+    // ds/dq = 1/grid_step: return the derivative in the original f0 coordinates.
+    gradient /= support.grid_step;
+    return gradient.allFinite();
+  }
+
   float left, right, up, down;
   if (!(step > 0.0) || !sampleAdaptiveVirtualValue(support, px, value) ||
       !sampleAdaptiveVirtualValue(support, px - V2D(step, 0.0), left) ||
@@ -2605,9 +2618,15 @@ bool VIOManager::interpolateRawVirtualImage(const cv::Mat &img, double u, double
   return true;
 }
 
-bool VIOManager::interpolateFloatVirtualImage(const cv::Mat &img, const cv::Mat *valid_mask, double u, double v, float &value) const
+bool VIOManager::interpolateFloatVirtualImage(const cv::Mat &img, const cv::Mat *valid_mask, double u, double v, float &value,
+                                             V2D *bilinear_gradient) const
 {
   value = 0.0f;
+  if (bilinear_gradient != nullptr)
+  {
+    bilinear_gradient->setZero();
+    if (virtual_interp_mode_enum != VirtualInterpMode::BILINEAR) return false;
+  }
   if (!std::isfinite(u) || !std::isfinite(v) || img.empty() || img.type() != CV_32FC1) return false;
   if (valid_mask != nullptr && (valid_mask->empty() || valid_mask->type() != CV_8UC1 ||
                                 valid_mask->rows != img.rows || valid_mask->cols != img.cols))
@@ -2632,8 +2651,16 @@ bool VIOManager::interpolateFloatVirtualImage(const cv::Mat &img, const cv::Mat 
       return false;
     const double dx = u - x;
     const double dy = v - y;
-    value = clampInterpValue((1.0 - dy) * ((1.0 - dx) * tl + dx * tr) +
-                             dy * ((1.0 - dx) * bl + dx * br));
+    const double sampled = (1.0 - dy) * ((1.0 - dx) * tl + dx * tr) +
+                            dy * ((1.0 - dx) * bl + dx * br);
+    value = clampInterpValue(sampled);
+    if (bilinear_gradient != nullptr && sampled >= 0.0 && sampled <= 255.0)
+    {
+      // Differentiate the same four taps used above. Outside the intensity
+      // range the clamped value is constant, so the gradient remains zero.
+      *bilinear_gradient << (1.0 - dy) * (tr - tl) + dy * (br - bl),
+                            (1.0 - dx) * (bl - tl) + dx * (br - tr);
+    }
     return true;
   }
 
@@ -2668,14 +2695,16 @@ bool VIOManager::interpolateFloatVirtualImage(const cv::Mat &img, const cv::Mat 
   return true;
 }
 
-bool VIOManager::interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value) const
+bool VIOManager::interpolateVirtualFloat(const cv::Mat &img, const cv::Mat &valid_mask, float u, float v, float &value,
+                                        V2D *bilinear_gradient) const
 {
-  return interpolateFloatVirtualImage(img, &valid_mask, u, v, value);
+  return interpolateFloatVirtualImage(img, &valid_mask, u, v, value, bilinear_gradient);
 }
 
-bool VIOManager::interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value) const
+bool VIOManager::interpolateStoredVirtualImage(const cv::Mat &img, float u, float v, float &value,
+                                              V2D *bilinear_gradient) const
 {
-  return interpolateFloatVirtualImage(img, nullptr, u, v, value);
+  return interpolateFloatVirtualImage(img, nullptr, u, v, value, bilinear_gradient);
 }
 
 V2D VIOManager::virtualProject(const V3D &p_v) const
@@ -2833,6 +2862,15 @@ bool VIOManager::sampleSparseVirtualValueAndGradient(const PerCameraData &ctx, c
 
 bool VIOManager::sampleVirtualValueAndGradient(const VirtualPatchImage &support, const V2D &px, int scale, float &value, V2D &gradient) const
 {
+  if (virtual_interp_mode_enum == VirtualInterpMode::BILINEAR)
+  {
+    if (scale <= 0 ||
+        !interpolateVirtualFloat(support.values, support.valid_mask, px[0], px[1], value, &gradient)) return false;
+    // Preserve the existing interface: callers divide this gradient by scale.
+    gradient *= scale;
+    return gradient.allFinite();
+  }
+
   float left, right, up, down;
   if (!interpolateVirtualFloat(support.values, support.valid_mask, px[0], px[1], value) ||
       !interpolateVirtualFloat(support.values, support.valid_mask, px[0] - scale, px[1], left) ||
@@ -2846,6 +2884,13 @@ bool VIOManager::sampleVirtualValueAndGradient(const VirtualPatchImage &support,
 
 bool VIOManager::sampleStoredVirtualValueAndGradient(const cv::Mat &img, const V2D &px, int scale, float &value, V2D &gradient) const
 {
+  if (virtual_interp_mode_enum == VirtualInterpMode::BILINEAR)
+  {
+    if (scale <= 0 || !interpolateStoredVirtualImage(img, px[0], px[1], value, &gradient)) return false;
+    gradient *= scale;
+    return gradient.allFinite();
+  }
+
   float left, right, up, down;
   if (!interpolateStoredVirtualImage(img, px[0], px[1], value) ||
       !interpolateStoredVirtualImage(img, px[0] - scale, px[1], left) ||
@@ -7053,6 +7098,18 @@ bool VIOManager::computeWarpedReferenceGradient(const Feature &reference, const 
                          : reference.px_;
   const V2D patch_offset = core_patch_offsets_[patch_index].cast<double>() * scale;
   const V2D reference_px = center + A_ref_cur * patch_offset;
+  if (reference.virtual_patch_valid_ && virtual_interp_mode_enum == VirtualInterpMode::BILINEAR)
+  {
+    float value = 0.0f;
+    V2D reference_gradient;
+    if (!interpolateStoredVirtualImage(reference.img_, reference_px[0], reference_px[1], value, &reference_gradient))
+      return false;
+    // reference_px = center + A_ref_cur * current_offset; no pyramid-scale
+    // factor remains in a derivative with respect to current virtual pixels.
+    gradient = A_ref_cur.transpose() * reference_gradient;
+    return gradient.allFinite();
+  }
+
   const V2D reference_du = A_ref_cur * V2D(scale, 0.0);
   const V2D reference_dv = A_ref_cur * V2D(0.0, scale);
 
