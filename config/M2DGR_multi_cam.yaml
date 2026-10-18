@@ -1,7 +1,7 @@
 common:
   # The first N camera entries below are enabled. Valid range: 1..7.
   # camera6 is excluded by default because its official extrinsic is marked "to be changed".
-  num_cameras: 1
+  num_cameras: 3
   require_all_cameras: true
   multi_cam_sync_queue_size: 5
   multi_cam_sync_tolerance_ms: 40.0
@@ -181,7 +181,7 @@ vio:
 
   virtual_fisheye_patch_en: true
   # Distance/scale reference maintenance and matched sampling/filtering; false keeps the legacy path.
-  virtual_adaptive_sampling_en: false
+  virtual_adaptive_sampling_en: true
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
@@ -194,7 +194,7 @@ vio:
   visual_ref_post_ekf_build_en: true
   # Advanced visual reference/landmark management. Submodules are effective
   # only when this master switch is enabled.
-  visual_map_manage_en: true
+  visual_map_manage_en: false
   visual_map_manage_log_en: true
   visual_map_manage_shadow_en: false
   visual_ref_current_select_en: true
@@ -231,7 +231,7 @@ vio:
   virtual_splat_require_full_core_coverage: true
   virtual_splat_debug_compare_pull_exact: false
   # Strong geometry gate for newly inserted visual map points only.
-  visual_geom_filter_en: true
+  visual_geom_filter_en: false
   visual_geom_filter_log_en: true
   visual_geom_filter_require_point_cov: true
   visual_geom_filter_voxel_size: 0.4
@@ -331,7 +331,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "street03_r3live"
+  seq_name: "asdhoiauhdgoia"
   pose_output_en: true
 
 pcd_save:
