@@ -150,9 +150,13 @@ vio:
   # ax/ay=120 maps to the current virtual_focal_length parameter.
   virtual_fisheye_patch_en: true
   # Distance/scale reference maintenance and matched sampling/filtering; false keeps the legacy path.
+<<<<<<< HEAD
+  virtual_adaptive_sampling_en: true
+=======
   virtual_adaptive_sampling_en: false
   # Pose-dependent affine warp and pose Jacobian; independent of adaptive sampling.
   virtual_pose_affine_en: false
+>>>>>>> 9079f47246a44ba65c4ccaa6ea0c6d5dd60dcdf1
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
@@ -165,7 +169,7 @@ vio:
   # reference selection, or deleting map objects while the raw-path abort is traced.
   visual_ref_post_ekf_build_en: true
 
-  visual_map_manage_en: true
+  visual_map_manage_en: false
   visual_map_manage_log_en: false
   visual_map_manage_shadow_en: false
   visual_ref_current_select_en: true
@@ -206,7 +210,7 @@ vio:
   # Keep the strong insertion filter disabled during diagnosis. Its lookup
   # scale matches mid360 lio.voxel_size so footprint association stays coherent.
   
-  visual_geom_filter_en: true
+  visual_geom_filter_en: false
   visual_geom_filter_log_en: false
   visual_geom_filter_require_point_cov: true
   visual_geom_filter_voxel_size: 0.5
@@ -306,7 +310,7 @@ publish:
   blind_rgb_points: 0.0
 
 evo:
-  seq_name: "mocap13_ours3"
+  seq_name: "dsfsfsfsf"
   pose_output_en: true
 
 pcd_save:
