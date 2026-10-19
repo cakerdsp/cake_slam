@@ -738,6 +738,13 @@ public:
     bool accepted = false;
   };
 
+  enum class PoseAffineMode { Skip, Legacy, Pose };
+  struct PoseAffineLevelPlan
+  {
+    std::vector<std::vector<PoseAffineMode>> historical;
+    std::vector<PoseAffineMode> pairs;
+  };
+
   long long usage_stats_frames_ = 0;
   long long usage_stats_total_frames_ = 0;
   std::vector<UsageStatsCell> usage_camera_pairs_;
@@ -810,7 +817,7 @@ public:
   double visual_parallel_time_ = 0.0, visual_reduce_time_ = 0.0;
   double visual_nis_worker_time_ = 0.0, visual_directional_time_ = 0.0;
   int visual_linearization_threads_ = 1;
-  bool pose_affine_update_rejected_ = false;
+  std::vector<std::vector<uint8_t>> pose_affine_evidence_valid_;
   struct VisualPatchResult
   {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -1061,7 +1068,14 @@ public:
       const M3D &virtual_from_camera) const;
   bool evaluatePoseAffineTrack(const PoseAffineTrack &track, const StatesGroup &value,
                                pose_affine_warp::Evaluation &evaluation) const;
-  bool poseAffineSamplesValid(int level, const StatesGroup &candidate);
+  PoseAffineLevelPlan buildPoseAffineLevelPlan(int level, const StatesGroup &base);
+  bool poseAffineHistoricalSamplesValid(int level, const PerCameraData &ctx, int point_index,
+                                        const StatesGroup &value, PoseAffineMode mode) const;
+  bool poseAffinePairSamplesValid(int level, const CurrentCrossCameraPair &pair,
+                                  const StatesGroup &value, PoseAffineMode mode) const;
+  bool poseAffineSamplesValid(int level, const StatesGroup &candidate, const PoseAffineLevelPlan &plan,
+                              const std::vector<std::vector<uint8_t>> &accepted_history,
+                              const std::vector<uint8_t> &accepted_pairs);
   bool sampleVirtualCorePatch(const VirtualPatchImage &support, const V2D &center, int scale, float *patch) const;
   bool sampleSparseVirtualValue(const PerCameraData &ctx, const cv::Mat &raw_img, const M3D &R_c_from_v,
                                 const V2D &px, float &value) const;

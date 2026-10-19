@@ -7496,108 +7496,258 @@ void VIOManager::buildCurrentCrossCameraPairs()
            adaptive_attempted, adaptive_prepared, adaptive_attempted - adaptive_prepared, adaptive_time_sum);
 }
 
-bool VIOManager::poseAffineSamplesValid(int level, const StatesGroup &candidate)
+bool VIOManager::poseAffineHistoricalSamplesValid(int level, const PerCameraData &ctx, int point_index,
+                                                 const StatesGroup &value, PoseAffineMode mode) const
 {
-  // Validate before committing, including the final solver iteration. A trial
-  // cannot improve its cost merely by moving difficult samples out of support.
-  bool valid = true;
-  for (PerCameraData &ctx : cameras_)
+  if (mode == PoseAffineMode::Skip || level < 0 || patch_size_total <= 0 ||
+      static_cast<int>(core_patch_offsets_.size()) < patch_size_total || ctx.visual_submap == nullptr ||
+      ctx.new_frame == nullptr || point_index < 0) return false;
+  const auto &map = *ctx.visual_submap;
+  if (point_index >= static_cast<int>(map.virtual_track_patches.size()) ||
+      point_index >= static_cast<int>(map.voxel_points.size()) ||
+      point_index >= static_cast<int>(map.search_levels.size()) ||
+      point_index >= static_cast<int>(map.warp_patch.size())) return false;
+  const auto &track = map.virtual_track_patches[point_index];
+  const VisualPoint *point = map.voxel_points[point_index];
+  const auto &reference = map.warp_patch[point_index];
+  if (!track.valid || point == nullptr || !point->pos_.allFinite() ||
+      static_cast<int>(reference.size()) < (level + 1) * patch_size_total) return false;
+  const int exponent = level + map.search_levels[point_index];
+  if (exponent < 0 || exponent >= 30) return false;
+  const int scale = 1 << exponent;
+  const bool adaptive = virtual_adaptive_sampling_en && level < static_cast<int>(track.adaptive_supports.size());
+  const double pitch = adaptive ? track.sampling_pitch : 1.0;
+  if (!std::isfinite(pitch) || pitch <= 0.0) return false;
+  const V3D point_c = ctx.Rcw * point->pos_ + ctx.Pcw;
+  const V3D point_v = track.R_vcur_from_ccur_seed * point_c;
+  if (!point_v.allFinite() || point_v.z() <= virtual_min_z) return false;
+  const V2D center = virtualProject(point_v);
+  MD(2, 3) projection;
+  computeVirtualProjectionJacobian(point_v, projection);
+  if (!center.allFinite() || !projection.allFinite()) return false;
+  pose_affine_warp::Evaluation affine;
+  Matrix2d deformation = Matrix2d::Identity();
+  if (mode == PoseAffineMode::Pose)
   {
-    updateFrameState(ctx, candidate);
-    if (!valid || ctx.visual_submap == nullptr) continue;
-    const auto &map = *ctx.visual_submap;
-    for (int i = 0; i < ctx.total_points && i < static_cast<int>(map.virtual_track_patches.size()); ++i)
+    if (!track.pose_affine || !evaluatePoseAffineTrack(*track.pose_affine, value, affine)) return false;
+    deformation = affine.affine * track.pose_affine->seed_inverse;
+    if (!deformation.allFinite()) return false;
+  }
+  double exposure = 1.0, reference_exposure = 1.0;
+  if (!zncc_residual_en)
+  {
+    if (ctx.camera_id < 0 || ctx.camera_id >= static_cast<int>(value.inv_expo_time.size()) ||
+        point_index >= static_cast<int>(map.inv_expo_list.size())) return false;
+    exposure = value.inv_expo_time[ctx.camera_id];
+    reference_exposure = map.inv_expo_list[point_index];
+    if (!std::isfinite(exposure) || !std::isfinite(reference_exposure)) return false;
+  }
+  std::vector<double> current_values(zncc_residual_en ? patch_size_total : 0);
+  for (int k = 0; k < patch_size_total; ++k)
+  {
+    const V2D offset = (core_patch_offsets_[k] * static_cast<float>(scale * pitch)).cast<double>();
+    const V2D px = center + deformation * offset;
+    float intensity;
+    V2D gradient;
+    const bool valid = adaptive
+        ? sampleAdaptiveVirtualValueAndGradient(track.adaptive_supports[level], px, scale * pitch, intensity, gradient)
+        : sampleVirtualValueAndGradient(track.cur_support, px, scale, intensity, gradient);
+    if (!valid) return false;
+    const MD(1, 2) photo = (exposure * (adaptive ? 1.0 : 1.0 / scale)) * gradient.transpose();
+    const MD(1, 3) photo_center = photo * projection * track.R_vcur_from_ccur_seed;
+    MD(1, 6) pose_jacobian;
+    pose_jacobian.head<3>() = photo_center * pose_affine_warp::skew(point_c) * ctx.Jdphi_dR - photo_center * ctx.Jdp_dR;
+    pose_jacobian.tail<3>() = -photo_center * ctx.Jdp_dt;
+    if (mode == PoseAffineMode::Pose)
     {
-      const auto &track = map.virtual_track_patches[i];
-      if (!track.pose_affine || i >= static_cast<int>(map.voxel_points.size()) ||
-          (i < static_cast<int>(map.contributes_to_ekf.size()) && !map.contributes_to_ekf[i]) ||
-          (i < static_cast<int>(map.level_active.size()) &&
-           (level >= static_cast<int>(map.level_active[i].size()) || !map.level_active[i][level])))
-        continue;
-      const VisualPoint *point = map.voxel_points[i];
-      pose_affine_warp::Evaluation affine;
-      if (point == nullptr || !evaluatePoseAffineTrack(*track.pose_affine, candidate, affine))
-      {
-        valid = false;
-        break;
-      }
-      const V3D point_v = track.R_vcur_from_ccur_seed * (ctx.Rcw * point->pos_ + ctx.Pcw);
-      if (!point_v.allFinite() || point_v.z() <= virtual_min_z)
-      {
-        valid = false;
-        break;
-      }
-      const V2D center = virtualProject(point_v);
-      const int exponent = level + map.search_levels[i];
-      if (exponent < 0 || exponent >= 30) { valid = false; break; }
-      const int scale = 1 << exponent;
-      const bool adaptive = virtual_adaptive_sampling_en && level < static_cast<int>(track.adaptive_supports.size());
-      const double pitch = adaptive ? track.sampling_pitch : 1.0;
-      const Matrix2d deformation = affine.affine * track.pose_affine->seed_inverse;
-      for (int k = 0; k < patch_size_total; ++k)
-      {
-        const V2D offset = (core_patch_offsets_[k] * static_cast<float>(scale * pitch)).cast<double>();
-        const V2D px = center + deformation * offset;
-        float value;
-        V2D gradient;
-        valid = adaptive
-            ? sampleAdaptiveVirtualValueAndGradient(track.adaptive_supports[level], px, scale * pitch, value, gradient)
-            : sampleVirtualValueAndGradient(track.cur_support, px, scale, value, gradient);
-        if (!valid) break;
-      }
-      if (!valid) break;
+      const V2D fixed = track.pose_affine->seed_inverse * offset;
+      const pose_affine_warp::PoseJacobian shape =
+          fixed.x() * affine.column_jacobians[0] + fixed.y() * affine.column_jacobians[1];
+      if (!shape.allFinite()) return false;
+      pose_jacobian += photo * shape;
+    }
+    if (!pose_jacobian.allFinite()) return false;
+    if (zncc_residual_en) current_values[k] = intensity;
+    else if (!std::isfinite(exposure * intensity - reference_exposure * reference[level * patch_size_total + k]))
+      return false;
+  }
+  if (zncc_residual_en)
+  {
+    Eigen::VectorXd normalized;
+    if (!normalizePatchValues(current_values, zncc_min_std, normalized) ||
+        !normalizePatchValues(reference.data() + level * patch_size_total, patch_size_total, zncc_min_std, normalized))
+      return false;
+  }
+  return true;
+}
+
+bool VIOManager::poseAffinePairSamplesValid(int level, const CurrentCrossCameraPair &pair,
+                                           const StatesGroup &value, PoseAffineMode mode) const
+{
+  if (mode == PoseAffineMode::Skip || level < 0 || patch_size_total <= 0 ||
+      static_cast<int>(core_patch_offsets_.size()) < patch_size_total || pair.point == nullptr ||
+      pair.point->pending_delete_ || !pair.point->pos_.allFinite() ||
+      pair.source_camera_id < 0 || pair.source_camera_id >= numCameras() ||
+      pair.target_camera_id < 0 || pair.target_camera_id >= numCameras() ||
+      pair.source_camera_id == pair.target_camera_id || pair.source_submap_index < 0 || pair.target_submap_index < 0 ||
+      !std::isfinite(pair.hessian_weight) || pair.hessian_weight < 0.0) return false;
+  const PerCameraData &source = cameras_[pair.source_camera_id];
+  const PerCameraData &target = cameras_[pair.target_camera_id];
+  if (source.visual_submap == nullptr || target.visual_submap == nullptr ||
+      source.new_frame == nullptr || target.new_frame == nullptr ||
+      pair.source_submap_index >= static_cast<int>(source.visual_submap->virtual_track_patches.size()) ||
+      pair.target_submap_index >= static_cast<int>(target.visual_submap->virtual_track_patches.size()) ||
+      pair.source_submap_index >= static_cast<int>(source.visual_submap->voxel_points.size()) ||
+      pair.target_submap_index >= static_cast<int>(target.visual_submap->voxel_points.size()) ||
+      source.visual_submap->voxel_points[pair.source_submap_index] != pair.point ||
+      target.visual_submap->voxel_points[pair.target_submap_index] != pair.point) return false;
+  const auto &source_track = source.visual_submap->virtual_track_patches[pair.source_submap_index];
+  const auto &target_track = target.visual_submap->virtual_track_patches[pair.target_submap_index];
+  if (!source_track.valid || !target_track.valid || !pair.A_target_source.allFinite() ||
+      !std::isfinite(pair.A_target_source.determinant()) || std::fabs(pair.A_target_source.determinant()) <= 1.0e-9)
+    return false;
+  const int exponent = level + pair.search_level;
+  if (exponent < 0 || exponent >= 30) return false;
+  const int scale = 1 << exponent;
+  const bool adaptive = virtual_adaptive_sampling_en && std::isfinite(pair.sampling_pitch) && pair.sampling_pitch > 0.0 &&
+      level < static_cast<int>(pair.adaptive_source_supports.size()) &&
+      level < static_cast<int>(pair.adaptive_target_supports.size());
+  const Matrix2d source_from_target = pair.A_target_source.inverse();
+  pose_affine_warp::Evaluation source_affine, target_affine;
+  Matrix2d source_affine_inverse = Matrix2d::Identity(), relative_affine = Matrix2d::Identity();
+  if (mode == PoseAffineMode::Pose)
+  {
+    if (!pair.source_pose_affine || !pair.target_pose_affine ||
+        !evaluatePoseAffineTrack(*pair.source_pose_affine, value, source_affine) ||
+        !evaluatePoseAffineTrack(*pair.target_pose_affine, value, target_affine) ||
+        std::fabs(source_affine.affine.determinant()) <= 1.0e-9) return false;
+    source_affine_inverse = source_affine.affine.inverse();
+    relative_affine = target_affine.affine * source_affine_inverse;
+    if (!source_affine_inverse.allFinite() || !relative_affine.allFinite() || !pair.pose_affine_seed_inverse.allFinite())
+      return false;
+  }
+  const auto sample = [&](const PerCameraData &ctx, const VirtualTrackPatch &track, const VirtualPatchImage *support,
+                          const V2D &offset, const pose_affine_warp::PoseJacobian *shape, float &intensity) {
+    if (ctx.camera_id < 0 || ctx.camera_id >= static_cast<int>(value.inv_expo_time.size())) return false;
+    const double exposure = zncc_residual_en ? 1.0 : value.inv_expo_time[ctx.camera_id];
+    const V3D point_c = ctx.Rcw * pair.point->pos_ + ctx.Pcw;
+    const V3D point_v = track.R_vcur_from_ccur_seed * point_c;
+    if (!std::isfinite(exposure) || !point_v.allFinite() || point_v.z() <= virtual_min_z) return false;
+    const V2D center = virtualProject(point_v);
+    MD(2, 3) projection;
+    computeVirtualProjectionJacobian(point_v, projection);
+    if (!center.allFinite() || !projection.allFinite()) return false;
+    V2D gradient;
+    const bool valid = support
+        ? sampleAdaptiveVirtualValueAndGradient(*support, center + offset, support->grid_step, intensity, gradient)
+        : sampleVirtualValueAndGradient(track.cur_support, center + offset, scale, intensity, gradient);
+    if (!valid) return false;
+    const MD(1, 2) photo = (exposure * (support ? 1.0 : 1.0 / scale)) * gradient.transpose();
+    const MD(1, 3) photo_center = photo * projection * track.R_vcur_from_ccur_seed;
+    MD(1, 6) pose_jacobian;
+    pose_jacobian.head<3>() = photo_center * pose_affine_warp::skew(point_c) * ctx.Jdphi_dR - photo_center * ctx.Jdp_dR;
+    pose_jacobian.tail<3>() = -photo_center * ctx.Jdp_dt;
+    if (shape) pose_jacobian += photo * *shape;
+    return pose_jacobian.allFinite() && std::isfinite(intensity);
+  };
+  std::vector<double> source_values(zncc_residual_en ? patch_size_total : 0);
+  std::vector<double> target_values(zncc_residual_en ? patch_size_total : 0);
+  for (int k = 0; k < patch_size_total; ++k)
+  {
+    V2D target_offset = (core_patch_offsets_[k] * static_cast<float>(scale)).cast<double>();
+    if (adaptive) target_offset *= pair.sampling_pitch;
+    const V2D source_offset = source_from_target * target_offset;
+    pose_affine_warp::PoseJacobian shape;
+    if (mode == PoseAffineMode::Pose)
+    {
+      const V2D fixed = pair.pose_affine_seed_inverse * target_offset;
+      const V2D source_coordinate = source_affine_inverse * fixed;
+      target_offset = relative_affine * fixed;
+      shape = source_coordinate.x() * (target_affine.column_jacobians[0] - relative_affine * source_affine.column_jacobians[0]) +
+              source_coordinate.y() * (target_affine.column_jacobians[1] - relative_affine * source_affine.column_jacobians[1]);
+      if (!shape.allFinite()) return false;
+    }
+    float source_value, target_value;
+    if (!sample(source, source_track, adaptive ? &pair.adaptive_source_supports[level] : nullptr,
+                source_offset, nullptr, source_value) ||
+        !sample(target, target_track, adaptive ? &pair.adaptive_target_supports[level] : nullptr,
+                target_offset, mode == PoseAffineMode::Pose ? &shape : nullptr, target_value)) return false;
+    if (zncc_residual_en)
+    {
+      source_values[k] = source_value;
+      target_values[k] = target_value;
+    }
+    else if (!std::isfinite(value.inv_expo_time[source.camera_id] * source_value -
+                           value.inv_expo_time[target.camera_id] * target_value)) return false;
+  }
+  if (zncc_residual_en)
+  {
+    Eigen::VectorXd normalized;
+    if (!normalizePatchValues(source_values, zncc_min_std, normalized) ||
+        !normalizePatchValues(target_values, zncc_min_std, normalized)) return false;
+  }
+  return true;
+}
+
+VIOManager::PoseAffineLevelPlan VIOManager::buildPoseAffineLevelPlan(int level, const StatesGroup &base)
+{
+  PoseAffineLevelPlan plan;
+  plan.historical.resize(cameras_.size());
+  plan.pairs.assign(current_cross_camera_pairs_.size(), PoseAffineMode::Skip);
+  for (PerCameraData &ctx : cameras_) updateFrameState(ctx, base);
+  for (size_t camera_index = 0; camera_index < cameras_.size(); ++camera_index)
+  {
+    const PerCameraData &ctx = cameras_[camera_index];
+    auto &modes = plan.historical[camera_index];
+    modes.assign(std::max(0, ctx.total_points), PoseAffineMode::Skip);
+    if (level < 0 || ctx.visual_submap == nullptr) continue;
+    const auto &map = *ctx.visual_submap;
+    for (int i = 0; i < ctx.total_points; ++i)
+    {
+      if (i < static_cast<int>(map.level_active.size()) &&
+          (level >= static_cast<int>(map.level_active[i].size()) || !map.level_active[i][level])) continue;
+      // Preserve SCPS and shadow observations; only the added pose deformation
+      // falls back, and the selected model stays fixed throughout this level.
+      if (poseAffineHistoricalSamplesValid(level, ctx, i, base, PoseAffineMode::Pose))
+        modes[i] = PoseAffineMode::Pose;
+      else if (poseAffineHistoricalSamplesValid(level, ctx, i, base, PoseAffineMode::Legacy))
+        modes[i] = PoseAffineMode::Legacy;
     }
   }
-  for (const CurrentCrossCameraPair &pair : current_cross_camera_pairs_)
+  for (size_t i = 0; i < current_cross_camera_pairs_.size(); ++i)
   {
-    if (!valid) break;
-    if (!pair.accepted || !pair.source_pose_affine || !pair.target_pose_affine ||
-        level >= static_cast<int>(pair.level_active.size()) || !pair.level_active[level]) continue;
-    const PerCameraData &source = cameras_[pair.source_camera_id];
-    const PerCameraData &target = cameras_[pair.target_camera_id];
-    const auto &source_track = source.visual_submap->virtual_track_patches[pair.source_submap_index];
-    const auto &target_track = target.visual_submap->virtual_track_patches[pair.target_submap_index];
-    pose_affine_warp::Evaluation source_affine, target_affine;
-    if (!evaluatePoseAffineTrack(*pair.source_pose_affine, candidate, source_affine) ||
-        !evaluatePoseAffineTrack(*pair.target_pose_affine, candidate, target_affine) ||
-        std::fabs(source_affine.affine.determinant()) <= 1.0e-9)
+    const auto &pair = current_cross_camera_pairs_[i];
+    if (level < 0 || !pair.accepted || level >= static_cast<int>(pair.level_active.size()) || !pair.level_active[level])
+      continue;
+    if (poseAffinePairSamplesValid(level, pair, base, PoseAffineMode::Pose)) plan.pairs[i] = PoseAffineMode::Pose;
+    else if (poseAffinePairSamplesValid(level, pair, base, PoseAffineMode::Legacy)) plan.pairs[i] = PoseAffineMode::Legacy;
+  }
+  for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
+  return plan;
+}
+
+bool VIOManager::poseAffineSamplesValid(int level, const StatesGroup &candidate, const PoseAffineLevelPlan &plan,
+                                       const std::vector<std::vector<uint8_t>> &accepted_history,
+                                       const std::vector<uint8_t> &accepted_pairs)
+{
+  // A trial must preserve every sample actually assembled into its solve,
+  // including fixed Legacy fallbacks. It cannot choose a new model or mask.
+  bool valid = true;
+  for (PerCameraData &ctx : cameras_) updateFrameState(ctx, candidate);
+  for (size_t camera_index = 0; valid && camera_index < accepted_history.size(); ++camera_index)
+    for (size_t i = 0; valid && i < accepted_history[camera_index].size(); ++i)
     {
-      valid = false;
-      break;
+      if (!accepted_history[camera_index][i]) continue;
+      valid = camera_index < cameras_.size() && camera_index < plan.historical.size() &&
+          i < plan.historical[camera_index].size() &&
+          poseAffineHistoricalSamplesValid(level, cameras_[camera_index], static_cast<int>(i), candidate,
+                                            plan.historical[camera_index][i]);
     }
-    const Matrix2d deformation = target_affine.affine * source_affine.affine.inverse() * pair.pose_affine_seed_inverse;
-    const V3D ps = source_track.R_vcur_from_ccur_seed * (source.Rcw * pair.point->pos_ + source.Pcw);
-    const V3D pt = target_track.R_vcur_from_ccur_seed * (target.Rcw * pair.point->pos_ + target.Pcw);
-    if (!ps.allFinite() || !pt.allFinite() || ps.z() <= virtual_min_z || pt.z() <= virtual_min_z)
-    {
-      valid = false;
-      break;
-    }
-    const V2D source_center = virtualProject(ps), target_center = virtualProject(pt);
-    const int exponent = level + pair.search_level;
-    if (exponent < 0 || exponent >= 30) { valid = false; break; }
-    const int scale = 1 << exponent;
-    const bool adaptive = virtual_adaptive_sampling_en &&
-        level < static_cast<int>(pair.adaptive_source_supports.size()) &&
-        level < static_cast<int>(pair.adaptive_target_supports.size());
-    const Matrix2d source_from_target = pair.A_target_source.inverse();
-    for (int k = 0; k < patch_size_total; ++k)
-    {
-      V2D offset = (core_patch_offsets_[k] * static_cast<float>(scale)).cast<double>();
-      if (adaptive) offset *= pair.sampling_pitch;
-      float source_value, target_value;
-      V2D source_gradient, target_gradient;
-      const V2D source_px = source_center + source_from_target * offset;
-      const V2D target_px = target_center + deformation * offset;
-      valid = adaptive
-          ? sampleAdaptiveVirtualValueAndGradient(pair.adaptive_source_supports[level], source_px,
-                pair.adaptive_source_supports[level].grid_step, source_value, source_gradient) &&
-            sampleAdaptiveVirtualValueAndGradient(pair.adaptive_target_supports[level], target_px,
-                pair.adaptive_target_supports[level].grid_step, target_value, target_gradient)
-          : sampleVirtualValueAndGradient(source_track.cur_support, source_px, scale, source_value, source_gradient) &&
-            sampleVirtualValueAndGradient(target_track.cur_support, target_px, scale, target_value, target_gradient);
-      if (!valid) break;
-    }
+  for (size_t i = 0; valid && i < accepted_pairs.size(); ++i)
+  {
+    if (!accepted_pairs[i]) continue;
+    valid = i < current_cross_camera_pairs_.size() && i < plan.pairs.size() &&
+        poseAffinePairSamplesValid(level, current_cross_camera_pairs_[i], candidate, plan.pairs[i]);
   }
   for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
   return valid;
@@ -7645,7 +7795,7 @@ bool VIOManager::referenceUncertaintyJacobian(
 
 void VIOManager::computeJacobianAndUpdateEKF()
 {
-  pose_affine_update_rejected_ = false;
+  pose_affine_evidence_valid_.clear();
   compute_jacobian_time = update_ekf_time = 0.0;
   vio_linearized_residual_count_ = 0;
   int invalid_patch_covariances = 0;
@@ -7666,6 +7816,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
     results.resize(std::max(0, camera.total_points));
     for (auto &result : results) result.resetFrame();
   }
+  if (virtual_pose_affine_en)
+  {
+    pose_affine_evidence_valid_.resize(cameras_.size());
+    for (const PerCameraData &camera : cameras_)
+      pose_affine_evidence_valid_[camera.camera_id].assign(std::max(0, camera.total_points), 0);
+  }
+  int pose_affine_levels = 0, pose_affine_fallback_levels = 0, pose_affine_excluded_levels = 0;
+  int pose_affine_local_failures = 0, pose_affine_rejected_steps = 0;
   const double measurement_cov = photometricNoiseCovariance();
   if (!std::isfinite(measurement_cov) || measurement_cov <= 0.0)
     throw std::runtime_error("photometric residual covariance must be finite and positive");
@@ -7716,14 +7874,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
   const bool allow_extrinsic_translation = online_extrinsic_active && online_extrinsic_trans_en;
   const StatesGroup state_before_visual_update = *state;
   const Eigen::MatrixXd cov_before_visual_update = state->cov;
-  auto reject_pose_affine_trial = [&]() {
-    pose_affine_update_rejected_ = true;
-    *state = state_before_visual_update;
-    G.setZero();
-    syncCameraExtrinsicsFromState(*state);
-    for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
-    printf("[ VIO Pose Affine ] visual update rejected: a fixed patch sample left valid support.\n");
-  };
   std::vector<uint8_t> final_active_extrinsic_rot(state->num_cameras, 0);
   std::vector<uint8_t> final_active_extrinsic_trans(state->num_cameras, 0);
   std::vector<uint8_t> final_active_time_groups(state->num_time_offset_groups, 0);
@@ -7772,14 +7922,85 @@ void VIOManager::computeJacobianAndUpdateEKF()
   long long rollback_usage_final_residuals_cross = usage_final_residuals_cross;
   long long rollback_usage_final_residuals_current_cross = usage_final_residuals_current_cross;
 
+  // One checkpoint describes one accepted mean, gain, covariance and set of
+  // diagnostics. Rejecting a proposal must not erase earlier visual updates.
+  auto restore_update_checkpoint = [&](const StatesGroup &accepted_state) {
+    *state = accepted_state;
+    G = rollback_G;
+    final_active_extrinsic_rot = rollback_active_extrinsic_rot;
+    final_active_extrinsic_trans = rollback_active_extrinsic_trans;
+    final_active_time_groups = rollback_active_time_groups;
+    last_time_tracks = rollback_last_time_tracks;
+    last_time_avg_pixel_velocity = rollback_last_time_avg_pixel_velocity;
+    last_time_update_ms = rollback_last_time_update_ms;
+    last_extrinsic_rot_update_deg = rollback_last_extrinsic_rot_update_deg;
+    last_extrinsic_trans_update_cm = rollback_last_extrinsic_trans_update_cm;
+    last_max_rot_update_deg = rollback_last_max_rot_update_deg;
+    last_max_trans_update_cm = rollback_last_max_trans_update_cm;
+    last_max_time_update_ms = rollback_last_max_time_update_ms;
+    usage_final_h_base = rollback_usage_final_h_base;
+    usage_final_h_same = rollback_usage_final_h_same;
+    usage_final_h_cross = rollback_usage_final_h_cross;
+    usage_final_h_current_cross = rollback_usage_final_h_current_cross;
+    usage_final_patches_all = rollback_usage_final_patches_all;
+    usage_final_patches_same = rollback_usage_final_patches_same;
+    usage_final_patches_cross = rollback_usage_final_patches_cross;
+    usage_final_patches_current_cross = rollback_usage_final_patches_current_cross;
+    usage_final_residuals_all = rollback_usage_final_residuals_all;
+    usage_final_residuals_same = rollback_usage_final_residuals_same;
+    usage_final_residuals_cross = rollback_usage_final_residuals_cross;
+    usage_final_residuals_current_cross = rollback_usage_final_residuals_current_cross;
+    final_directional_result = rollback_directional_result;
+    final_posterior_covariance = rollback_posterior_covariance;
+    syncCameraExtrinsicsFromState(*state);
+    if (virtual_pose_affine_en)
+      for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
+  };
+
   for (int level = patch_pyrimid_level - 1; level >= 0; --level)
   {
     StatesGroup old_state = *state;
     if (inverse_composition_en) buildFixedTemplateGradientCache(level);
+    PoseAffineLevelPlan pose_affine_plan;
+    std::vector<std::vector<uint8_t>> accepted_history, previous_accepted_history;
+    std::vector<uint8_t> accepted_pairs, previous_accepted_pairs;
+    bool has_previous_observation_set = false;
+    if (virtual_pose_affine_en)
+    {
+      pose_affine_plan = buildPoseAffineLevelPlan(level, *state);
+      accepted_history.resize(pose_affine_plan.historical.size());
+      for (size_t camera_id = 0; camera_id < pose_affine_plan.historical.size(); ++camera_id)
+      {
+        const auto &modes = pose_affine_plan.historical[camera_id];
+        accepted_history[camera_id].assign(modes.size(), 0);
+        for (const auto mode : modes)
+        {
+          if (mode == PoseAffineMode::Pose) ++pose_affine_levels;
+          else if (mode == PoseAffineMode::Legacy) ++pose_affine_fallback_levels;
+          else ++pose_affine_excluded_levels;
+        }
+      }
+      accepted_pairs.assign(pose_affine_plan.pairs.size(), 0);
+      for (const auto mode : pose_affine_plan.pairs)
+      {
+        if (mode == PoseAffineMode::Pose) ++pose_affine_levels;
+        else if (mode == PoseAffineMode::Legacy) ++pose_affine_fallback_levels;
+        else ++pose_affine_excluded_levels;
+      }
+    }
     double last_error = std::numeric_limits<double>::max();
     for (int iteration = 0; iteration < max_iterations; ++iteration)
     {
-      bool pose_affine_iteration_valid = true;
+      std::vector<int> accepted_time_tracks;
+      std::vector<double> accepted_time_pixel_velocity;
+      if (virtual_pose_affine_en)
+      {
+        // Group activation below writes these diagnostics before the solve.
+        accepted_time_tracks = last_time_tracks;
+        accepted_time_pixel_velocity = last_time_avg_pixel_velocity;
+        for (auto &mask : accepted_history) std::fill(mask.begin(), mask.end(), 0);
+        std::fill(accepted_pairs.begin(), accepted_pairs.end(), 0);
+      }
       const double linearize_start = omp_get_wtime();
       const int full_state_dim = state->stateDim();
       const Eigen::MatrixXd iteration_prior_cov = state_before_visual_update.covarianceAt(*state);
@@ -8041,6 +8262,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
           {
             VisualPoint *point = ctx.visual_submap->voxel_points[point_index];
             if (point == nullptr) continue;
+            if (virtual_pose_affine_en &&
+                (ctx.camera_id >= static_cast<int>(pose_affine_plan.historical.size()) ||
+                 point_index >= static_cast<int>(pose_affine_plan.historical[ctx.camera_id].size()) ||
+                 pose_affine_plan.historical[ctx.camera_id][point_index] == PoseAffineMode::Skip))
+              continue;
             if (point_index < static_cast<int>(ctx.visual_submap->level_active.size()) &&
                 (level >= static_cast<int>(ctx.visual_submap->level_active[point_index].size()) ||
                  ctx.visual_submap->level_active[point_index][level] == 0))
@@ -8104,7 +8330,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
               ++result.linearized;
               const double weight = normalized_patch_weight *
                   (tukey_robust_en ? tukeySqrtWeight(residual, outlier_threshold) : 1.0);
-              if (weight < 0.0 || !std::isfinite(weight) || !std::isfinite(residual) || !jacobian.allFinite()) return;
+              if (weight < 0.0 || !std::isfinite(weight) || !std::isfinite(residual) || !jacobian.allFinite())
+              {
+                if (virtual_pose_affine_en) result.pose_affine_invalid = true;
+                return;
+              }
               patch_workspace.motion.row(local_dof) = jacobian.head<9>().transpose();
               patch_workspace.camera.row(local_dof) = jacobian.tail(patch_dim - 9).transpose();
               patch_residual[local_dof] = residual;
@@ -8127,8 +8357,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
               ++result.linearized;
               const double weight = normalized_patch_weight *
                   (tukey_robust_en ? tukeySqrtWeight(residual, outlier_threshold) : 1.0);
-              if (weight < 0.0 || !std::isfinite(weight) || !std::isfinite(residual)) return;
-              if (!jacobian.allFinite()) return;
+              if (weight < 0.0 || !std::isfinite(weight) || !std::isfinite(residual) || !jacobian.allFinite())
+              {
+                if (virtual_pose_affine_en) result.pose_affine_invalid = true;
+                return;
+              }
               patch_workspace.motion.row(local_dof) = jacobian.motion.transpose();
               patch_workspace.camera.row(local_dof) = jacobian.camera.transpose();
               patch_residual[local_dof] = residual;
@@ -8283,9 +8516,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
               {
                 const V3D point_v = track.R_vcur_from_ccur_seed * point_c;
                 if (point_v[2] <= virtual_min_z ||
-                    (virtual_pose_affine_en && track.pose_affine && !point_v.allFinite()))
+                    (virtual_pose_affine_en && !point_v.allFinite()))
                 {
-                  if (virtual_pose_affine_en && track.pose_affine) result.pose_affine_invalid = true;
+                  if (virtual_pose_affine_en) result.pose_affine_invalid = true;
                   continue;
                 }
                 const V2D center = virtualProject(point_v);
@@ -8293,7 +8526,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 computeVirtualProjectionJacobian(point_v, Jdpi);
                 M3D point_c_hat;
                 point_c_hat << SKEW_SYM_MATRX(point_c);
-                const bool pose_affine_track = virtual_pose_affine_en && track.pose_affine;
+                const bool pose_affine_track = virtual_pose_affine_en &&
+                    pose_affine_plan.historical[ctx.camera_id][point_index] == PoseAffineMode::Pose;
                 pose_affine_warp::Evaluation pose_affine;
                 Matrix2d pose_deformation = Matrix2d::Identity();
                 if (pose_affine_track)
@@ -8348,7 +8582,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                                         current_value, image_gradient);
                     if (!current_gradient_ok)
                     {
-                      if (pose_affine_track)
+                      if (virtual_pose_affine_en)
                       {
                         result.pose_affine_invalid = true;
                         break;
@@ -8525,6 +8759,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
                   !accumulateNormalizedReferencePatch(normalized_current_values, normalized_current_jacobian))
                 continue;
             }
+            if (virtual_pose_affine_en && (result.pose_affine_invalid || local_dof != patch_size_total))
+            {
+              result.pose_affine_invalid = true;
+              continue;
+            }
             if (local_dof == 0) continue;
             const auto active_residual = patch_residual.head(local_dof);
             // Restore the original independent-pixel photometric likelihood.
@@ -8532,6 +8771,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
             // Reference/map uncertainty remains confined to the optional NIS gate.
             patch_workspace.compute(local_dof);
             result.information = static_cast<const split_state_math::PatchInformation &>(patch_workspace);
+            if (virtual_pose_affine_en &&
+                (!std::isfinite(patch_error) || !result.information.h_motion.allFinite() ||
+                 !result.information.g_motion.allFinite() || !result.information.h_cross.allFinite() ||
+                 !result.information.h_camera.allFinite() || !result.information.g_camera.allFinite()))
+            {
+              result.pose_affine_invalid = true;
+              continue;
+            }
             result.has_error = true;
             result.error = patch_error;
             result.dof = local_dof;
@@ -8624,22 +8871,28 @@ void VIOManager::computeJacobianAndUpdateEKF()
           const auto &result = patch_results[point_index];
           if (result.failure) std::rethrow_exception(result.failure);
           if (result.pose_affine_invalid &&
-              (point_index >= static_cast<int>(ctx.visual_submap->contributes_to_ekf.size()) ||
-               ctx.visual_submap->contributes_to_ekf[point_index] != 0))
-            pose_affine_iteration_valid = false;
+              virtual_pose_affine_en)
+          {
+            ++pose_affine_local_failures;
+            continue;
+          }
           vio_linearized_residual_count_ += result.linearized;
           visual_nis_worker_time_ += result.nis_time;
-          if (result.has_error) ctx.visual_submap->errors[point_index] = result.error;
+          if (result.has_error && !virtual_pose_affine_en)
+            ctx.visual_submap->errors[point_index] = result.error;
           if (result.invalid_covariance && invalid_patch_covariances++ == 0)
             printf("\033[1;31m[ COV VIO ] Invalid reference/landmark covariance: %s; patch rejected.\033[0m\n",
                    result.covariance_error.c_str());
           if (result.evidence && point_index < static_cast<int>(ctx.visual_submap->pose_information.size()))
           {
+            if (virtual_pose_affine_en)
+              pose_affine_evidence_valid_[ctx.camera_id][point_index] = 1;
             ctx.visual_submap->pose_information[point_index] = result.information.h_motion.topLeftCorner<6, 6>();
             ctx.visual_submap->observation_dof[point_index] = result.dof;
             ctx.visual_submap->observation_nis[point_index] = result.nis;
           }
           if (!result.accepted) continue;
+          if (virtual_pose_affine_en) accepted_history[ctx.camera_id][point_index] = 1;
           result.information.addTo(split_information);
           measurement_count += result.dof;
           error += result.error;
@@ -8681,8 +8934,13 @@ void VIOManager::computeJacobianAndUpdateEKF()
         // Otherwise GCC's whole-function register allocation and code layout can regress even when the
         // runtime option is disabled. The closure is constructed and called only on the enabled path.
         auto linearize_current_cross_camera = [&]() __attribute__((noinline)) {
-          for (CurrentCrossCameraPair &pair : current_cross_camera_pairs_)
+          for (size_t pair_index = 0; pair_index < current_cross_camera_pairs_.size(); ++pair_index)
           {
+        CurrentCrossCameraPair &pair = current_cross_camera_pairs_[pair_index];
+        if (virtual_pose_affine_en &&
+            (pair_index >= pose_affine_plan.pairs.size() ||
+             pose_affine_plan.pairs[pair_index] == PoseAffineMode::Skip))
+          continue;
         if (!pair.accepted || pair.point == nullptr || pair.point->pending_delete_ ||
             !pair.point->pos_.array().isFinite().all())
           continue;
@@ -8733,17 +8991,18 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                    level < static_cast<int>(pair.adaptive_target_supports.size());
 
         const bool pose_affine_pair = virtual_pose_affine_en &&
-                                      pair.source_pose_affine && pair.target_pose_affine;
+                                       pose_affine_plan.pairs[pair_index] == PoseAffineMode::Pose;
         pose_affine_warp::Evaluation source_affine, target_affine;
         Matrix2d relative_affine = Matrix2d::Identity();
         Matrix2d source_affine_inverse = Matrix2d::Identity();
         if (pose_affine_pair)
         {
-          if (!evaluatePoseAffineTrack(*pair.source_pose_affine, *state, source_affine) ||
+          if (!pair.source_pose_affine || !pair.target_pose_affine ||
+              !evaluatePoseAffineTrack(*pair.source_pose_affine, *state, source_affine) ||
               !evaluatePoseAffineTrack(*pair.target_pose_affine, *state, target_affine) ||
               std::fabs(source_affine.affine.determinant()) <= 1.0e-9)
           {
-            pose_affine_iteration_valid = false;
+            ++pose_affine_local_failures;
             continue;
           }
           source_affine_inverse = source_affine.affine.inverse();
@@ -8887,6 +9146,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
         };
 
         Eigen::MatrixXd pair_hessian = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
+        Eigen::VectorXd pair_gradient;
+        if (virtual_pose_affine_en) pair_gradient = Eigen::VectorXd::Zero(solve_dim);
         int pair_residuals = 0;
         double pair_error = 0.0;
         std::vector<double> source_values;
@@ -8926,9 +9187,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
               !linearizeCurrentSample(target, target_track, target_offset, target_value, target_jacobian,
                                       pose_affine_pair ? &offset_jacobian : nullptr))
           {
-            if (pose_affine_pair)
+            if (virtual_pose_affine_en)
             {
-              pose_affine_iteration_valid = false;
+              complete_pair_patch = false;
               break;
             }
             if (zncc_residual_en)
@@ -8954,13 +9215,33 @@ void VIOManager::computeJacobianAndUpdateEKF()
           const double residual = sqrt_weight * sqrt_robust_weight * raw_residual;
           const Eigen::VectorXd jacobian =
               sqrt_weight * sqrt_robust_weight * (source_jacobian - target_jacobian);
-          hessian.noalias() += jacobian * jacobian.transpose();
-          gradient.noalias() += jacobian * residual;
+          if (virtual_pose_affine_en)
+          {
+            if (!std::isfinite(residual) || !jacobian.allFinite())
+            {
+              complete_pair_patch = false;
+              break;
+            }
+            pair_gradient.noalias() += jacobian * residual;
+          }
+          else
+          {
+            hessian.noalias() += jacobian * jacobian.transpose();
+            gradient.noalias() += jacobian * residual;
+          }
           pair_hessian.noalias() += jacobian * jacobian.transpose();
           pair_error += residual * residual;
           ++pair_residuals;
-          ++vio_linearized_residual_count_;
-          ++measurement_count;
+          if (!virtual_pose_affine_en)
+          {
+            ++vio_linearized_residual_count_;
+            ++measurement_count;
+          }
+        }
+        if (virtual_pose_affine_en && !complete_pair_patch)
+        {
+          ++pose_affine_local_failures;
+          continue;
         }
         if (zncc_residual_en)
         {
@@ -8973,7 +9254,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
                                           normalized_source, normalized_source_jacobian) ||
               !normalizePatchWithJacobian(target_values, target_jacobians, zncc_min_std,
                                           normalized_target, normalized_target_jacobian))
+          {
+            if (virtual_pose_affine_en) ++pose_affine_local_failures;
             continue;
+          }
           Eigen::VectorXd residuals = normalized_source - normalized_target;
           Eigen::MatrixXd jacobians = normalized_source_jacobian - normalized_target_jacobian;
           const double sqrt_robust_weight =
@@ -8989,16 +9273,48 @@ void VIOManager::computeJacobianAndUpdateEKF()
             const Eigen::VectorXd jacobian =
                 combined_sqrt_weight * jacobians.row(row).transpose();
             const double residual = combined_sqrt_weight * residuals[row];
-            hessian.noalias() += jacobian * jacobian.transpose();
-            gradient.noalias() += jacobian * residual;
+            if (virtual_pose_affine_en)
+            {
+              if (!std::isfinite(residual) || !jacobian.allFinite())
+              {
+                complete_pair_patch = false;
+                break;
+              }
+              pair_gradient.noalias() += jacobian * residual;
+            }
+            else
+            {
+              hessian.noalias() += jacobian * jacobian.transpose();
+              gradient.noalias() += jacobian * residual;
+            }
             pair_hessian.noalias() += jacobian * jacobian.transpose();
             pair_error += residual * residual;
             ++pair_residuals;
-            ++vio_linearized_residual_count_;
-            ++measurement_count;
+            if (!virtual_pose_affine_en)
+            {
+              ++vio_linearized_residual_count_;
+              ++measurement_count;
+            }
           }
         }
         if (pair_residuals <= 0) continue;
+        if (virtual_pose_affine_en)
+        {
+          // Commit one complete pair so a failed sample cannot leave partial
+          // information or a mismatched error/count in the joint update.
+          if (!complete_pair_patch || pair_residuals != patch_size_total ||
+              !pair_hessian.allFinite() || !pair_gradient.allFinite() ||
+              !std::isfinite(pair_error))
+          {
+            ++pose_affine_local_failures;
+            continue;
+          }
+          hessian.noalias() += pair_hessian;
+          gradient.noalias() += pair_gradient;
+          measurement_count += pair_residuals;
+          vio_linearized_residual_count_ += pair_residuals;
+          accepted_pairs[pair_index] = 1;
+        }
         error += pair_error;
         if (usage_stats_en)
         {
@@ -9015,11 +9331,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
         linearize_current_cross_camera();
       }
 
-      if (virtual_pose_affine_en && !pose_affine_iteration_valid)
-      {
-        reject_pose_affine_trial();
-        return;
-      }
       if (usage_stats_en)
       {
         usage_effective_h_all = usage_iter_h_all;
@@ -9146,41 +9457,47 @@ void VIOManager::computeJacobianAndUpdateEKF()
         }
       }
       compute_jacobian_time += omp_get_wtime() - linearize_start;
-      if (measurement_count == 0) break;
+      if (measurement_count == 0)
+      {
+        if (virtual_pose_affine_en)
+        {
+          last_time_tracks = accepted_time_tracks;
+          last_time_avg_pixel_velocity = accepted_time_pixel_velocity;
+        }
+        break;
+      }
+      if (virtual_pose_affine_en &&
+          (!has_previous_observation_set || accepted_history != previous_accepted_history ||
+           accepted_pairs != previous_accepted_pairs))
+      {
+        // Local exclusions and existing gates may change membership. Never
+        // compare mean costs computed from different observation sets.
+        last_error = std::numeric_limits<double>::max();
+      }
       error /= measurement_count;
       if (error > last_error)
       {
-        *state = old_state;
-        G = rollback_G;
-        final_active_extrinsic_rot = rollback_active_extrinsic_rot;
-        final_active_extrinsic_trans = rollback_active_extrinsic_trans;
-        final_active_time_groups = rollback_active_time_groups;
-        last_time_tracks = rollback_last_time_tracks;
-        last_time_avg_pixel_velocity = rollback_last_time_avg_pixel_velocity;
-        last_time_update_ms = rollback_last_time_update_ms;
-        last_extrinsic_rot_update_deg = rollback_last_extrinsic_rot_update_deg;
-        last_extrinsic_trans_update_cm = rollback_last_extrinsic_trans_update_cm;
-        last_max_rot_update_deg = rollback_last_max_rot_update_deg;
-        last_max_trans_update_cm = rollback_last_max_trans_update_cm;
-        last_max_time_update_ms = rollback_last_max_time_update_ms;
-        usage_final_h_base = rollback_usage_final_h_base;
-        usage_final_h_same = rollback_usage_final_h_same;
-        usage_final_h_cross = rollback_usage_final_h_cross;
-        usage_final_h_current_cross = rollback_usage_final_h_current_cross;
-        usage_final_patches_all = rollback_usage_final_patches_all;
-        usage_final_patches_same = rollback_usage_final_patches_same;
-        usage_final_patches_cross = rollback_usage_final_patches_cross;
-        usage_final_patches_current_cross = rollback_usage_final_patches_current_cross;
-        usage_final_residuals_all = rollback_usage_final_residuals_all;
-        usage_final_residuals_same = rollback_usage_final_residuals_same;
-        usage_final_residuals_cross = rollback_usage_final_residuals_cross;
-        usage_final_residuals_current_cross = rollback_usage_final_residuals_current_cross;
-        final_directional_result = rollback_directional_result;
-        final_posterior_covariance = rollback_posterior_covariance;
-        syncCameraExtrinsicsFromState(*state);
+        restore_update_checkpoint(old_state);
         break;
       }
 
+      if (virtual_pose_affine_en)
+      {
+        // Publish per-patch errors only after this state passes the cost test.
+        // A rejected trial must not leave errors from a discarded mean in MM.
+        for (PerCameraData &camera : cameras_)
+        {
+          if (camera.visual_submap == nullptr) continue;
+          const auto &results = visual_patch_results_[camera.camera_id];
+          const size_t count = std::min(results.size(), camera.visual_submap->errors.size());
+          for (size_t i = 0; i < count; ++i)
+            if (results[i].has_error && !results[i].pose_affine_invalid)
+              camera.visual_submap->errors[i] = results[i].error;
+        }
+        previous_accepted_history = accepted_history;
+        previous_accepted_pairs = accepted_pairs;
+        has_previous_observation_set = true;
+      }
       old_state = *state;
       last_error = error;
       const double update_start = omp_get_wtime();
@@ -9219,8 +9536,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
       rollback_active_extrinsic_rot = final_active_extrinsic_rot;
       rollback_active_extrinsic_trans = final_active_extrinsic_trans;
       rollback_active_time_groups = final_active_time_groups;
-      rollback_last_time_tracks = last_time_tracks;
-      rollback_last_time_avg_pixel_velocity = last_time_avg_pixel_velocity;
+      rollback_last_time_tracks = virtual_pose_affine_en ? accepted_time_tracks : last_time_tracks;
+      rollback_last_time_avg_pixel_velocity = virtual_pose_affine_en
+          ? accepted_time_pixel_velocity : last_time_avg_pixel_velocity;
       rollback_last_time_update_ms = last_time_update_ms;
       rollback_last_extrinsic_rot_update_deg = last_extrinsic_rot_update_deg;
       rollback_last_extrinsic_trans_update_cm = last_extrinsic_trans_update_cm;
@@ -9345,10 +9663,15 @@ void VIOManager::computeJacobianAndUpdateEKF()
           }
         }
       }
-      if (virtual_pose_affine_en && !poseAffineSamplesValid(level, *state + solution))
+      if (virtual_pose_affine_en &&
+          !poseAffineSamplesValid(level, *state + solution, pose_affine_plan, accepted_history, accepted_pairs))
       {
-        reject_pose_affine_trial();
-        return;
+        ++pose_affine_rejected_steps;
+        restore_update_checkpoint(old_state);
+        update_ekf_time += omp_get_wtime() - update_start;
+        // Only this proposal is rejected. Finalize its accepted predecessor,
+        // then let the next, finer level build its own modes and valid set.
+        break;
       }
       final_directional_result = iteration_directional_result;
       final_posterior_covariance = state->resetCovariance(covariance_update.covariance, solution);
@@ -9383,6 +9706,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
         break;
     }
   }
+  if (virtual_pose_affine_en)
+    printf("[ VIO Pose Affine ] pose_levels=%d fallback_levels=%d excluded_levels=%d local_failures=%d rejected_steps=%d\n",
+           pose_affine_levels, pose_affine_fallback_levels, pose_affine_excluded_levels,
+           pose_affine_local_failures, pose_affine_rejected_steps);
   state->cov = final_posterior_covariance.rows() == state->stateDim()
                    ? final_posterior_covariance : cov_before_visual_update;
   if (directional_update_en)
@@ -10016,6 +10343,11 @@ void VIOManager::updateManagedObservationEvidence(PerCameraData &ctx)
     VisualPoint *point = ctx.visual_submap->voxel_points[i];
     Feature *reference = ctx.visual_submap->reference_features[i];
     if (point == nullptr || reference == nullptr || point->pending_delete_ || reference->pending_delete_) continue;
+    // A geometric/sampling failure is not evidence that a reference is bad.
+    if (virtual_pose_affine_en &&
+        (ctx.camera_id >= static_cast<int>(pose_affine_evidence_valid_.size()) ||
+         i >= static_cast<int>(pose_affine_evidence_valid_[ctx.camera_id].size()) ||
+         !pose_affine_evidence_valid_[ctx.camera_id][i])) continue;
     if (visual_map_manage_shadow_en &&
         (shadow_retired_point_suggestions_.count(point->point_id_) != 0 ||
          shadow_retired_ref_suggestions_.count(reference->ref_id_) != 0))
@@ -12747,7 +13079,7 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   // fflush(stdout);
   const double ekf_end = omp_get_wtime();
 
-  if (visual_map_manage_en && !pose_affine_update_rejected_)
+  if (visual_map_manage_en)
     for (PerCameraData &ctx : cameras_) updateManagedObservationEvidence(ctx);
 
   if (visual_ref_post_ekf_build_en)
