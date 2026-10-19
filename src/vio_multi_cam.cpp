@@ -5966,12 +5966,15 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       continue;
     }
     const V2D virtual_center = virtualProject(point_vcur);
+    // Match the legacy warped reference and solver coordinates. Adaptive
+    // supports already contain their full per-level grid_step.
+    const int legacy_base_scale = 1 << result.track.search_level;
     const bool current_core_ok = adaptive_ready
         ? sampleVirtualCorePatch(result.track.adaptive_supports[0], virtual_center, 1, current_core_all.data())
         : virtual_sparse_patch_en
         ? sampleSparseVirtualCorePatch(ctx, img, result.track.R_ccur_from_vcur_seed,
-                                       virtual_center, 1, current_core_all.data())
-        : sampleVirtualCorePatch(result.track.cur_support, virtual_center, 1, current_core_all.data());
+                                       virtual_center, legacy_base_scale, current_core_all.data())
+        : sampleVirtualCorePatch(result.track.cur_support, virtual_center, legacy_base_scale, current_core_all.data());
     result.level_valid[0] = current_core_ok ? 1 : 0;
     if (!current_core_ok)
     {
@@ -5983,7 +5986,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     {
       for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
       {
-        const int scale = 1 << pyramid_level;
+        const int scale = 1 << (pyramid_level + result.track.search_level);
         const bool level_ok = adaptive_ready
             ? sampleVirtualCorePatch(result.track.adaptive_supports[pyramid_level], virtual_center, 1,
                                       current_core_all.data() + patch_size_total * pyramid_level)
