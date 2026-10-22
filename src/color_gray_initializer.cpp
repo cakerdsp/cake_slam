@@ -10,6 +10,7 @@
 #include <cmath>
 #include <exception>
 #include <numeric>
+#include <sstream>
 #include <utility>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/features2d.hpp>
@@ -39,6 +40,45 @@ constexpr int kGridSize = 64;
 constexpr double kEps = 1.0e-9;
 
 #if CAKE_HAVE_OPENCV_SIFT || CAKE_HAVE_OPENCV_XFEATURES2D_SIFT
+enum Stage
+{
+  Seed, Roi, SiftSource, SiftTarget, Independent, Geometry, Sampling,
+  Ratio, Mutual, ChartMapping, Unique, Grid, Color, Fit
+};
+
+PairReport makePairReport(int source, int target)
+{
+  PairReport report;
+  report.source_camera = source;
+  report.target_camera = target;
+  const auto add = [&report](const char *name, const char *unit) {
+    StageReport stage;
+    stage.name = name;
+    stage.unit = unit;
+    report.stages.push_back(std::move(stage));
+  };
+  for (const char *name : {"seed", "roi", "sift_src", "sift_dst", "independent", "geometry", "rgb_region"})
+    add(name, "regions");
+  for (const char *name : {"ratio", "mutual", "tangent", "unique"}) add(name, "matches");
+  add("grid", "pixels");
+  add("color", "samples");
+  add("fit", "pairs");
+  return report;
+}
+
+bool reject(std::string &reason, const char *value)
+{
+  reason = value;
+  return false;
+}
+
+void record(StageReport &stage, bool passed, const std::string &reason)
+{
+  ++stage.entered;
+  if (passed) ++stage.passed;
+  else ++stage.rejected[reason];
+}
+
 cv::Ptr<cv::Feature2D> createSift()
 {
 #if CAKE_HAVE_OPENCV_SIFT
@@ -91,15 +131,16 @@ struct Chart
   }
 };
 
-bool makeChart(const CameraSnapshot &camera, const PlaneSeed &plane, Chart &chart)
+bool makeChart(const CameraSnapshot &camera, const PlaneSeed &plane, Chart &chart, std::string &reason)
 {
   const V3 p = camera.R_c_w * plane.point_w + camera.t_c_w;
-  if (!p.allFinite() || p.norm() <= kEps) return false;
+  if (!p.allFinite() || p.norm() <= kEps) return reject(reason, "invalid_camera_point");
   V2 raw;
-  if (!camera.project(p, raw) || !raw.allFinite()) return false;
+  if (!camera.project(p, raw) || !raw.allFinite()) return reject(reason, "center_projection_failed");
   const V3 z = p.normalized();
   const V3 back = camera.unproject(raw);
-  if (!back.allFinite() || back.norm() <= kEps || back.normalized().dot(z) < 0.999) return false;
+  if (!back.allFinite() || back.norm() <= kEps || back.normalized().dot(z) < 0.999)
+    return reject(reason, "projection_unprojection_inconsistent");
   V3 x = V3::UnitX() - z.x() * z;
   if (x.norm() < 0.1) x = V3::UnitY() - z.y() * z;
   x.normalize();
@@ -139,9 +180,9 @@ struct CropFeatures
 
 // This inexpensive stage runs for both cameras before either spends a SIFT
 // extraction budget. Invisible early seeds do not hide later shared seeds.
-bool prepareRegion(const CameraSnapshot &camera, const PlaneSeed &plane, CropFeatures &out)
+bool prepareRegion(const CameraSnapshot &camera, const PlaneSeed &plane, CropFeatures &out, std::string &reason)
 {
-  if (!makeChart(camera, plane, out.chart)) return false;
+  if (!makeChart(camera, plane, out.chart, reason)) return false;
   const V3 n = plane.normal_w.normalized();
   const V3 u = n.unitOrthogonal();
   const V3 v = n.cross(u);
@@ -149,19 +190,20 @@ bool prepareRegion(const CameraSnapshot &camera, const PlaneSeed &plane, CropFea
   V2 center;
   if (!camera.project(camera.R_c_w * plane.point_w + camera.t_c_w, center) ||
       !center.allFinite() || center.x() < 0.0 || center.y() < 0.0 ||
-      center.x() >= camera.bgr.cols || center.y() >= camera.bgr.rows) return false;
+      center.x() >= camera.bgr.cols || center.y() >= camera.bgr.rows) return reject(reason, "center_outside_image");
   for (int i = 0; i < 16; ++i)
   {
     const double angle = i * (2.0 * 3.14159265358979323846 / 16.0);
     const V3 p = plane.point_w + plane.radius * (std::cos(angle) * u + std::sin(angle) * v);
     V2 raw;
-    if (!camera.project(camera.R_c_w * p + camera.t_c_w, raw) || !raw.allFinite()) return false;
+    if (!camera.project(camera.R_c_w * p + camera.t_c_w, raw) || !raw.allFinite())
+      return reject(reason, "plane_boundary_projection_failed");
     // Guard conversion to OpenCV integer rectangles for malformed models.
-    if (raw.cwiseAbs().maxCoeff() > 1.0e6) return false;
+    if (raw.cwiseAbs().maxCoeff() > 1.0e6) return reject(reason, "plane_boundary_overflow");
     boundary.emplace_back(static_cast<float>(raw.x()), static_cast<float>(raw.y()));
   }
   cv::Rect roi = cv::boundingRect(boundary) & cv::Rect(0, 0, camera.bgr.cols, camera.bgr.rows);
-  if (roi.width < kMinCrop || roi.height < kMinCrop || !center.allFinite()) return false;
+  if (roi.width < kMinCrop || roi.height < kMinCrop || !center.allFinite()) return reject(reason, "crop_lt_48px");
   const int width = std::min(kMaxCrop, roi.width), height = std::min(kMaxCrop, roi.height);
   const int x = std::clamp(static_cast<int>(std::floor(center.x() - width * 0.5)), roi.x, roi.x + roi.width - width);
   const int y = std::clamp(static_cast<int>(std::floor(center.y() - height * 0.5)), roi.y, roi.y + roi.height - height);
@@ -171,7 +213,7 @@ bool prepareRegion(const CameraSnapshot &camera, const PlaneSeed &plane, CropFea
 
 bool extractFeatures(const CameraSnapshot &camera, const PlaneSeed &plane,
                      const cv::Ptr<cv::Feature2D> &sift, CropFeatures &out,
-                     const std::atomic<bool> &cancel)
+                     const std::atomic<bool> &cancel, std::string &reason)
 {
   const int width = out.roi.width, height = out.roi.height;
   const int x = out.roi.x, y = out.roi.y;
@@ -181,7 +223,7 @@ bool extractFeatures(const CameraSnapshot &camera, const PlaneSeed &plane,
   // not assume that the final cross-camera color weights are known.
   for (int row = 0; row < height; ++row)
   {
-    if (cancelled(cancel)) return false;
+    if (cancelled(cancel)) return reject(reason, "cancelled");
     for (int col = 0; col < width; ++col)
     {
       V2 q;
@@ -191,11 +233,14 @@ bool extractFeatures(const CameraSnapshot &camera, const PlaneSeed &plane,
   }
   out.support_mask = mask.clone();
   cv::erode(mask, mask, cv::Mat(), cv::Point(-1, -1), 4);
-  if (cancelled(cancel)) return false;
+  if (cancelled(cancel)) return reject(reason, "cancelled");
   sift->detectAndCompute(gray, mask, out.keys, out.descriptors);
-  if (cancelled(cancel)) return false;
+  if (cancelled(cancel)) return reject(reason, "cancelled");
   for (auto &key : out.keys) key.pt += cv::Point2f(static_cast<float>(x), static_cast<float>(y));
-  return out.keys.size() >= 16 && !out.descriptors.empty();
+  if (out.keys.size() < 16)
+    return reject(reason, cv::countNonZero(mask) == 0 ? "empty_sift_mask" : "keypoints_lt_16");
+  if (out.descriptors.empty()) return reject(reason, "empty_descriptors");
+  return true;
 }
 
 struct CachedFeatures
@@ -205,6 +250,8 @@ struct CachedFeatures
   bool region_valid = false;
   bool extracted = false;
   bool features_valid = false;
+  std::string region_reason;
+  std::string feature_reason;
 };
 
 struct FeatureCache
@@ -227,7 +274,7 @@ struct FeatureCache
     if (!entry.prepared)
     {
       entry.prepared = true;
-      entry.region_valid = prepareRegion(snapshot.cameras[camera], snapshot.planes[plane], entry.data);
+      entry.region_valid = prepareRegion(snapshot.cameras[camera], snapshot.planes[plane], entry.data, entry.region_reason);
     }
     return entry;
   }
@@ -238,10 +285,12 @@ struct FeatureCache
     if (entry.extracted) return entry.features_valid;
     entry.extracted = true;
     const int area = entry.data.roi.area();
-    if (!entry.region_valid || cancelled(cancel) ||
-        extracted_pixels[camera] + area > kMaxFullCropsPerCamera * kMaxCrop * kMaxCrop) return false;
+    if (!entry.region_valid) return reject(entry.feature_reason, "invalid_region");
+    if (cancelled(cancel)) return reject(entry.feature_reason, "cancelled");
+    if (extracted_pixels[camera] + area > kMaxFullCropsPerCamera * kMaxCrop * kMaxCrop)
+      return reject(entry.feature_reason, "camera_sift_pixel_budget");
     extracted_pixels[camera] += area;
-    entry.features_valid = extractFeatures(snapshot.cameras[camera], snapshot.planes[plane], sift, entry.data, cancel);
+    entry.features_valid = extractFeatures(snapshot.cameras[camera], snapshot.planes[plane], sift, entry.data, cancel, entry.feature_reason);
     if (!entry.features_valid) entry.data.support_mask.release();
     return entry.features_valid;
   }
@@ -254,7 +303,7 @@ struct Correspondence
   float descriptor_distance = 0.0f;
 };
 
-std::vector<Correspondence> match(const CropFeatures &source, const CropFeatures &target)
+std::vector<Correspondence> match(const CropFeatures &source, const CropFeatures &target, PairReport &report)
 {
   cv::BFMatcher matcher(cv::NORM_L2);
   std::vector<std::vector<cv::DMatch>> forward, reverse;
@@ -263,16 +312,27 @@ std::vector<Correspondence> match(const CropFeatures &source, const CropFeatures
   std::vector<Correspondence> pairs;
   for (const auto &two : forward)
   {
-    if (two.size() < 2 || !(two[0].distance < 0.75f * two[1].distance)) continue;
+    const bool ratio_ok = two.size() >= 2 && two[0].distance < 0.75f * two[1].distance;
+    record(report.stages[Ratio], ratio_ok, two.size() < 2 ? "fewer_than_2_neighbors" : "ratio_ge_0.75");
+    if (!ratio_ok) continue;
     const cv::DMatch &m = two[0];
-    if (m.trainIdx < 0 || m.trainIdx >= static_cast<int>(reverse.size())) continue;
+    if (m.trainIdx < 0 || m.trainIdx >= static_cast<int>(reverse.size()))
+    {
+      record(report.stages[Mutual], false, "invalid_reverse_index");
+      continue;
+    }
     const auto &back = reverse[m.trainIdx];
-    if (back.size() < 2 || back[0].trainIdx != m.queryIdx || !(back[0].distance < 0.75f * back[1].distance)) continue;
+    const bool mutual_ok = back.size() >= 2 && back[0].trainIdx == m.queryIdx && back[0].distance < 0.75f * back[1].distance;
+    record(report.stages[Mutual], mutual_ok, back.size() < 2 ? "fewer_than_2_reverse_neighbors" :
+           (back[0].trainIdx != m.queryIdx ? "not_mutual_best" : "reverse_ratio_ge_0.75"));
+    if (!mutual_ok) continue;
     Correspondence p;
     p.descriptor_distance = m.distance;
     p.source_raw = V2(source.keys[m.queryIdx].pt.x, source.keys[m.queryIdx].pt.y);
     p.target_raw = V2(target.keys[m.trainIdx].pt.x, target.keys[m.trainIdx].pt.y);
-    if (source.chart.toChart(p.source_raw, p.source) && target.chart.toChart(p.target_raw, p.target)) pairs.push_back(p);
+    const bool chart_ok = source.chart.toChart(p.source_raw, p.source) && target.chart.toChart(p.target_raw, p.target);
+    record(report.stages[ChartMapping], chart_ok, "tangent_mapping_failed");
+    if (chart_ok) pairs.push_back(p);
   }
   // SIFT may report several orientations/octaves at one location. Keep the
   // strongest descriptor match per spatial neighborhood in BOTH images so
@@ -288,6 +348,7 @@ std::vector<Correspondence> match(const CropFeatures &source, const CropFeatures
       return (p.source_raw - kept.source_raw).squaredNorm() < 4.0 ||
              (p.target_raw - kept.target_raw).squaredNorm() < 4.0;
     });
+    record(report.stages[Unique], !duplicate, "duplicate_within_2px");
     if (!duplicate) unique.push_back(p);
   }
   pairs.swap(unique);
@@ -315,30 +376,32 @@ bool planeHomography(const Chart &source, const Chart &target, const PlaneSeed &
 }
 
 bool fitResidual(const std::vector<Correspondence> &pairs, const M3 &prior,
-                 bool reverse, M3 &corrected, std::vector<unsigned char> &inliers)
+                 bool reverse, M3 &corrected, std::vector<unsigned char> &inliers, std::string &reason)
 {
   std::vector<cv::Point2f> predicted, observed;
   for (size_t i = 0; i < pairs.size(); ++i)
   {
     if (i % 4 == 0) continue; // independent geometry holdout
     V2 q;
-    if (!dehom(prior, reverse ? pairs[i].target : pairs[i].source, q)) return false;
+    if (!dehom(prior, reverse ? pairs[i].target : pairs[i].source, q)) return reject(reason, "prior_projection_failed");
     const V2 &target = reverse ? pairs[i].source : pairs[i].target;
     predicted.emplace_back(static_cast<float>(q.x()), static_cast<float>(q.y()));
     observed.emplace_back(static_cast<float>(target.x()), static_cast<float>(target.y()));
   }
-  if (predicted.size() < 12) return false;
+  if (predicted.size() < 12) return reject(reason, "training_matches_lt_12");
   cv::Mat mask;
   const cv::Mat affine = cv::estimateAffine2D(predicted, observed, mask, cv::RANSAC, 2.0, 1000, 0.995, 10);
-  if (affine.empty() || affine.rows != 2 || affine.cols != 3) return false;
+  if (affine.empty() || affine.rows != 2 || affine.cols != 3) return reject(reason, "ransac_no_affine");
   M3 residual = M3::Identity();
   for (int row = 0; row < 2; ++row)
     for (int col = 0; col < 3; ++col) residual(row, col) = affine.at<double>(row, col);
-  if (!residual.allFinite() || residual.topLeftCorner<2, 2>().determinant() <= 0.0) return false;
+  if (!residual.allFinite() || residual.topLeftCorner<2, 2>().determinant() <= 0.0)
+    return reject(reason, "invalid_affine_orientation");
   const Eigen::JacobiSVD<M2> svd(residual.topLeftCorner<2, 2>());
-  if (svd.singularValues().minCoeff() < 0.8 || svd.singularValues().maxCoeff() > 1.25) return false;
+  if (svd.singularValues().minCoeff() < 0.8 || svd.singularValues().maxCoeff() > 1.25)
+    return reject(reason, "affine_scale_outside_0.8_1.25");
   corrected = residual * prior;
-  if (!corrected.allFinite() || std::abs(corrected.determinant()) <= kEps) return false;
+  if (!corrected.allFinite() || std::abs(corrected.determinant()) <= kEps) return reject(reason, "singular_corrected_warp");
   inliers.assign(pairs.size(), 0);
   int index = 0, count = 0;
   for (size_t i = 0; i < pairs.size(); ++i)
@@ -348,7 +411,8 @@ bool fitResidual(const std::vector<Correspondence> &pairs, const M3 &prior,
     inliers[i] = good ? 1 : 0;
     count += good;
   }
-  return count >= 8;
+  if (count < 8) return reject(reason, "ransac_inliers_lt_8");
+  return true;
 }
 
 bool rawError(const Chart &target, const M3 &h, const V2 &source,
@@ -362,12 +426,14 @@ bool rawError(const Chart &target, const M3 &h, const V2 &source,
 
 bool verifyGeometry(const CropFeatures &source, const CropFeatures &target,
                     const std::vector<Correspondence> &pairs, const M3 &prior,
-                    M3 &forward, M3 &reverse, std::vector<cv::Point2f> &hull)
+                    M3 &forward, M3 &reverse, std::vector<cv::Point2f> &hull, std::string &reason)
 {
-  if (pairs.size() < 16) return false;
+  if (pairs.size() < 16) return reject(reason, "unique_matches_lt_16");
   std::vector<unsigned char> inlier_a, inlier_b;
-  if (!fitResidual(pairs, prior, false, forward, inlier_a) ||
-      !fitResidual(pairs, prior.inverse(), true, reverse, inlier_b)) return false;
+  if (!fitResidual(pairs, prior, false, forward, inlier_a, reason))
+  { reason = "forward_" + reason; return false; }
+  if (!fitResidual(pairs, prior.inverse(), true, reverse, inlier_b, reason))
+  { reason = "reverse_" + reason; return false; }
   std::vector<cv::Point2f> support;
   int validation_count = 0;
   double validation_error = 0.0;
@@ -376,11 +442,11 @@ bool verifyGeometry(const CropFeatures &source, const CropFeatures &target,
     const auto &p = pairs[i];
     double ea = 0.0, eb = 0.0;
     if (!rawError(target.chart, forward, p.source, p.target_raw, eb) ||
-        !rawError(source.chart, reverse, p.target, p.source_raw, ea)) return false;
+        !rawError(source.chart, reverse, p.target, p.source_raw, ea)) return reject(reason, "raw_reprojection_failed");
     if (i % 4 == 0)
     {
       // A held-out point is not silently dropped because it fits poorly.
-      if (ea > 2.0 || eb > 2.0) return false;
+      if (ea > 2.0 || eb > 2.0) return reject(reason, "holdout_error_gt_2px");
       validation_error += 0.5 * (ea + eb);
       ++validation_count;
     }
@@ -388,16 +454,19 @@ bool verifyGeometry(const CropFeatures &source, const CropFeatures &target,
     {
       V2 predicted, raw;
       if (!dehom(prior, p.source, predicted) || !target.chart.toRaw(predicted, raw) ||
-          (raw - p.target_raw).norm() > 12.0) return false;
+          (raw - p.target_raw).norm() > 12.0) return reject(reason, "prior_projection_invalid_or_error_gt_12px");
       support.emplace_back(static_cast<float>(p.target.x()), static_cast<float>(p.target.y()));
     }
   }
-  if (validation_count < 4 || validation_error / validation_count > 1.25 || support.size() < 8) return false;
+  if (validation_count < 4) return reject(reason, "holdout_count_lt_4");
+  if (validation_error / validation_count > 1.25) return reject(reason, "holdout_mean_gt_1.25px");
+  if (support.size() < 8) return reject(reason, "bidirectional_support_lt_8");
   cv::convexHull(support, hull);
-  if (hull.size() < 3 || std::abs(cv::contourArea(hull)) < 100.0) return false;
+  if (hull.size() < 3 || std::abs(cv::contourArea(hull)) < 100.0) return reject(reason, "hull_area_lt_100_or_degenerate");
   const cv::RotatedRect box = cv::minAreaRect(hull);
-  if (std::min(box.size.width, box.size.height) < 8.0 ||
-      std::max(box.size.width, box.size.height) > 8.0 * std::min(box.size.width, box.size.height)) return false;
+  if (std::min(box.size.width, box.size.height) < 8.0) return reject(reason, "hull_width_lt_8");
+  if (std::max(box.size.width, box.size.height) > 8.0 * std::min(box.size.width, box.size.height))
+    return reject(reason, "hull_aspect_gt_8");
   return true;
 }
 
@@ -479,36 +548,42 @@ void takeSamples(const CropFeatures &source, const CropFeatures &target,
                  const PlaneSeed &plane, const M3 &forward, const M3 &reverse,
                  const std::vector<cv::Point2f> &hull, const V3 &target_weights,
                  bool target_is_anchor, int region, std::vector<ColorSample> &samples,
-                 const std::atomic<bool> &cancel)
+                 const std::atomic<bool> &cancel, PairReport &report, std::string &reason)
 {
+  const size_t initial_samples = samples.size();
   const cv::Rect bounds = cv::boundingRect(hull);
   const V2 center(bounds.x + bounds.width * 0.5, bounds.y + bounds.height * 0.5);
   const M3 inverse = forward.inverse();
   M2 ja, jb;
-  if (!rawJacobian(source.chart, inverse, center, ja) || !rawJacobian(target.chart, M3::Identity(), center, jb)) return;
+  if (!rawJacobian(source.chart, inverse, center, ja) || !rawJacobian(target.chart, M3::Identity(), center, jb))
+  { reason = "center_jacobian_failed"; return; }
   const Eigen::JacobiSVD<M2> sa(ja), sb(jb);
   if (sa.singularValues().minCoeff() <= kEps || sb.singularValues().minCoeff() <= kEps ||
       sa.singularValues().maxCoeff() / sa.singularValues().minCoeff() > 2.0 ||
-      sb.singularValues().maxCoeff() / sb.singularValues().minCoeff() > 2.0) return;
+      sb.singularValues().maxCoeff() / sb.singularValues().minCoeff() > 2.0)
+  { reason = "singular_footprint_or_anisotropy_gt_2"; return; }
   const double native_step = std::max(1.0 / sa.singularValues().minCoeff(), 1.0 / sb.singularValues().minCoeff());
   const double step = std::max(native_step, std::max(bounds.width, bounds.height) / static_cast<double>(kGridSize - 1));
-  if (!std::isfinite(step) || step <= 0.0) return;
+  if (!std::isfinite(step) || step <= 0.0) { reason = "invalid_grid_step"; return; }
   const int width = std::min(kGridSize, static_cast<int>(std::floor(bounds.width / step)) + 1);
   const int height = std::min(kGridSize, static_cast<int>(std::floor(bounds.height / step)) + 1);
-  if (width < 16 || height < 16) return;
+  if (width < 16 || height < 16) { reason = "grid_side_lt_16"; return; }
   // A single local blur is inappropriate when the warp varies strongly.
   for (int corner = 0; corner < 4; ++corner)
   {
     const V2 q(bounds.x + ((corner & 1) ? bounds.width : 0), bounds.y + ((corner & 2) ? bounds.height : 0));
     M2 a, b;
-    if (!rawJacobian(source.chart, inverse, q, a) || !rawJacobian(target.chart, M3::Identity(), q, b) ||
-        (a - ja).norm() > 0.2 * ja.norm() || (b - jb).norm() > 0.2 * jb.norm()) return;
+    if (!rawJacobian(source.chart, inverse, q, a) || !rawJacobian(target.chart, M3::Identity(), q, b))
+    { reason = "corner_jacobian_failed"; return; }
+    if ((a - ja).norm() > 0.2 * ja.norm() || (b - jb).norm() > 0.2 * jb.norm())
+    { reason = "jacobian_variation_gt_20pct"; return; }
   }
 
   cv::Mat source_float, target_float, target_gray;
   int halo_a = 0, halo_b = 0;
-  if (!prepareImage(source.chart.camera->bgr(source.roi), maximumScale(ja) * step, source_float, halo_a)) return;
-  if (cancelled(cancel)) return;
+  if (!prepareImage(source.chart.camera->bgr(source.roi), maximumScale(ja) * step, source_float, halo_a))
+  { reason = "source_blur_sigma_invalid_or_gt_6"; return; }
+  if (cancelled(cancel)) { reason = "cancelled"; return; }
   const bool legacy_gray = target_is_anchor || (target_weights - defaultWeights()).squaredNorm() == 0.0;
   if (legacy_gray)
     target_gray = fixed_gray_image::convertFixedGray(target.chart.camera->bgr(target.roi));
@@ -517,36 +592,54 @@ void takeSamples(const CropFeatures &source, const CropFeatures &target,
     const auto lut = fixed_gray_image::prepareFixedGrayLut(target_weights);
     target_gray = fixed_gray_image::convertFixedGray(target.chart.camera->bgr(target.roi), &lut);
   }
-  if (!prepareImage(target_gray, maximumScale(jb) * step, target_float, halo_b)) return;
+  if (!prepareImage(target_gray, maximumScale(jb) * step, target_float, halo_b))
+  { reason = "target_blur_sigma_invalid_or_gt_6"; return; }
   const cv::Mat mask_a = rawSampleMask(source, halo_a), mask_b = rawSampleMask(target, halo_b);
-  if (cancelled(cancel)) return;
+  if (cancelled(cancel)) { reason = "cancelled"; return; }
+  // Fixed counters avoid allocating strings or updating maps per grid pixel.
+  enum GridReject { Hull, Inverse, SourcePlane, TargetPlane, SourceRaw, TargetRaw,
+                    CycleProjection, CycleError, Halo, SourceMask, TargetMask, GridRejectCount };
+  const char *grid_reasons[] = {"outside_hull", "inverse_projection", "source_plane_support", "target_plane_support",
+      "source_raw_projection", "target_raw_projection", "cycle_projection", "cycle_error_gt_1.5px",
+      "filter_halo_outside_crop", "source_raw_mask", "target_raw_mask"};
+  std::array<int, GridRejectCount> grid_rejected{};
+  const auto grid_check = [&grid_rejected](bool ok, GridReject cause) {
+    if (!ok) ++grid_rejected[cause];
+    return ok;
+  };
   cv::Mat map_a(height, width, CV_32FC2), map_b(height, width, CV_32FC2);
   cv::Mat valid(height, width, CV_8UC1, cv::Scalar(0));
   for (int row = 0; row < height; ++row)
   {
-    if (cancelled(cancel)) return;
+    if (cancelled(cancel)) { reason = "cancelled"; return; }
     for (int col = 0; col < width; ++col)
     {
       const V2 q(bounds.x + col * step, bounds.y + row * step);
       V2 a, b, local_a, cycle, cycle_raw;
-      bool ok = cv::pointPolygonTest(hull, cv::Point2f(static_cast<float>(q.x()), static_cast<float>(q.y())), false) >= 0.0;
-      ok = ok && dehom(inverse, q, local_a) && onPlaneSupport(source.chart, plane, local_a) &&
-           onPlaneSupport(target.chart, plane, q) && source.chart.toRaw(local_a, a) && target.chart.toRaw(q, b);
+      ++report.stages[Grid].entered;
+      bool ok = grid_check(cv::pointPolygonTest(hull, cv::Point2f(static_cast<float>(q.x()), static_cast<float>(q.y())), false) >= 0.0, Hull);
+      ok = ok && grid_check(dehom(inverse, q, local_a), Inverse) &&
+           grid_check(onPlaneSupport(source.chart, plane, local_a), SourcePlane) &&
+           grid_check(onPlaneSupport(target.chart, plane, q), TargetPlane) &&
+           grid_check(source.chart.toRaw(local_a, a), SourceRaw) && grid_check(target.chart.toRaw(q, b), TargetRaw);
       // Reverse fit is independent; inverse(forward) alone is not a test.
-      ok = ok && dehom(reverse, q, cycle) && source.chart.toRaw(cycle, cycle_raw) && (cycle_raw - a).norm() <= 1.5;
+      ok = ok && grid_check(dehom(reverse, q, cycle) && source.chart.toRaw(cycle, cycle_raw), CycleProjection) &&
+           grid_check((cycle_raw - a).norm() <= 1.5, CycleError);
       if (ok)
       {
         a -= V2(source.roi.x, source.roi.y);
         b -= V2(target.roi.x, target.roi.y);
-        ok = a.x() >= halo_a && a.y() >= halo_a && a.x() < source.roi.width - halo_a && a.y() < source.roi.height - halo_a &&
-             b.x() >= halo_b && b.y() >= halo_b && b.x() < target.roi.width - halo_b && b.y() < target.roi.height - halo_b;
-        ok = ok && validBilinearSupport(mask_a, a) && validBilinearSupport(mask_b, b);
+        ok = grid_check(a.x() >= halo_a && a.y() >= halo_a && a.x() < source.roi.width - halo_a && a.y() < source.roi.height - halo_a &&
+             b.x() >= halo_b && b.y() >= halo_b && b.x() < target.roi.width - halo_b && b.y() < target.roi.height - halo_b, Halo);
+        ok = ok && grid_check(validBilinearSupport(mask_a, a), SourceMask) && grid_check(validBilinearSupport(mask_b, b), TargetMask);
       }
       map_a.at<cv::Vec2f>(row, col) = ok ? cv::Vec2f(static_cast<float>(a.x()), static_cast<float>(a.y())) : cv::Vec2f(-1000.0f, -1000.0f);
       map_b.at<cv::Vec2f>(row, col) = ok ? cv::Vec2f(static_cast<float>(b.x()), static_cast<float>(b.y())) : cv::Vec2f(-1000.0f, -1000.0f);
-      if (ok) valid.at<unsigned char>(row, col) = 255;
+      if (ok) { valid.at<unsigned char>(row, col) = 255; ++report.stages[Grid].passed; }
     }
   }
+  for (int i = 0; i < GridRejectCount; ++i)
+    if (grid_rejected[i]) report.stages[Grid].rejected[grid_reasons[i]] += grid_rejected[i];
   cv::Mat rgb, gray;
   cv::remap(source_float, rgb, map_a, cv::Mat(), cv::INTER_LINEAR, cv::BORDER_CONSTANT);
   cv::remap(target_float, gray, map_b, cv::Mat(), cv::INTER_LINEAR, cv::BORDER_CONSTANT);
@@ -557,50 +650,81 @@ void takeSamples(const CropFeatures &source, const CropFeatures &target,
   cv::GaussianBlur(gray.mul(gray), gray_square_mean, cv::Size(11, 11), 1.5, 1.5);
   // All taps must be valid; BORDER_CONSTANT never becomes an observation.
   cv::erode(valid, valid, cv::Mat::ones(11, 11, CV_8U), cv::Point(-1, -1), 1, cv::BORDER_CONSTANT, cv::Scalar(0));
+  enum ColorReject { FilterSupport, TargetFinite, TargetRange, TargetVariance,
+                     SourceFinite, SourceRange, SourceVariance, ColorRejectCount };
+  const char *color_reasons[] = {"invalid_11x11_support", "target_nonfinite", "target_mean_outside_4_251",
+      "target_variance_gt_36_or_nan", "source_nonfinite", "source_mean_outside_4_251", "source_variance_gt_36_or_nan"};
+  std::array<int, ColorRejectCount> color_rejected{};
+  const auto color_check = [&color_rejected](bool ok, ColorReject cause) {
+    if (!ok) ++color_rejected[cause];
+    return ok;
+  };
   for (int row = 5; row + 5 < height; row += 3)
   {
-    if (cancelled(cancel)) return;
+    if (cancelled(cancel)) { reason = "cancelled"; return; }
     for (int col = 5; col + 5 < width && samples.size() < kMaxSamples; col += 3)
     {
-      if (!valid.at<unsigned char>(row, col)) continue;
+      ++report.stages[Color].entered;
+      if (!color_check(valid.at<unsigned char>(row, col) != 0, FilterSupport)) continue;
       const cv::Vec3f mean = rgb_mean.at<cv::Vec3f>(row, col);
       const cv::Vec3f square = rgb_square_mean.at<cv::Vec3f>(row, col);
       const float y = gray_mean.at<float>(row, col);
-      bool ok = std::isfinite(y) && y > 4.0f && y < 251.0f && gray_square_mean.at<float>(row, col) - y * y <= 36.0f;
+      bool ok = color_check(std::isfinite(y), TargetFinite) && color_check(y > 4.0f && y < 251.0f, TargetRange) &&
+                color_check(gray_square_mean.at<float>(row, col) - y * y <= 36.0f, TargetVariance);
       for (int channel = 0; channel < 3; ++channel)
-        ok = ok && std::isfinite(mean[channel]) && mean[channel] > 4.0f && mean[channel] < 251.0f &&
-             square[channel] - mean[channel] * mean[channel] <= 36.0f;
+        ok = ok && color_check(std::isfinite(mean[channel]), SourceFinite) &&
+             color_check(mean[channel] > 4.0f && mean[channel] < 251.0f, SourceRange) &&
+             color_check(square[channel] - mean[channel] * mean[channel] <= 36.0f, SourceVariance);
       if (!ok) continue;
       ColorSample sample;
       sample.rgb = V3(mean[2], mean[1], mean[0]);
       sample.target = y;
       sample.region = region;
       samples.push_back(sample);
+      ++report.stages[Color].passed;
     }
   }
+  for (int i = 0; i < ColorRejectCount; ++i)
+    if (color_rejected[i]) report.stages[Color].rejected[color_reasons[i]] += color_rejected[i];
+  if (samples.size() == initial_samples) reason = "no_valid_color_samples";
 }
 
 std::vector<ColorSample> pairSamples(const Snapshot &snapshot, FeatureCache &cache,
                                     int source_id, int target_id, const V3 &target_weights,
-                                    const std::atomic<bool> &cancel)
+                                    const std::atomic<bool> &cancel, PairReport &report)
 {
   std::vector<ColorSample> samples;
   samples.reserve(kMaxSamples);
   const int count = std::min(kMaxPlaneCandidates, static_cast<int>(snapshot.planes.size()));
+  report.plane_candidates = count;
   int regions_considered = 0;
   std::vector<std::pair<const CropFeatures *, const CropFeatures *>> used_regions;
   for (int i = 0; i < count && samples.size() < kMaxSamples; ++i)
   {
-    if (cancelled(cancel)) break;
+    if (cancelled(cancel)) { report.stop_reason = "cancelled"; break; }
     const PlaneSeed &plane = snapshot.planes[i];
-    if (!plane.point_w.allFinite() || !plane.normal_w.allFinite() || plane.normal_w.norm() < kEps ||
-        !std::isfinite(plane.radius) || plane.radius <= 0.0) continue;
+    const bool invalid_seed = !plane.point_w.allFinite() || !plane.normal_w.allFinite() || plane.normal_w.norm() < kEps ||
+                              !std::isfinite(plane.radius) || plane.radius <= 0.0;
+    record(report.stages[Seed], !invalid_seed, "invalid_plane_seed");
+    if (invalid_seed) continue;
     const CachedFeatures &source_entry = cache.prepare(source_id, i);
     const CachedFeatures &target_entry = cache.prepare(target_id, i);
-    if (!source_entry.region_valid || !target_entry.region_valid || cancelled(cancel)) continue;
-    if (regions_considered >= kMaxRegionsPerPair) break;
+    const bool roi_ok = source_entry.region_valid && target_entry.region_valid;
+    record(report.stages[Roi], roi_ok, !source_entry.region_valid ? "source_" + source_entry.region_reason : "target_" + target_entry.region_reason);
+    if (!roi_ok || cancelled(cancel)) continue;
+    if (regions_considered >= kMaxRegionsPerPair) { report.stop_reason = "pair_region_budget_12"; break; }
     ++regions_considered;
-    if (!cache.extract(source_id, i) || !cache.extract(target_id, i)) continue;
+    // Preserve the original short circuit: do not extract target if source failed.
+    ++report.stages[SiftSource].entered;
+    const bool source_ok = cache.extract(source_id, i);
+    report.source_keypoints_max = std::max(report.source_keypoints_max, static_cast<int>(source_entry.data.keys.size()));
+    if (!source_ok) { ++report.stages[SiftSource].rejected[source_entry.feature_reason]; continue; }
+    ++report.stages[SiftSource].passed;
+    ++report.stages[SiftTarget].entered;
+    const bool target_ok = cache.extract(target_id, i);
+    report.target_keypoints_max = std::max(report.target_keypoints_max, static_cast<int>(target_entry.data.keys.size()));
+    if (!target_ok) { ++report.stages[SiftTarget].rejected[target_entry.feature_reason]; continue; }
+    ++report.stages[SiftTarget].passed;
     const CropFeatures &source = source_entry.data, &target = target_entry.data;
     // Distinct world-plane labels alone do not guarantee independent image
     // data (e.g. different depths project onto the same raw image support).
@@ -610,17 +734,35 @@ std::vector<ColorSample> pairSamples(const Snapshot &snapshot, FeatureCache &cac
         [&source, &target](const std::pair<const CropFeatures *, const CropFeatures *> &used) {
           return overlappingRawSupport(source, *used.first) || overlappingRawSupport(target, *used.second);
         });
+    record(report.stages[Independent], !overlaps_used_region, "raw_support_overlaps_used_region");
     if (overlaps_used_region) continue;
-    const auto pairs = match(source, target);
+    const auto pairs = match(source, target, report);
+    report.matches_max = std::max(report.matches_max, static_cast<int>(pairs.size()));
     M3 prior, forward, reverse;
     std::vector<cv::Point2f> hull;
-    if (!planeHomography(source.chart, target.chart, plane, prior) ||
-        !verifyGeometry(source, target, pairs, prior, forward, reverse, hull)) continue;
-    if (cancelled(cancel)) break;
+    ++report.stages[Geometry].entered;
+    std::string reason;
+    if (!planeHomography(source.chart, target.chart, plane, prior))
+    { ++report.stages[Geometry].rejected["plane_homography_failed"]; continue; }
+    if (!verifyGeometry(source, target, pairs, prior, forward, reverse, hull, reason))
+    { ++report.stages[Geometry].rejected[reason]; continue; }
+    ++report.stages[Geometry].passed;
+    if (cancelled(cancel)) { report.stop_reason = "cancelled"; break; }
     const size_t previous_samples = samples.size();
-    takeSamples(source, target, plane, forward, reverse, hull, target_weights, target_id == 0, i, samples, cancel);
-    if (samples.size() > previous_samples) used_regions.emplace_back(&source, &target);
+    ++report.stages[Sampling].entered;
+    takeSamples(source, target, plane, forward, reverse, hull, target_weights, target_id == 0, i, samples, cancel, report, reason);
+    if (samples.size() > previous_samples)
+    {
+      used_regions.emplace_back(&source, &target);
+      ++report.stages[Sampling].passed;
+    }
+    else ++report.stages[Sampling].rejected[reason];
   }
+  report.samples = static_cast<int>(samples.size());
+  report.regions = static_cast<int>(used_regions.size());
+  if (cancelled(cancel)) report.stop_reason = "cancelled";
+  else if (samples.size() >= kMaxSamples) report.stop_reason = "sample_budget_4096";
+  else if (report.stop_reason.empty()) report.stop_reason = "candidate_list_exhausted";
   return samples;
 }
 #endif
@@ -703,9 +845,14 @@ Result estimate(const Snapshot &snapshot, const std::atomic<bool> &cancel)
           if (!result.cameras[target].calibrated || tried[source][target]) continue;
           tried[source][target] = 1;
           ++attempts;
-          const auto samples = pairSamples(snapshot, feature_cache, static_cast<int>(source), static_cast<int>(target), result.weights[target], cancel);
+          result.pairs.push_back(makePairReport(static_cast<int>(source), static_cast<int>(target)));
+          PairReport &pair_report = result.pairs.back();
+          const auto samples = pairSamples(snapshot, feature_cache, static_cast<int>(source), static_cast<int>(target), result.weights[target], cancel, pair_report);
           if (cancelled(cancel)) { result.reason = "initialization cancelled"; return result; }
+          ++pair_report.stages[Fit].entered;
           const WeightFit fit = fitWeights(samples);
+          if (fit.accepted) ++pair_report.stages[Fit].passed;
+          else ++pair_report.stages[Fit].rejected[fit.reason];
           CameraReport &report = result.cameras[source];
           report.parent_camera = static_cast<int>(target);
           report.samples = static_cast<int>(samples.size());
@@ -743,6 +890,50 @@ Result estimate(const Snapshot &snapshot, const std::atomic<bool> &cancel)
   }
   return result;
 #endif
+}
+
+std::vector<std::string> diagnosticLines(const Result &result)
+{
+  std::vector<std::string> lines;
+  for (const PairReport &pair : result.pairs)
+  {
+    const std::string prefix = "camera" + std::to_string(pair.source_camera) + "->camera" + std::to_string(pair.target_camera);
+    std::ostringstream summary;
+    summary << prefix << " candidates=" << pair.plane_candidates << " regions=" << pair.regions
+            << " samples=" << pair.samples << " scan_stop="
+            << (pair.stop_reason.empty() ? "interrupted" : pair.stop_reason);
+    lines.push_back(summary.str());
+    for (const char *unit : {"regions", "matches", "pixels", "samples", "pairs"})
+    {
+      std::ostringstream counts;
+      counts << prefix << ' ' << unit << " pass/entered:";
+      int entered = 0;
+      for (const StageReport &stage : pair.stages)
+      {
+        if (stage.unit != unit) continue;
+        counts << ' ' << stage.name << '=' << stage.passed << '/' << stage.entered;
+        entered += stage.entered;
+      }
+      if (std::string(unit) == "regions")
+        counts << " keypoints_max(src/dst)=" << pair.source_keypoints_max << '/' << pair.target_keypoints_max;
+      if (std::string(unit) == "matches") counts << " unique_max_per_region=" << pair.matches_max;
+      // Region and fitting counts always show whether the pipeline was reached.
+      if (entered || std::string(unit) == "regions" || std::string(unit) == "pairs") lines.push_back(counts.str());
+    }
+    for (const StageReport &stage : pair.stages)
+    {
+      int rejected = 0;
+      for (const auto &entry : stage.rejected) rejected += entry.second;
+      const int unfinished = stage.entered - stage.passed - rejected;
+      if (stage.rejected.empty() && unfinished == 0) continue;
+      std::ostringstream causes;
+      causes << prefix << ' ' << stage.name << " reject (" << stage.unit << "):";
+      for (const auto &entry : stage.rejected) causes << ' ' << entry.first << '=' << entry.second;
+      if (unfinished) causes << " interrupted=" << unfinished;
+      lines.push_back(causes.str());
+    }
+  }
+  return lines;
 }
 
 } // namespace color_gray_init

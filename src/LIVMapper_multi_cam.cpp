@@ -1237,6 +1237,19 @@ void LIVMapper::pollColorGrayInitialization()
   const double elapsed = std::chrono::duration<double>(now - startup.started).count();
 
   auto result = std::move(startup.result);
+  const auto diagnostic_lines = color_gray_init::diagnosticLines(result);
+  if (!diagnostic_lines.empty())
+  {
+    std::string block = "\033[1;36m[ Color Gray Init ] Attempt " + std::to_string(startup.attempts) +
+        " diagnostics: pass/entered; 0/0=not reached; counts are per camera pair.\033[0m\n";
+    for (const auto &line : diagnostic_lines)
+    {
+      block += line.find(" reject (") == std::string::npos ? "\033[1;36m" : "\033[1;33m";
+      block += "[ Color Gray Init ] " + line + "\033[0m\n";
+    }
+    // Emit a completed attempt together, never from the background worker.
+    printf("%s", block.c_str());
+  }
   std::string install_reason;
   if (result.accepted && vio_manager->installFixedGrayWeights(result.weights, install_reason))
   {
@@ -1263,9 +1276,14 @@ void LIVMapper::pollColorGrayInitialization()
   {
     const auto &report = result.cameras[c];
     if (!report.calibrated)
-      printf("\033[1;33m[ Color Gray Init ] camera%zu parent=%d regions=%d samples=%d: %s (rmse=%.3f baseline=%.3f)\033[0m\n",
-             c, report.parent_camera, report.regions, report.samples, report.reason.c_str(),
-             report.validation_rmse, report.baseline_rmse);
+    {
+      printf("\033[1;33m[ Color Gray Init ] camera%zu parent=%d regions=%d samples=%d: %s",
+             c, report.parent_camera, report.regions, report.samples, report.reason.c_str());
+      if (std::isfinite(report.validation_rmse) && std::isfinite(report.baseline_rmse))
+        printf(" (rmse=%.3f baseline=%.3f)", report.validation_rmse, report.baseline_rmse);
+      else printf(" (rmse/baseline=n/a: validation errors unavailable)");
+      printf("\033[0m\n");
+    }
   }
   if (result.accepted)
   {

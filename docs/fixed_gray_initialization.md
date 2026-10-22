@@ -56,6 +56,63 @@ IMU 初始化完成后，颜色初始化在正常 VIO 调用中检查数据是�
 
 运行日志使用 `[ Color Gray Init ]` 前缀，给出 SIFT 后端、数据等待原因、后台尝试、成功权重、共视父相机、区域/样本数、验证误差和基线误差，或者具体拒绝原因。日志中的误差包含拟合阶段的临时亮度比例，不能解释为安装权重后的原始灰度已绝对相等。
 
+## 分阶段诊断日志
+
+开启 `vio.color_gray_init_en` 后，每次后台尝试完成时，主线程集中打印一组加粗日志：青色为计数，黄色为拒绝原因。关闭该开关时不收集、不打印这些诊断；没有新增日志开关，没有调整任何匹配、几何、取样或拟合阈值。
+
+每个实际尝试过的相机连接单独输出，例如 `camera1->camera0` 表示用相机 1 的 RGB 拟合相机 0 的灰度。多相机中即使同一相机换过父相机，之前的尝试也会保留在本次日志里。
+
+所有阶段统一使用 **通过数/进入数**；`0/0` 表示尚未进入该阶段。计数单位在行首给出，不能把匹配点数、区域数与颜色样本数混为一谈。
+
+| 单位 | 阶段 | 含义 |
+| --- | --- | --- |
+| regions | `seed`, `roi` | 平面种子有效；两侧均能构建裁剪区域 |
+| regions | `sift_src`, `sift_dst` | 两侧特征检查分别通过；源侧失败时仍沿用原流程跳过目标侧提取 |
+| regions | `independent` | 与本次已产出颜色样本的区域没有原图支撑重叠 |
+| regions | `geometry` | 匹配数量、双向残余仿射、留出验证和支撑分布全部通过 |
+| regions | `rgb_region` | 该区域至少产出一个有效颜色样本 |
+| matches | `ratio`, `mutual`, `tangent`, `unique` | 正向比值、反向匹配与比值、切平面映射、空间去重 |
+| pixels | `grid` | 网格位置通过几何、双向一致性、滤波边界及原图掩膜检查 |
+| samples | `color` | 按原步长遍历的候选颜色样本通过完整 11×11 支撑、灰度/RGB 范围和方差检查 |
+| pairs | `fit` | 该相机连接的权重拟合验收通过；不是“已经开始数值求解”的含义 |
+
+`keypoints_max(src/dst)` 和 `unique_max_per_region` 是该连接内单区域的最大数量；匹配行上的计数则是各区域之和。特征可来自同一快照的缓存，`sift_src/dst` 统计区域检查次数，不表示实际调用 SIFT 的次数。
+
+拒绝行记录每个条目的**第一个失败条件**和数量。例如下面是格式示意，并非实际运行结果：
+
+```text
+[ Color Gray Init ] camera1->camera0 geometry reject (regions): holdout_error_gt_2px=5 unique_matches_lt_16=3
+[ Color Gray Init ] camera1->camera0 fit reject (pairs): insufficient_samples=1
+```
+
+这表示 5 个区域因几何留出点误差超过原有 2 像素门限被拒绝，另有 3 个区域在去重后不足 16 个匹配。最终拟合样本不足只是下游结果。其他常见原因：
+
+- `source_crop_lt_48px` / `target_crop_lt_48px`：对应一侧的裁剪区域过小。
+- `empty_sift_mask` / `keypoints_lt_16`：有效特征掩膜为空或关键点不足。
+- `forward_*` / `reverse_*`：对应方向的残余仿射估计或检查失败。
+- `grid_side_lt_16` / `jacobian_variation_gt_20pct`：取样网格过小或区域内投影变化超过原限制。
+- `source_raw_mask` / `target_raw_mask`：原图掩膜不满足取样要求；掩膜同时包含平面支撑、原始通道范围和滤波邻域限制，不能仅凭这个计数断定是饱和。
+- `invalid_11x11_support`：颜色均值使用的完整滤波邻域不全有效。
+- `*_variance_gt_36_or_nan`：局部方差不满足原有检查。
+- `scan_stop=pair_region_budget_12` / `camera_sift_pixel_budget`：处理预算耗尽，不是匹配阈值拒绝。
+- `scan_stop=candidate_list_exhausted`：本次候选已遍历完，不表示所有候选通过。
+
+若没有可用的验证误差，打印 `n/a`，避免把默认的 `inf` 误读成实际测得的误差。发生取消或异常时，未完成的计数标记为 `interrupted`；不会为了补齐计数继续执行算法。
+
+## 现有其他日志开关
+
+这些参数修改后需要重新启动节点；当前代码在初始化时读取，不是运行时动态开关。本次未修改配置。
+
+| YAML 参数（均在 `vio:` 下） | 可以关闭的输出 | 注意 |
+| --- | --- | --- |
+| `visual_map_manage_log_en: false` | `[ VIO Map Manage ]` | 不关闭地图管理本身 |
+| `visual_geom_filter_log_en: false` | `[ VIO Geom Filter ]` | 不关闭几何筛选本身 |
+| `usage_stats_en: false` | 使用/观测统计表 | 跨相机 patch 使用统计也停止；若还需观察它，保留 `true`，将 `usage_stats_window` 从 100 增至 500 可降低打印频率 |
+
+仓库中的 `mid360_mei_multi_cam.yaml` 已将上面三个布尔开关关闭；`HILTI22_multi_cam.yaml` 和 `M2DGR_multi_cam.yaml` 则开启。运行机器实际加载的配置可能不同。
+
+每条 IMU/图像接收 `ROS_INFO`、每帧 `LIO Mapping Time` / `VIO Time` 表和体素滑窗的 `[DEBUG]` 输出，目前没有独立 YAML 日志开关。`VIO Ref Build` 在 `visual_ref_post_ekf_build_en` 开启时仍会输出，不能仅靠 `visual_geom_filter_log_en: false` 消除。在线标定统计也没有独立的日志开关。不应通过关闭滑窗、参考构建或在线标定等算法功能来消除输出。ROS 日志等级只控制 ROS 日志调用，不能关闭这些直接使用 `printf` / `std::cout` 的表格和消息。
+
 ## 本次验证边界
 
 按用户要求，本地没有编译、没有运行测试或数据集。已添加独立数学和灰度转换测试源文件并接入 `tests/CMakeLists.txt`，它们尚未执行。当前交付是代码实现与静态审查，不代表已通过目标 ROS/OpenCV 环境编译，也不代表已确认初始化成功率、耗时或里程计精度收益。
