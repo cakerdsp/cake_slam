@@ -19,6 +19,8 @@ which is included as part of this source code package.
 #include "adaptive_image_pyramid.h"
 #include "virtual_sampling.h"
 #include "pose_affine_warp.h"
+#include "color_gray_initializer.h"
+#include "fixed_gray_image.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -864,6 +866,8 @@ public:
   // double ave_ekf_time = 0;
 
   int frame_count = 0;
+  bool fixed_gray_weights_installed_ = false;
+  std::vector<fixed_gray_image::PreparedLut> fixed_gray_luts_;
   bool plot_flag;
 
   Eigen::MatrixXd G, H_T_H;
@@ -924,6 +928,10 @@ public:
   void setCameraTimeOffsetGroups(const std::vector<int> &groups);
   void setCurrentUnbiasedGyr(const V3D &gyr);
   int numCameras() const { return static_cast<int>(cameras_.size()); }
+  bool buildColorGraySnapshot(const MeasureGroup &meas, const vector<pointWithVar> &pg,
+                              const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+                              color_gray_init::Snapshot &snapshot, std::string &reason) const;
+  bool installFixedGrayWeights(const std::vector<Eigen::Vector3d> &weights, std::string &reason);
   void processMultiCameraFrame(const MeasureGroup &meas, vector<pointWithVar> &pg,
                                const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void processFrameOpticalFlow(cv::Mat &img, double img_time);

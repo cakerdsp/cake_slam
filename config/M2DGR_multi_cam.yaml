@@ -151,6 +151,8 @@ preprocess:
 
 vio:
   frontend_mode: 0
+  # One-time fixed RGB-to-gray weights; false keeps the original grayscale path.
+  color_gray_init_en: false
   cross_camera_reference_en: true
   cross_camera_current_residual_en: true
   max_iterations: 5

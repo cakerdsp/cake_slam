@@ -61,6 +61,20 @@ find_package(catkin REQUIRED COMPONENTS
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
 find_package(OpenCV REQUIRED)
+# Keep older ROS/OpenCV installations buildable. The optional initializer uses
+# the core SIFT API (OpenCV >= 4.4), only when it compiles and links here.
+include(CheckCXXSourceCompiles)
+set(_cake_saved_required_includes "${CMAKE_REQUIRED_INCLUDES}")
+set(_cake_saved_required_libraries "${CMAKE_REQUIRED_LIBRARIES}")
+set(CMAKE_REQUIRED_INCLUDES ${OpenCV_INCLUDE_DIRS})
+set(CMAKE_REQUIRED_LIBRARIES ${OpenCV_LIBRARIES})
+check_cxx_source_compiles("#include <opencv2/features2d.hpp>
+int main() { auto detector = cv::SIFT::create(500); return detector.empty(); }"
+  CAKE_HAVE_OPENCV_SIFT)
+set(CMAKE_REQUIRED_INCLUDES "${_cake_saved_required_includes}")
+set(CMAKE_REQUIRED_LIBRARIES "${_cake_saved_required_libraries}")
+unset(_cake_saved_required_includes)
+unset(_cake_saved_required_libraries)
 find_package(Sophus REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Boost REQUIRED COMPONENTS thread)
@@ -121,6 +135,19 @@ target_link_libraries(vikit_ros_vendor
 )
 
 add_library(utils src/utils.cpp)
+add_library(color_gray_initializer src/color_gray_initializer.cpp)
+target_link_libraries(color_gray_initializer ${OpenCV_LIBRARIES})
+if(CAKE_HAVE_OPENCV_SIFT)
+  target_compile_definitions(color_gray_initializer PUBLIC CAKE_HAVE_OPENCV_SIFT=1)
+else()
+  target_compile_definitions(color_gray_initializer PUBLIC CAKE_HAVE_OPENCV_SIFT=0)
+  message(STATUS "cv::SIFT unavailable: color_gray_init_en will retain legacy grayscale")
+endif()
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  # This new module rejects non-finite/degenerate calibration input. Preserve
+  # those checks even on ARM configurations that enable project-wide fast-math.
+  target_compile_options(color_gray_initializer PRIVATE -fno-fast-math)
+endif()
 add_library(vio_multi_cam
   src/vio_multi_cam.cpp
   src/frame_multi_cam.cpp
@@ -154,7 +181,7 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 target_link_libraries(utils ${COMMON_LIBS})
-target_link_libraries(vio_multi_cam ${COMMON_LIBS})
+target_link_libraries(vio_multi_cam color_gray_initializer ${COMMON_LIBS})
 target_link_libraries(lio_multi_cam utils ${COMMON_LIBS})
 target_link_libraries(pre_multi_cam ${COMMON_LIBS})
 target_link_libraries(imu_proc_multi_cam ${COMMON_LIBS})
@@ -179,6 +206,7 @@ if(mimalloc_FOUND)
 endif()
 
 install(TARGETS
+  color_gray_initializer
   vikit_common_vendor
   vikit_ros_vendor
   utils

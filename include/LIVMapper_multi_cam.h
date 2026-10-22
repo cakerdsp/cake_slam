@@ -29,6 +29,9 @@ which is included as part of this source code package.
 #include <vikit/camera_loader.h>
 #include <cstdint>
 #include <map>
+#include <memory>
+
+struct ColorGrayStartup;
 
 struct CameraInputConfig
 {
@@ -122,6 +125,8 @@ public:
   cv::Mat getImageFromMsg(const sensor_msgs::Image::ConstPtr &img_msg);
   void handleImageFrame(int camera_id, const ros::Time &stamp, const cv::Mat &img_cur);
   void flushCompletedImageGroupsLocked();
+  bool prepareColorGrayInitialization(const MeasureGroup &meas);
+  void pollColorGrayInitialization();
 
   std::mutex mtx_buffer, mtx_buffer_imu_prop;
   std::condition_variable sig_buffer;
@@ -177,6 +182,8 @@ public:
   int img_en = 1, imu_int_frame = 3;
   bool normal_en = true;
   bool exposure_estimate_en = false;
+  bool color_gray_init_en = false;
+  std::unique_ptr<ColorGrayStartup> color_gray_startup_;
   double inv_expo_time_init = 1.0;
   double exposure_time_init = 0.0;
   bool inverse_composition_en = false;

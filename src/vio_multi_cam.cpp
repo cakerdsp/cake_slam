@@ -22,6 +22,11 @@ which is included as part of this source code package.
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <vikit/atan_camera.h>
+#include <vikit/equidistant_camera.h>
+#include <vikit/mei_camera.h>
+#include <vikit/omni_camera.h>
+#include <vikit/polynomial_camera.h>
 
 using namespace Eigen;
 
@@ -41,6 +46,24 @@ constexpr double kS2Eps = 1.0e-12;
 constexpr double kInterpPi = 3.14159265358979323846;
 constexpr int kRuntimeRawSupportDumpSize = 45;
 constexpr int kLegacyFixedStateDim = 19;
+
+std::shared_ptr<const vk::AbstractCamera> copyColorGrayCamera(const vk::AbstractCamera *camera)
+{
+  // Own the immutable calibration used by the worker; the live VIO camera is a raw pointer.
+  if (const auto *model = dynamic_cast<const vk::PinholeCamera *>(camera))
+    return std::make_shared<vk::PinholeCamera>(*model);
+  if (const auto *model = dynamic_cast<const vk::EquidistantCamera *>(camera))
+    return std::make_shared<vk::EquidistantCamera>(*model);
+  if (const auto *model = dynamic_cast<const vk::MEICamera *>(camera))
+    return std::make_shared<vk::MEICamera>(*model);
+  if (const auto *model = dynamic_cast<const vk::ATANCamera *>(camera))
+    return std::make_shared<vk::ATANCamera>(*model);
+  if (const auto *model = dynamic_cast<const vk::PolynomialCamera *>(camera))
+    return std::make_shared<vk::PolynomialCamera>(*model);
+  if (const auto *model = dynamic_cast<const vk::OmniCamera *>(camera))
+    return std::make_shared<vk::OmniCamera>(*model);
+  return {};
+}
 
 bool normalizePatchValues(const float *values, int count, double min_std,
                           Eigen::VectorXd &normalized, double *stddev = nullptr)
@@ -12971,6 +12994,217 @@ void VIOManager::processMultiCameraFrameFake(const MeasureGroup &meas)
   }
 }
 
+bool VIOManager::buildColorGraySnapshot(
+    const MeasureGroup &meas, const vector<pointWithVar> &pg,
+    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+    color_gray_init::Snapshot &snapshot, std::string &reason) const
+{
+  snapshot = color_gray_init::Snapshot{};
+  reason.clear();
+  if (state == nullptr || !meas.has_multi_cam_frame || numCameras() < 2 ||
+      static_cast<int>(meas.multi_cam_frame.images.size()) != numCameras())
+  {
+    reason = "missing multi-camera state or images";
+    return false;
+  }
+  if (frame_count != 0 || !feat_map.empty() || fixed_gray_weights_installed_)
+  {
+    reason = "color initialization must precede the first visual frame";
+    return false;
+  }
+  if (state->num_cameras != numCameras() || state->Rcl.size() != cameras_.size() ||
+      state->Pcl.size() != cameras_.size() || pg.empty() || plane_map.empty() ||
+      !std::isfinite(virtual_focal_length) || virtual_focal_length <= 0.0)
+  {
+    reason = "camera calibration or LiDAR geometry is not ready";
+    return false;
+  }
+
+  const MultiCameraFrame &mf = meas.multi_cam_frame;
+  color_gray_init::Snapshot candidate;
+  candidate.cameras.reserve(cameras_.size());
+  for (int camera_id = 0; camera_id < numCameras(); ++camera_id)
+  {
+    const PerCameraData &ctx = cameras_[camera_id];
+    const auto camera = copyColorGrayCamera(ctx.cam);
+    if (!camera || mf.images[camera_id].type() != CV_8UC3 || mf.images[camera_id].empty())
+    {
+      reason = "unsupported camera model or non-BGR image for camera " + std::to_string(camera_id);
+      return false;
+    }
+    color_gray_init::CameraSnapshot item;
+    // Match the existing direct frontend's resize order, but own worker image storage.
+    item.bgr = mf.images[camera_id].clone();
+    if (ctx.width != item.bgr.cols || ctx.height != item.bgr.rows)
+      cv::resize(item.bgr, item.bgr,
+                 cv::Size(item.bgr.cols * ctx.image_resize_factor, item.bgr.rows * ctx.image_resize_factor),
+                 0, 0, CV_INTER_LINEAR);
+    if (item.bgr.cols != ctx.width || item.bgr.rows != ctx.height ||
+        camera->width() != ctx.width || camera->height() != ctx.height)
+    {
+      reason = "resized image and camera model dimensions disagree for camera " + std::to_string(camera_id);
+      return false;
+    }
+
+    const double td_used = camera_id < static_cast<int>(mf.td_used.size()) ? mf.td_used[camera_id] : 0.0;
+    const int group = camera_id < static_cast<int>(mf.time_offset_group.size())
+                          ? mf.time_offset_group[camera_id] : ctx.time_offset_group;
+    const double td_state = group >= 0 && group < state->num_time_offset_groups
+                                ? state->time_offset[group] : td_used;
+    const double td_delta = td_state - td_used;
+    if (!std::isfinite(td_delta) || !state->rot_end.allFinite() || !state->pos_end.allFinite() ||
+        !state->vel_end.allFinite() || !state->Rcl[camera_id].allFinite() ||
+        !state->Pcl[camera_id].allFinite())
+    {
+      reason = "nonfinite camera pose or timestamp correction";
+      return false;
+    }
+    V3D gyro = current_unbiased_gyr_;
+    if (!gyro.allFinite()) gyro.setZero();
+    const M3D Rwi = state->rot_end * Exp(gyro, td_delta);
+    const V3D Pwi = state->pos_end + state->vel_end * td_delta;
+    const M3D Rci = state->Rcl[camera_id] * Rli;
+    const V3D Pci = state->Rcl[camera_id] * Pli + state->Pcl[camera_id];
+    item.R_c_w = Rci * Rwi.transpose();
+    item.t_c_w = -item.R_c_w * Pwi + Pci;
+    item.virtual_focal = virtual_focal_length;
+    if (!item.R_c_w.allFinite() || !item.t_c_w.allFinite())
+    {
+      reason = "nonfinite camera transform";
+      return false;
+    }
+    item.project = [camera](const Eigen::Vector3d &point, Eigen::Vector2d &pixel) {
+      if (!point.allFinite() || point.norm() <= 1.0e-9) return false;
+      pixel = camera->world2cam(point);
+      if (!pixel.allFinite() || pixel.x() < 1.0 || pixel.y() < 1.0 ||
+          pixel.x() >= camera->width() - 2.0 || pixel.y() >= camera->height() - 2.0)
+        return false;
+      // A finite projection alone can accept a rear-facing pinhole point.
+      const Eigen::Vector3d bearing = camera->cam2world(pixel);
+      return bearing.allFinite() && bearing.norm() > 1.0e-9 &&
+             bearing.normalized().dot(point.normalized()) > 0.999;
+    };
+    item.unproject = [camera](const Eigen::Vector2d &pixel) -> Eigen::Vector3d {
+      if (!pixel.allFinite() || pixel.x() < 0.0 || pixel.y() < 0.0 ||
+          pixel.x() >= camera->width() || pixel.y() >= camera->height())
+        return Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+      const Eigen::Vector3d bearing = camera->cam2world(pixel);
+      if (!bearing.allFinite() || bearing.norm() <= 1.0e-9)
+        return Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+      return bearing.normalized();
+    };
+    candidate.cameras.push_back(std::move(item));
+  }
+
+  constexpr size_t kMaxCandidates = 256;
+  constexpr size_t kMaxSeeds = 24;
+  const size_t count = std::min(kMaxCandidates, pg.size());
+  for (size_t sample = 0; sample < count && candidate.planes.size() < kMaxSeeds; ++sample)
+  {
+    const pointWithVar &point = pg[sample * pg.size() / count];
+    const VoxelPlane *plane = nullptr;
+    int64_t vx = 0, vy = 0, vz = 0;
+    if (!associateVisualPointSurface(point.point_w, plane_map, vx, vy, vz, plane) ||
+        plane == nullptr || !plane->is_init_ ||
+        plane->points_size_ < std::max(5, visual_geom_filter_min_plane_points) ||
+        !plane->center_.allFinite() || !std::isfinite(plane->radius_) || plane->radius_ <= 0.05)
+      continue;
+    const V3D normal = plane->normal_.normalized();
+    const double plane_distance = normal.dot(point.point_w - plane->center_);
+    if (!std::isfinite(plane_distance) || std::abs(plane_distance) > 0.05) continue;
+    color_gray_init::PlaneSeed seed;
+    seed.point_w = point.point_w - plane_distance * normal;
+    seed.normal_w = normal;
+    // Reuse the map's statistical support scale. It is not a surface or visibility guarantee;
+    // the worker must still validate matches and restrict samples to their supported region.
+    if (!std::isfinite(visual_geom_filter_radius_multiplier) || visual_geom_filter_radius_multiplier <= 0.0)
+      continue;
+    const double support_radius = visual_geom_filter_radius_multiplier * static_cast<double>(plane->radius_);
+    seed.radius = std::min(1.0, support_radius - (seed.point_w - plane->center_).norm());
+    if (!std::isfinite(seed.radius) || seed.radius < 0.05) continue;
+
+    bool overlaps = false;
+    for (const auto &retained : candidate.planes)
+    {
+      const V3D delta = seed.point_w - retained.point_w;
+      if (std::abs(seed.normal_w.dot(retained.normal_w)) > 0.98 &&
+          std::abs(retained.normal_w.dot(delta)) < 0.05 &&
+          delta.norm() < seed.radius + retained.radius)
+      {
+        overlaps = true;
+        break;
+      }
+    }
+    if (overlaps) continue;
+    int visible_camera_count = 0;
+    for (size_t camera_id = 0; camera_id < candidate.cameras.size(); ++camera_id)
+    {
+      const auto &camera = candidate.cameras[camera_id];
+      const V3D point_c = camera.R_c_w * seed.point_w + camera.t_c_w;
+      V2D pixel;
+      if (!camera.project(point_c, pixel)) continue;
+      const V3D normal_c = camera.R_c_w * seed.normal_w;
+      if (std::abs(normal_c.dot(point_c.normalized())) < 0.2) continue;
+      ++visible_camera_count;
+    }
+    if (visible_camera_count >= 2) candidate.planes.push_back(seed);
+  }
+  if (candidate.planes.size() < 6)
+  {
+    reason = "fewer than six separated co-visible plane regions";
+    return false;
+  }
+  snapshot = std::move(candidate);
+  return true;
+}
+
+bool VIOManager::installFixedGrayWeights(const std::vector<Eigen::Vector3d> &weights, std::string &reason)
+{
+  reason.clear();
+  if (fixed_gray_weights_installed_ || frame_count != 0 || !feat_map.empty() ||
+      frontend_mode != 0 || weights.size() != cameras_.size())
+  {
+    reason = "fixed gray weights can only be installed once before direct VIO starts";
+    return false;
+  }
+  for (const auto &ctx : cameras_)
+  {
+    if (ctx.new_frame != nullptr || !ctx.pending_new_points.empty())
+    {
+      reason = "visual frames or reference observations already exist";
+      return false;
+    }
+  }
+  for (const auto &weight : weights)
+  {
+    if (!weight.allFinite() || (weight.array() < 0.0).any() ||
+        std::abs(weight.sum() - 1.0) > 1.0e-6)
+    {
+      reason = "gray weights must be finite, nonnegative and normalized";
+      return false;
+    }
+  }
+  if (weights.empty() || (weights.front() - Eigen::Vector3d(0.299, 0.587, 0.114)).norm() > 1.0e-6)
+  {
+    reason = "camera zero must retain the original grayscale definition";
+    return false;
+  }
+  std::vector<fixed_gray_image::PreparedLut> prepared;
+  prepared.reserve(weights.size());
+  try
+  {
+    for (const auto &weight : weights) prepared.push_back(fixed_gray_image::prepareFixedGrayLut(weight));
+  }
+  catch (const std::invalid_argument &error)
+  {
+    reason = error.what();
+    return false;
+  }
+  fixed_gray_luts_ = std::move(prepared);
+  fixed_gray_weights_installed_ = true;
+  return true;
+}
+
 void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointWithVar> &pg,
                                          const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
@@ -12993,7 +13227,15 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
       cv::resize(image, image, cv::Size(image.cols * ctx.image_resize_factor, image.rows * ctx.image_resize_factor), 0, 0, CV_INTER_LINEAR);
     ctx.img_rgb = image.clone();
     ctx.img_cp = image.clone();
-    if (image.channels() == 3) cv::cvtColor(image, image, CV_BGR2GRAY);
+    if (image.channels() == 3)
+    {
+      const fixed_gray_image::PreparedLut *weights =
+          fixed_gray_weights_installed_ && camera_id > 0 ? &fixed_gray_luts_[camera_id] : nullptr;
+      if (weights == nullptr || weights->legacy_default)
+        cv::cvtColor(image, image, CV_BGR2GRAY);
+      else
+        image = fixed_gray_image::convertFixedGray(image, weights);
+    }
     const double raw_timestamp = camera_id < static_cast<int>(mf.raw_timestamps.size())
                                      ? mf.raw_timestamps[camera_id]
                                      : mf.timestamp;

@@ -119,6 +119,8 @@ vio:
   # 0: direct; 1: optical_flow; 2: color_only.
   # Virtual fisheye patch logic is used by the direct/fisheye frontend.
   frontend_mode: 0
+  # One-time fixed RGB-to-gray weights; false keeps the original grayscale path.
+  color_gray_init_en: false
   cross_camera_reference_en: true
   cross_camera_current_residual_en: false
   max_iterations: 5
