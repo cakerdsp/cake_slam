@@ -18,6 +18,12 @@
 #ifndef CAKE_HAVE_OPENCV_SIFT
 #define CAKE_HAVE_OPENCV_SIFT 0
 #endif
+#ifndef CAKE_HAVE_OPENCV_XFEATURES2D_SIFT
+#define CAKE_HAVE_OPENCV_XFEATURES2D_SIFT 0
+#endif
+#if CAKE_HAVE_OPENCV_XFEATURES2D_SIFT
+#include <opencv2/xfeatures2d/nonfree.hpp>
+#endif
 
 namespace color_gray_init
 {
@@ -32,7 +38,16 @@ constexpr int kMaxSamples = 4096;
 constexpr int kGridSize = 64;
 constexpr double kEps = 1.0e-9;
 
+#if CAKE_HAVE_OPENCV_SIFT || CAKE_HAVE_OPENCV_XFEATURES2D_SIFT
+cv::Ptr<cv::Feature2D> createSift()
+{
 #if CAKE_HAVE_OPENCV_SIFT
+  return cv::SIFT::create(500);
+#else
+  return cv::xfeatures2d::SIFT::create(500);
+#endif
+}
+
 using V2 = Eigen::Vector2d;
 using V3 = Eigen::Vector3d;
 using M2 = Eigen::Matrix2d;
@@ -155,7 +170,7 @@ bool prepareRegion(const CameraSnapshot &camera, const PlaneSeed &plane, CropFea
 }
 
 bool extractFeatures(const CameraSnapshot &camera, const PlaneSeed &plane,
-                     const cv::Ptr<cv::SIFT> &sift, CropFeatures &out,
+                     const cv::Ptr<cv::Feature2D> &sift, CropFeatures &out,
                      const std::atomic<bool> &cancel)
 {
   const int width = out.roi.width, height = out.roi.height;
@@ -196,7 +211,7 @@ struct FeatureCache
 {
   const Snapshot &snapshot;
   const std::atomic<bool> &cancel;
-  cv::Ptr<cv::SIFT> sift = cv::SIFT::create(500);
+  cv::Ptr<cv::Feature2D> sift = createSift();
   std::vector<std::vector<CachedFeatures>> entries;
   std::vector<int> extracted_pixels;
 
@@ -611,13 +626,43 @@ std::vector<ColorSample> pairSamples(const Snapshot &snapshot, FeatureCache &cac
 #endif
 } // namespace
 
+const char *siftBackend()
+{
+#if CAKE_HAVE_OPENCV_SIFT
+  return "cv::SIFT";
+#elif CAKE_HAVE_OPENCV_XFEATURES2D_SIFT
+  return "cv::xfeatures2d::SIFT";
+#else
+  return "unavailable";
+#endif
+}
+
+bool siftAvailable(std::string &reason)
+{
+  reason.clear();
+#if CAKE_HAVE_OPENCV_SIFT || CAKE_HAVE_OPENCV_XFEATURES2D_SIFT
+  try
+  {
+    if (!createSift().empty()) return true;
+    reason = std::string(siftBackend()) + " returned an empty detector";
+  }
+  catch (const std::exception &error)
+  {
+    reason = std::string(siftBackend()) + " cannot be created: " + error.what();
+  }
+#else
+  reason = "this OpenCV build has neither supported cv::SIFT nor cv::xfeatures2d::SIFT";
+#endif
+  return false;
+}
+
 Result estimate(const Snapshot &snapshot, const std::atomic<bool> &cancel)
 {
   Result result;
   const size_t count = snapshot.cameras.size();
   result.weights.assign(count, defaultWeights());
   result.cameras.resize(count);
-#if !CAKE_HAVE_OPENCV_SIFT
+#if !CAKE_HAVE_OPENCV_SIFT && !CAKE_HAVE_OPENCV_XFEATURES2D_SIFT
   (void)cancel;
   result.reason = "OpenCV SIFT is unavailable in this build";
   return result;

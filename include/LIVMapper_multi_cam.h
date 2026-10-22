@@ -125,7 +125,7 @@ public:
   cv::Mat getImageFromMsg(const sensor_msgs::Image::ConstPtr &img_msg);
   void handleImageFrame(int camera_id, const ros::Time &stamp, const cv::Mat &img_cur);
   void flushCompletedImageGroupsLocked();
-  bool prepareColorGrayInitialization(const MeasureGroup &meas);
+  void prepareColorGrayInitialization(const MeasureGroup &meas);
   void pollColorGrayInitialization();
 
   std::mutex mtx_buffer, mtx_buffer_imu_prop;

@@ -61,6 +61,9 @@ struct Result
   std::string reason;
 };
 
+// Called only when enabled; checks runtime creation as well as the compiled API.
+const char *siftBackend();
+bool siftAvailable(std::string &reason);
 Result estimate(const Snapshot &snapshot, const std::atomic<bool> &cancel);
 
 } // namespace color_gray_init

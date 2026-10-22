@@ -61,8 +61,8 @@ find_package(catkin REQUIRED COMPONENTS
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
 find_package(OpenCV REQUIRED)
-# Keep older ROS/OpenCV installations buildable. The optional initializer uses
-# the core SIFT API (OpenCV >= 4.4), only when it compiles and links here.
+# Prefer core SIFT, then the older contrib API. Runtime creation is checked
+# separately: older contrib builds may expose SIFT but disable its implementation.
 include(CheckCXXSourceCompiles)
 set(_cake_saved_required_includes "${CMAKE_REQUIRED_INCLUDES}")
 set(_cake_saved_required_libraries "${CMAKE_REQUIRED_LIBRARIES}")
@@ -71,6 +71,11 @@ set(CMAKE_REQUIRED_LIBRARIES ${OpenCV_LIBRARIES})
 check_cxx_source_compiles("#include <opencv2/features2d.hpp>
 int main() { auto detector = cv::SIFT::create(500); return detector.empty(); }"
   CAKE_HAVE_OPENCV_SIFT)
+if(NOT CAKE_HAVE_OPENCV_SIFT)
+  check_cxx_source_compiles("#include <opencv2/xfeatures2d/nonfree.hpp>
+int main() { auto detector = cv::xfeatures2d::SIFT::create(500); return detector.empty(); }"
+    CAKE_HAVE_OPENCV_XFEATURES2D_SIFT)
+endif()
 set(CMAKE_REQUIRED_INCLUDES "${_cake_saved_required_includes}")
 set(CMAKE_REQUIRED_LIBRARIES "${_cake_saved_required_libraries}")
 unset(_cake_saved_required_includes)
@@ -138,10 +143,17 @@ add_library(utils src/utils.cpp)
 add_library(color_gray_initializer src/color_gray_initializer.cpp)
 target_link_libraries(color_gray_initializer ${OpenCV_LIBRARIES})
 if(CAKE_HAVE_OPENCV_SIFT)
-  target_compile_definitions(color_gray_initializer PUBLIC CAKE_HAVE_OPENCV_SIFT=1)
+  target_compile_definitions(color_gray_initializer PUBLIC
+    CAKE_HAVE_OPENCV_SIFT=1 CAKE_HAVE_OPENCV_XFEATURES2D_SIFT=0)
+  message(STATUS "Color gray initialization SIFT backend: cv::SIFT")
+elseif(CAKE_HAVE_OPENCV_XFEATURES2D_SIFT)
+  target_compile_definitions(color_gray_initializer PUBLIC
+    CAKE_HAVE_OPENCV_SIFT=0 CAKE_HAVE_OPENCV_XFEATURES2D_SIFT=1)
+  message(STATUS "Color gray initialization SIFT backend: cv::xfeatures2d::SIFT (runtime availability checked on enable)")
 else()
-  target_compile_definitions(color_gray_initializer PUBLIC CAKE_HAVE_OPENCV_SIFT=0)
-  message(STATUS "cv::SIFT unavailable: color_gray_init_en will retain legacy grayscale")
+  target_compile_definitions(color_gray_initializer PUBLIC
+    CAKE_HAVE_OPENCV_SIFT=0 CAKE_HAVE_OPENCV_XFEATURES2D_SIFT=0)
+  message(STATUS "Neither SIFT API is available: color_gray_init_en will retain legacy grayscale")
 endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   # This new module rejects non-finite/degenerate calibration input. Preserve

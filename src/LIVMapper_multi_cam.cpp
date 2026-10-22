@@ -27,17 +27,17 @@ which is included as part of this source code package.
 using namespace Sophus;
 
 // The worker owns its image/geometry snapshot. The main thread alone installs
-// weights, before any visual reference exists. No estimator state is shared.
+// weights at a visual-frame boundary for future images only. No estimator state
+// is shared with the worker, and existing observations are left unchanged.
 struct ColorGrayStartup
 {
   using Clock = std::chrono::steady_clock;
-  static constexpr double kMaxWaitSeconds = 2.0;
-  static constexpr int kMaxAttempts = 3;
   Clock::time_point started = Clock::now();
   Clock::time_point next_snapshot = started;
+  Clock::time_point next_wait_log = started;
   bool terminal = false;
   int attempts = 0;
-  std::string last_reason = "waiting for usable co-visible LiDAR planes";
+  std::string last_reason;
   std::atomic<bool> cancel{false};
   std::atomic<bool> done{false};
   std::thread worker;
@@ -47,6 +47,15 @@ struct ColorGrayStartup
   {
     cancel.store(true, std::memory_order_relaxed);
     if (worker.joinable()) worker.join();
+  }
+
+  void reportWaiting(const std::string &reason)
+  {
+    const auto now = Clock::now();
+    if (now < next_wait_log) return;
+    printf("\033[1;36m[ Color Gray Init ] Waiting for data: %s; VIO continues with original grayscale.\033[0m\n",
+           reason.c_str());
+    next_wait_log = now + std::chrono::seconds(5);
   }
 
   void launch(color_gray_init::Snapshot snapshot)
@@ -1221,29 +1230,18 @@ void LIVMapper::pollColorGrayInitialization()
 {
   if (!color_gray_init_en || !color_gray_startup_) return;
   auto &startup = *color_gray_startup_;
+  if (startup.terminal || !startup.worker.joinable() ||
+      !startup.done.load(std::memory_order_acquire)) return;
+  startup.worker.join(); // done was published only after the worker's result was written.
   const auto now = ColorGrayStartup::Clock::now();
   const double elapsed = std::chrono::duration<double>(now - startup.started).count();
-  if (!startup.terminal && elapsed >= ColorGrayStartup::kMaxWaitSeconds)
-  {
-    startup.terminal = true;
-    startup.cancel.store(true, std::memory_order_relaxed);
-    printf("\033[1;31m[ Color Gray Init ] Timeout after %.2f s (%s); retain original grayscale.\033[0m\n",
-           elapsed, startup.last_reason.c_str());
-  }
-  if (!startup.worker.joinable() || !startup.done.load(std::memory_order_acquire)) return;
-  startup.worker.join();
-  if (startup.terminal)
-  {
-    startup.result = color_gray_init::Result{}; // A late result must never change live references.
-    return;
-  }
 
   auto result = std::move(startup.result);
   std::string install_reason;
   if (result.accepted && vio_manager->installFixedGrayWeights(result.weights, install_reason))
   {
     startup.terminal = true;
-    printf("\033[1;32m[ Color Gray Init ] Fixed RGB weights installed before visual startup (%.2f s).\033[0m\n", elapsed);
+    printf("\033[1;32m[ Color Gray Init ] Fixed RGB weights installed after %.2f s; effective from this visual frame onward. Existing references unchanged.\033[0m\n", elapsed);
     for (size_t c = 0; c < result.weights.size(); ++c)
     {
       const auto &w = result.weights[c];
@@ -1269,37 +1267,34 @@ void LIVMapper::pollColorGrayInitialization()
              c, report.parent_camera, report.regions, report.samples, report.reason.c_str(),
              report.validation_rmse, report.baseline_rmse);
   }
-  if (result.accepted || startup.attempts >= ColorGrayStartup::kMaxAttempts)
+  if (result.accepted)
   {
     startup.terminal = true;
     printf("\033[1;31m[ Color Gray Init ] Retain original grayscale for this run.\033[0m\n");
   }
   else
   {
-    startup.next_snapshot = now + std::chrono::milliseconds(150);
+    startup.next_snapshot = now + std::chrono::seconds(1);
+    printf("\033[1;33m[ Color Gray Init ] Will retry with a fresh snapshot; VIO continues with original grayscale.\033[0m\n");
   }
 }
 
-bool LIVMapper::prepareColorGrayInitialization(const MeasureGroup &meas)
+void LIVMapper::prepareColorGrayInitialization(const MeasureGroup &meas)
 {
-  if (!color_gray_init_en) return true;
+  if (!color_gray_init_en) return;
   if (!color_gray_startup_)
   {
-    // Normal IMU initialization already prevents usable visual geometry. Do not
-    // spend the optional visual-startup budget before it has completed.
-    if (imu_en && p_imu->imu_need_init) return false;
+    // Wait for IMU readiness without suppressing the normal VIO call.
+    if (imu_en && p_imu->imu_need_init) return;
     color_gray_startup_.reset(new ColorGrayStartup());
     auto &startup = *color_gray_startup_;
     std::string unsupported;
-#if !defined(CAKE_HAVE_OPENCV_SIFT) || !CAKE_HAVE_OPENCV_SIFT
-    unsupported = "this OpenCV build has no supported cv::SIFT";
-#else
     if (frontend_mode != 0 || !virtual_fisheye_patch_en || num_cameras < 2)
       unsupported = "requires the direct tangent-plane frontend and at least two cameras";
     else if (!std::isfinite(visual_geom_filter_voxel_size) ||
              std::abs(visual_geom_filter_voxel_size - voxelmap_manager->config_setting_.max_voxel_size_) > 1.0e-9)
       unsupported = "visual_geom_filter_voxel_size must match the LiDAR map voxel size";
-#endif
+    if (unsupported.empty()) color_gray_init::siftAvailable(unsupported);
     if (!unsupported.empty())
     {
       startup.terminal = true;
@@ -1307,36 +1302,40 @@ bool LIVMapper::prepareColorGrayInitialization(const MeasureGroup &meas)
     }
     else
     {
-      printf("\033[1;36m[ Color Gray Init ] Waiting up to %.1f s for fixed-weight calibration; LIO continues.\033[0m\n",
-             ColorGrayStartup::kMaxWaitSeconds);
+      printf("\033[1;36m[ Color Gray Init ] Background calibration enabled (%s); no fixed timeout. LIVO continues with original grayscale until success.\033[0m\n",
+             color_gray_init::siftBackend());
     }
   }
   pollColorGrayInitialization();
   auto &startup = *color_gray_startup_;
-  if (startup.terminal) return true;
-  if (startup.worker.joinable() || ColorGrayStartup::Clock::now() < startup.next_snapshot) return false;
-  startup.next_snapshot = ColorGrayStartup::Clock::now() + std::chrono::milliseconds(150);
-  if (!lidar_map_inited || _pv_list.empty()) return false;
+  if (startup.terminal || startup.worker.joinable() ||
+      ColorGrayStartup::Clock::now() < startup.next_snapshot) return;
+  startup.next_snapshot = ColorGrayStartup::Clock::now() + std::chrono::seconds(1);
+  if (!lidar_map_inited || _pv_list.empty())
+  {
+    startup.reportWaiting(!lidar_map_inited ? "LiDAR map not initialized" : "LiDAR candidate points are empty");
+    return;
+  }
 
   color_gray_init::Snapshot snapshot;
   try
   {
     if (!vio_manager->buildColorGraySnapshot(meas, _pv_list, voxelmap_manager->voxel_map_,
-                                            snapshot, startup.last_reason)) return false;
-    // Snapshot construction also counts against the startup wait budget.
-    pollColorGrayInitialization();
-    if (startup.terminal) return true;
-    startup.last_reason = "calibration worker still running";
+                                            snapshot, startup.last_reason))
+    {
+      startup.reportWaiting(startup.last_reason);
+      return;
+    }
     startup.launch(std::move(snapshot));
+    printf("\033[1;36m[ Color Gray Init ] Attempt %d running in background; VIO continues with original grayscale.\033[0m\n", startup.attempts);
   }
   catch (const std::exception &error)
   {
     startup.terminal = true;
     startup.cancel.store(true, std::memory_order_relaxed);
     printf("\033[1;31m[ Color Gray Init ] Cannot start calibration: %s; retain original grayscale.\033[0m\n", error.what());
-    return true;
+    return;
   }
-  return false;
 }
 
 void LIVMapper::handleVIO()
@@ -1348,9 +1347,9 @@ void LIVMapper::handleVIO()
     current_frontend_mode = 0;
   }
 
-  // Consumed VIO frames are intentionally skipped until the one-time decision.
-  // No Frame, landmark, reference, or exposure initialization is created here.
-  if (color_gray_init_en && !prepareColorGrayInitialization(LidarMeasures.measures.back())) return;
+  // Optional work never gates VIO. A completed result is installed here, before
+  // converting any image in this multi-camera frame; historical data is untouched.
+  if (color_gray_init_en) prepareColorGrayInitialization(LidarMeasures.measures.back());
 
   euler_cur = RotMtoEuler(_state.rot_end);
   fout_pre << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
@@ -1648,8 +1647,6 @@ void LIVMapper::run(ros::NodeHandle &nh)
   while (ros::ok())
   {
     ros::spinOnce();
-    // Timeout/reap even if images or LiDAR packets stop arriving.
-    if (color_gray_init_en) pollColorGrayInitialization();
     if (!sync_packages(LidarMeasures))
     {
       rate.sleep();

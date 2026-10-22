@@ -13007,9 +13007,9 @@ bool VIOManager::buildColorGraySnapshot(
     reason = "missing multi-camera state or images";
     return false;
   }
-  if (frame_count != 0 || !feat_map.empty() || fixed_gray_weights_installed_)
+  if (fixed_gray_weights_installed_)
   {
-    reason = "color initialization must precede the first visual frame";
+    reason = "fixed gray weights have already been installed";
     return false;
   }
   if (state->num_cameras != numCameras() || state->Rcl.size() != cameras_.size() ||
@@ -13161,19 +13161,12 @@ bool VIOManager::buildColorGraySnapshot(
 bool VIOManager::installFixedGrayWeights(const std::vector<Eigen::Vector3d> &weights, std::string &reason)
 {
   reason.clear();
-  if (fixed_gray_weights_installed_ || frame_count != 0 || !feat_map.empty() ||
-      frontend_mode != 0 || weights.size() != cameras_.size())
+  // Called on the main thread before processing a new multi-camera frame.
+  // Existing grayscale observations are deliberately left unchanged.
+  if (fixed_gray_weights_installed_ || frontend_mode != 0 || weights.size() != cameras_.size())
   {
-    reason = "fixed gray weights can only be installed once before direct VIO starts";
+    reason = "fixed gray weights require the direct frontend, all cameras, and a single installation";
     return false;
-  }
-  for (const auto &ctx : cameras_)
-  {
-    if (ctx.new_frame != nullptr || !ctx.pending_new_points.empty())
-    {
-      reason = "visual frames or reference observations already exist";
-      return false;
-    }
   }
   for (const auto &weight : weights)
   {
