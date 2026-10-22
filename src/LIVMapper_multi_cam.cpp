@@ -1227,7 +1227,7 @@ void LIVMapper::pollColorGrayInitialization()
   {
     startup.terminal = true;
     startup.cancel.store(true, std::memory_order_relaxed);
-    printf("[ Color Gray Init ] Timeout after %.2f s (%s); retain original grayscale.\n",
+    printf("\033[1;31m[ Color Gray Init ] Timeout after %.2f s (%s); retain original grayscale.\033[0m\n",
            elapsed, startup.last_reason.c_str());
   }
   if (!startup.worker.joinable() || !startup.done.load(std::memory_order_acquire)) return;
@@ -1243,11 +1243,11 @@ void LIVMapper::pollColorGrayInitialization()
   if (result.accepted && vio_manager->installFixedGrayWeights(result.weights, install_reason))
   {
     startup.terminal = true;
-    printf("[ Color Gray Init ] Fixed RGB weights installed before visual startup (%.2f s).\n", elapsed);
+    printf("\033[1;32m[ Color Gray Init ] Fixed RGB weights installed before visual startup (%.2f s).\033[0m\n", elapsed);
     for (size_t c = 0; c < result.weights.size(); ++c)
     {
       const auto &w = result.weights[c];
-      printf("[ Color Gray Init ] camera%zu w_RGB=[%.6f %.6f %.6f]", c, w[0], w[1], w[2]);
+      printf("\033[1;32m[ Color Gray Init ] camera%zu w_RGB=[%.6f %.6f %.6f]", c, w[0], w[1], w[2]);
       if (c < result.cameras.size())
       {
         const auto &report = result.cameras[c];
@@ -1255,24 +1255,24 @@ void LIVMapper::pollColorGrayInitialization()
                report.parent_camera, report.regions, report.samples,
                report.validation_rmse, report.baseline_rmse);
       }
-      printf("\n");
+      printf("\033[0m\n");
     }
     return;
   }
   startup.last_reason = result.accepted ? install_reason : result.reason;
-  printf("[ Color Gray Init ] Attempt %d rejected: %s\n", startup.attempts, startup.last_reason.c_str());
+  printf("\033[1;33m[ Color Gray Init ] Attempt %d rejected: %s\033[0m\n", startup.attempts, startup.last_reason.c_str());
   for (size_t c = 1; c < result.cameras.size(); ++c)
   {
     const auto &report = result.cameras[c];
     if (!report.calibrated)
-      printf("[ Color Gray Init ] camera%zu parent=%d regions=%d samples=%d: %s (rmse=%.3f baseline=%.3f)\n",
+      printf("\033[1;33m[ Color Gray Init ] camera%zu parent=%d regions=%d samples=%d: %s (rmse=%.3f baseline=%.3f)\033[0m\n",
              c, report.parent_camera, report.regions, report.samples, report.reason.c_str(),
              report.validation_rmse, report.baseline_rmse);
   }
   if (result.accepted || startup.attempts >= ColorGrayStartup::kMaxAttempts)
   {
     startup.terminal = true;
-    printf("[ Color Gray Init ] Retain original grayscale for this run.\n");
+    printf("\033[1;31m[ Color Gray Init ] Retain original grayscale for this run.\033[0m\n");
   }
   else
   {
@@ -1303,11 +1303,11 @@ bool LIVMapper::prepareColorGrayInitialization(const MeasureGroup &meas)
     if (!unsupported.empty())
     {
       startup.terminal = true;
-      printf("[ Color Gray Init ] Unavailable: %s; retain original grayscale.\n", unsupported.c_str());
+      printf("\033[1;31m[ Color Gray Init ] Unavailable: %s; retain original grayscale.\033[0m\n", unsupported.c_str());
     }
     else
     {
-      printf("[ Color Gray Init ] Waiting up to %.1f s for fixed-weight calibration; LIO continues.\n",
+      printf("\033[1;36m[ Color Gray Init ] Waiting up to %.1f s for fixed-weight calibration; LIO continues.\033[0m\n",
              ColorGrayStartup::kMaxWaitSeconds);
     }
   }
@@ -1333,7 +1333,7 @@ bool LIVMapper::prepareColorGrayInitialization(const MeasureGroup &meas)
   {
     startup.terminal = true;
     startup.cancel.store(true, std::memory_order_relaxed);
-    printf("[ Color Gray Init ] Cannot start calibration: %s; retain original grayscale.\n", error.what());
+    printf("\033[1;31m[ Color Gray Init ] Cannot start calibration: %s; retain original grayscale.\033[0m\n", error.what());
     return true;
   }
   return false;
