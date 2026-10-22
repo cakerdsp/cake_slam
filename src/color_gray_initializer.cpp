@@ -34,10 +34,23 @@ constexpr int kMaxPlaneCandidates = 24;
 constexpr int kMaxRegionsPerPair = 12;
 constexpr int kMaxFullCropsPerCamera = 12;
 constexpr int kMaxCrop = 320;
-constexpr int kMinCrop = 48;
+constexpr int kMinFeatureContext = 96;
+constexpr int kMinGeometryMatches = 6;
+constexpr int kMinGeometryTraining = 4;
+constexpr int kMinGeometryHoldout = 2;
+constexpr int kGeometryHoldoutStride = 3;
 constexpr int kMaxSamples = 4096;
-constexpr int kGridSize = 64;
+constexpr int kGridSize = 16;
+constexpr int kColorKernelSize = 5;
+constexpr int kColorHalo = kColorKernelSize / 2;
+constexpr int kColorSampleStride = 1;
+constexpr double kColorSigma = 1.0;
 constexpr double kEps = 1.0e-9;
+static_assert(kMinGeometryMatches - (kMinGeometryMatches + kGeometryHoldoutStride - 1) /
+                  kGeometryHoldoutStride >= kMinGeometryTraining, "insufficient geometry training points");
+static_assert((kMinGeometryMatches + kGeometryHoldoutStride - 1) / kGeometryHoldoutStride >=
+                  kMinGeometryHoldout, "insufficient geometry holdout points");
+static_assert(kColorKernelSize % 2 == 1 && kGridSize >= kColorKernelSize, "invalid color support");
 
 #if CAKE_HAVE_OPENCV_SIFT || CAKE_HAVE_OPENCV_XFEATURES2D_SIFT
 enum Stage
@@ -202,11 +215,14 @@ bool prepareRegion(const CameraSnapshot &camera, const PlaneSeed &plane, CropFea
     if (raw.cwiseAbs().maxCoeff() > 1.0e6) return reject(reason, "plane_boundary_overflow");
     boundary.emplace_back(static_cast<float>(raw.x()), static_cast<float>(raw.y()));
   }
-  cv::Rect roi = cv::boundingRect(boundary) & cv::Rect(0, 0, camera.bgr.cols, camera.bgr.rows);
-  if (roi.width < kMinCrop || roi.height < kMinCrop || !center.allFinite()) return reject(reason, "crop_lt_48px");
-  const int width = std::min(kMaxCrop, roi.width), height = std::min(kMaxCrop, roi.height);
-  const int x = std::clamp(static_cast<int>(std::floor(center.x() - width * 0.5)), roi.x, roi.x + roi.width - width);
-  const int y = std::clamp(static_cast<int>(std::floor(center.y() - height * 0.5)), roi.y, roi.y + roi.height - height);
+  const cv::Rect plane_roi = cv::boundingRect(boundary) & cv::Rect(0, 0, camera.bgr.cols, camera.bgr.rows);
+  if (plane_roi.empty()) return reject(reason, "empty_plane_projection");
+  // Context is image storage only. The plane radius and the masks used for
+  // geometry/color sampling do not grow with this padded crop.
+  const int width = std::min(camera.bgr.cols, std::min(kMaxCrop, std::max(kMinFeatureContext, plane_roi.width)));
+  const int height = std::min(camera.bgr.rows, std::min(kMaxCrop, std::max(kMinFeatureContext, plane_roi.height)));
+  const int x = std::clamp(static_cast<int>(std::floor(center.x() - width * 0.5)), 0, camera.bgr.cols - width);
+  const int y = std::clamp(static_cast<int>(std::floor(center.y() - height * 0.5)), 0, camera.bgr.rows - height);
   out.roi = cv::Rect(x, y, width, height);
   return true;
 }
@@ -232,13 +248,28 @@ bool extractFeatures(const CameraSnapshot &camera, const PlaneSeed &plane,
     }
   }
   out.support_mask = mask.clone();
-  cv::erode(mask, mask, cv::Mat(), cv::Point(-1, -1), 4);
+  // This mask selects feature CENTERS. SIFT descriptors may read the padded
+  // image context; they need not fit wholly inside a tiny planar support.
   if (cancelled(cancel)) return reject(reason, "cancelled");
   sift->detectAndCompute(gray, mask, out.keys, out.descriptors);
   if (cancelled(cancel)) return reject(reason, "cancelled");
-  for (auto &key : out.keys) key.pt += cv::Point2f(static_cast<float>(x), static_cast<float>(y));
-  if (out.keys.size() < 16)
-    return reject(reason, cv::countNonZero(mask) == 0 ? "empty_sift_mask" : "keypoints_lt_16");
+  // SIFT's integer mask lookup is not an exact subpixel support test. Filter
+  // descriptor rows together with keypoints before any pairing/affine fit.
+  std::vector<cv::KeyPoint> supported_keys;
+  cv::Mat supported_descriptors;
+  for (size_t i = 0; i < out.keys.size(); ++i)
+  {
+    cv::KeyPoint key = out.keys[i];
+    key.pt += cv::Point2f(static_cast<float>(x), static_cast<float>(y));
+    V2 q;
+    if (!out.chart.toChart(V2(key.pt.x, key.pt.y), q) || !onPlaneSupport(out.chart, plane, q)) continue;
+    supported_keys.push_back(key);
+    if (!out.descriptors.empty()) supported_descriptors.push_back(out.descriptors.row(static_cast<int>(i)));
+  }
+  out.keys.swap(supported_keys);
+  out.descriptors = std::move(supported_descriptors);
+  if (out.keys.size() < kMinGeometryMatches)
+    return reject(reason, cv::countNonZero(mask) == 0 ? "empty_sift_mask" : "supported_keypoints_lt_6");
   if (out.descriptors.empty()) return reject(reason, "empty_descriptors");
   return true;
 }
@@ -375,23 +406,48 @@ bool planeHomography(const Chart &source, const Chart &target, const PlaneSeed &
   return h.allFinite() && std::abs(h.determinant()) > kEps;
 }
 
+bool isGeometryHoldout(size_t index)
+{
+  return index % kGeometryHoldoutStride == 0;
+}
+
+bool hasAffineSpan(const std::vector<cv::Point2f> &points)
+{
+  // Centering makes the rank check independent of tangent-plane origin;
+  // normalization by trace^2 makes it independent of coordinate scale.
+  if (points.size() < 3) return false;
+  V2 mean = V2::Zero();
+  for (const auto &p : points) mean += V2(p.x, p.y);
+  mean /= static_cast<double>(points.size());
+  M2 scatter = M2::Zero();
+  for (const auto &p : points)
+  {
+    const V2 delta = V2(p.x, p.y) - mean;
+    scatter += delta * delta.transpose();
+  }
+  const double trace = scatter.trace();
+  return scatter.allFinite() && trace > kEps && scatter.determinant() > kEps * trace * trace;
+}
+
 bool fitResidual(const std::vector<Correspondence> &pairs, const M3 &prior,
                  bool reverse, M3 &corrected, std::vector<unsigned char> &inliers, std::string &reason)
 {
   std::vector<cv::Point2f> predicted, observed;
   for (size_t i = 0; i < pairs.size(); ++i)
   {
-    if (i % 4 == 0) continue; // independent geometry holdout
+    if (isGeometryHoldout(i)) continue; // six matches -> four training, two holdout
     V2 q;
     if (!dehom(prior, reverse ? pairs[i].target : pairs[i].source, q)) return reject(reason, "prior_projection_failed");
     const V2 &target = reverse ? pairs[i].source : pairs[i].target;
     predicted.emplace_back(static_cast<float>(q.x()), static_cast<float>(q.y()));
     observed.emplace_back(static_cast<float>(target.x()), static_cast<float>(target.y()));
   }
-  if (predicted.size() < 12) return reject(reason, "training_matches_lt_12");
+  if (predicted.size() < kMinGeometryTraining) return reject(reason, "training_matches_lt_4");
+  if (!hasAffineSpan(predicted) || !hasAffineSpan(observed)) return reject(reason, "training_points_degenerate");
   cv::Mat mask;
   const cv::Mat affine = cv::estimateAffine2D(predicted, observed, mask, cv::RANSAC, 2.0, 1000, 0.995, 10);
   if (affine.empty() || affine.rows != 2 || affine.cols != 3) return reject(reason, "ransac_no_affine");
+  if (mask.total() != predicted.size()) return reject(reason, "ransac_invalid_inlier_mask");
   M3 residual = M3::Identity();
   for (int row = 0; row < 2; ++row)
     for (int col = 0; col < 3; ++col) residual(row, col) = affine.at<double>(row, col);
@@ -404,14 +460,23 @@ bool fitResidual(const std::vector<Correspondence> &pairs, const M3 &prior,
   if (!corrected.allFinite() || std::abs(corrected.determinant()) <= kEps) return reject(reason, "singular_corrected_warp");
   inliers.assign(pairs.size(), 0);
   int index = 0, count = 0;
+  std::vector<cv::Point2f> inlier_predicted, inlier_observed;
   for (size_t i = 0; i < pairs.size(); ++i)
   {
-    if (i % 4 == 0) continue;
-    const bool good = mask.at<unsigned char>(index++) != 0;
+    if (isGeometryHoldout(i)) continue;
+    const bool good = mask.at<unsigned char>(index) != 0;
+    if (good)
+    {
+      inlier_predicted.push_back(predicted[index]);
+      inlier_observed.push_back(observed[index]);
+    }
+    ++index;
     inliers[i] = good ? 1 : 0;
     count += good;
   }
-  if (count < 8) return reject(reason, "ransac_inliers_lt_8");
+  if (count < kMinGeometryTraining) return reject(reason, "ransac_inliers_lt_4");
+  if (!hasAffineSpan(inlier_predicted) || !hasAffineSpan(inlier_observed))
+    return reject(reason, "ransac_inliers_degenerate");
   return true;
 }
 
@@ -428,7 +493,7 @@ bool verifyGeometry(const CropFeatures &source, const CropFeatures &target,
                     const std::vector<Correspondence> &pairs, const M3 &prior,
                     M3 &forward, M3 &reverse, std::vector<cv::Point2f> &hull, std::string &reason)
 {
-  if (pairs.size() < 16) return reject(reason, "unique_matches_lt_16");
+  if (pairs.size() < kMinGeometryMatches) return reject(reason, "unique_matches_lt_6");
   std::vector<unsigned char> inlier_a, inlier_b;
   if (!fitResidual(pairs, prior, false, forward, inlier_a, reason))
   { reason = "forward_" + reason; return false; }
@@ -443,7 +508,7 @@ bool verifyGeometry(const CropFeatures &source, const CropFeatures &target,
     double ea = 0.0, eb = 0.0;
     if (!rawError(target.chart, forward, p.source, p.target_raw, eb) ||
         !rawError(source.chart, reverse, p.target, p.source_raw, ea)) return reject(reason, "raw_reprojection_failed");
-    if (i % 4 == 0)
+    if (isGeometryHoldout(i))
     {
       // A held-out point is not silently dropped because it fits poorly.
       if (ea > 2.0 || eb > 2.0) return reject(reason, "holdout_error_gt_2px");
@@ -458,9 +523,9 @@ bool verifyGeometry(const CropFeatures &source, const CropFeatures &target,
       support.emplace_back(static_cast<float>(p.target.x()), static_cast<float>(p.target.y()));
     }
   }
-  if (validation_count < 4) return reject(reason, "holdout_count_lt_4");
+  if (validation_count < kMinGeometryHoldout) return reject(reason, "holdout_count_lt_2");
   if (validation_error / validation_count > 1.25) return reject(reason, "holdout_mean_gt_1.25px");
-  if (support.size() < 8) return reject(reason, "bidirectional_support_lt_8");
+  if (support.size() < kMinGeometryTraining) return reject(reason, "bidirectional_support_lt_4");
   cv::convexHull(support, hull);
   if (hull.size() < 3 || std::abs(cv::contourArea(hull)) < 100.0) return reject(reason, "hull_area_lt_100_or_degenerate");
   const cv::RotatedRect box = cv::minAreaRect(hull);
@@ -551,8 +616,11 @@ void takeSamples(const CropFeatures &source, const CropFeatures &target,
                  const std::atomic<bool> &cancel, PairReport &report, std::string &reason)
 {
   const size_t initial_samples = samples.size();
-  const cv::Rect bounds = cv::boundingRect(hull);
-  const V2 center(bounds.x + bounds.width * 0.5, bounds.y + bounds.height * 0.5);
+  const cv::Moments moments = cv::moments(hull);
+  if (!std::isfinite(moments.m00) || std::abs(moments.m00) <= kEps)
+  { reason = "invalid_hull_centroid"; return; }
+  const V2 center(moments.m10 / moments.m00, moments.m01 / moments.m00);
+  if (!center.allFinite()) { reason = "invalid_hull_centroid"; return; }
   const M3 inverse = forward.inverse();
   M2 ja, jb;
   if (!rawJacobian(source.chart, inverse, center, ja) || !rawJacobian(target.chart, M3::Identity(), center, jb))
@@ -562,16 +630,18 @@ void takeSamples(const CropFeatures &source, const CropFeatures &target,
       sa.singularValues().maxCoeff() / sa.singularValues().minCoeff() > 2.0 ||
       sb.singularValues().maxCoeff() / sb.singularValues().minCoeff() > 2.0)
   { reason = "singular_footprint_or_anisotropy_gt_2"; return; }
-  const double native_step = std::max(1.0 / sa.singularValues().minCoeff(), 1.0 / sb.singularValues().minCoeff());
-  const double step = std::max(native_step, std::max(bounds.width, bounds.height) / static_cast<double>(kGridSize - 1));
+  const double step = std::max(1.0 / sa.singularValues().minCoeff(), 1.0 / sb.singularValues().minCoeff());
   if (!std::isfinite(step) || step <= 0.0) { reason = "invalid_grid_step"; return; }
-  const int width = std::min(kGridSize, static_cast<int>(std::floor(bounds.width / step)) + 1);
-  const int height = std::min(kGridSize, static_cast<int>(std::floor(bounds.height / step)) + 1);
-  if (width < 16 || height < 16) { reason = "grid_side_lt_16"; return; }
+  // A local 16x16 window, not a resize of the entire feature-support hull.
+  // Keep the native-footprint pitch; shrinking the grid must not force more
+  // minification or require both sides of a thin hull to span 16 samples.
+  const int width = kGridSize, height = kGridSize;
+  const V2 origin = center - V2::Constant(0.5 * (kGridSize - 1) * step);
   // A single local blur is inappropriate when the warp varies strongly.
   for (int corner = 0; corner < 4; ++corner)
   {
-    const V2 q(bounds.x + ((corner & 1) ? bounds.width : 0), bounds.y + ((corner & 2) ? bounds.height : 0));
+    const V2 q = origin + V2((corner & 1) ? (width - 1) * step : 0.0,
+                             (corner & 2) ? (height - 1) * step : 0.0);
     M2 a, b;
     if (!rawJacobian(source.chart, inverse, q, a) || !rawJacobian(target.chart, M3::Identity(), q, b))
     { reason = "corner_jacobian_failed"; return; }
@@ -614,7 +684,7 @@ void takeSamples(const CropFeatures &source, const CropFeatures &target,
     if (cancelled(cancel)) { reason = "cancelled"; return; }
     for (int col = 0; col < width; ++col)
     {
-      const V2 q(bounds.x + col * step, bounds.y + row * step);
+      const V2 q = origin + V2(col * step, row * step);
       V2 a, b, local_a, cycle, cycle_raw;
       ++report.stages[Grid].entered;
       bool ok = grid_check(cv::pointPolygonTest(hull, cv::Point2f(static_cast<float>(q.x()), static_cast<float>(q.y())), false) >= 0.0, Hull);
@@ -644,25 +714,29 @@ void takeSamples(const CropFeatures &source, const CropFeatures &target,
   cv::remap(source_float, rgb, map_a, cv::Mat(), cv::INTER_LINEAR, cv::BORDER_CONSTANT);
   cv::remap(target_float, gray, map_b, cv::Mat(), cv::INTER_LINEAR, cv::BORDER_CONSTANT);
   cv::Mat rgb_mean, rgb_square_mean, gray_mean, gray_square_mean;
-  cv::GaussianBlur(rgb, rgb_mean, cv::Size(11, 11), 1.5, 1.5);
-  cv::GaussianBlur(rgb.mul(rgb), rgb_square_mean, cv::Size(11, 11), 1.5, 1.5);
-  cv::GaussianBlur(gray, gray_mean, cv::Size(11, 11), 1.5, 1.5);
-  cv::GaussianBlur(gray.mul(gray), gray_square_mean, cv::Size(11, 11), 1.5, 1.5);
+  const cv::Size color_kernel(kColorKernelSize, kColorKernelSize);
+  cv::GaussianBlur(rgb, rgb_mean, color_kernel, kColorSigma, kColorSigma);
+  cv::GaussianBlur(rgb.mul(rgb), rgb_square_mean, color_kernel, kColorSigma, kColorSigma);
+  cv::GaussianBlur(gray, gray_mean, color_kernel, kColorSigma, kColorSigma);
+  cv::GaussianBlur(gray.mul(gray), gray_square_mean, color_kernel, kColorSigma, kColorSigma);
   // All taps must be valid; BORDER_CONSTANT never becomes an observation.
-  cv::erode(valid, valid, cv::Mat::ones(11, 11, CV_8U), cv::Point(-1, -1), 1, cv::BORDER_CONSTANT, cv::Scalar(0));
+  cv::erode(valid, valid, cv::Mat::ones(kColorKernelSize, kColorKernelSize, CV_8U),
+            cv::Point(-1, -1), 1, cv::BORDER_CONSTANT, cv::Scalar(0));
   enum ColorReject { FilterSupport, TargetFinite, TargetRange, TargetVariance,
                      SourceFinite, SourceRange, SourceVariance, ColorRejectCount };
-  const char *color_reasons[] = {"invalid_11x11_support", "target_nonfinite", "target_mean_outside_4_251",
+  const char *color_reasons[] = {"invalid_5x5_support", "target_nonfinite", "target_mean_outside_4_251",
       "target_variance_gt_36_or_nan", "source_nonfinite", "source_mean_outside_4_251", "source_variance_gt_36_or_nan"};
   std::array<int, ColorRejectCount> color_rejected{};
   const auto color_check = [&color_rejected](bool ok, ColorReject cause) {
     if (!ok) ++color_rejected[cause];
     return ok;
   };
-  for (int row = 5; row + 5 < height; row += 3)
+  // Visit each valid center in the small grid. Adjacent local means may
+  // overlap, but keep the same physical-region ID and train/validation split.
+  for (int row = kColorHalo; row + kColorHalo < height; row += kColorSampleStride)
   {
     if (cancelled(cancel)) { reason = "cancelled"; return; }
-    for (int col = 5; col + 5 < width && samples.size() < kMaxSamples; col += 3)
+    for (int col = kColorHalo; col + kColorHalo < width && samples.size() < kMaxSamples; col += kColorSampleStride)
     {
       ++report.stages[Color].entered;
       if (!color_check(valid.at<unsigned char>(row, col) != 0, FilterSupport)) continue;
@@ -895,6 +969,16 @@ Result estimate(const Snapshot &snapshot, const std::atomic<bool> &cancel)
 std::vector<std::string> diagnosticLines(const Result &result)
 {
   std::vector<std::string> lines;
+  if (!result.pairs.empty())
+  {
+    std::ostringstream settings;
+    settings << "small-region settings: feature_context_min=" << kMinFeatureContext
+             << " matches_min=" << kMinGeometryMatches << " train_min=" << kMinGeometryTraining
+             << " holdout_min=" << kMinGeometryHoldout << " grid=" << kGridSize << 'x' << kGridSize
+             << " color_kernel=" << kColorKernelSize << 'x' << kColorKernelSize
+             << " color_stride=" << kColorSampleStride;
+    lines.push_back(settings.str());
+  }
   for (const PairReport &pair : result.pairs)
   {
     const std::string prefix = "camera" + std::to_string(pair.source_camera) + "->camera" + std::to_string(pair.target_camera);
