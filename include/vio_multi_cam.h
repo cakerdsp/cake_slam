@@ -692,6 +692,43 @@ public:
     }
   };
 
+  enum WarpApproxPairReject
+  {
+    WARP_APPROX_NO_SEED, WARP_APPROX_NO_PLANE, WARP_APPROX_BAD_GEOMETRY,
+    WARP_APPROX_BAD_AFFINE, WARP_APPROX_BAD_CENTER, WARP_APPROX_PAIR_REJECT_COUNT
+  };
+  enum WarpApproxSampleReject
+  {
+    WARP_APPROX_RAY_PLANE, WARP_APPROX_CURRENT_PROJECTION, WARP_APPROX_EXACT_PROJECTION,
+    WARP_APPROX_RAW_PROJECTION, WARP_APPROX_TANGENT_PROJECTION, WARP_APPROX_NONFINITE,
+    WARP_APPROX_SAMPLE_REJECT_COUNT
+  };
+  static constexpr double kWarpApproxHistStep = 0.01; // Reference-image pixels.
+  static constexpr int kWarpApproxHistBins = 6401; // [0,64) plus an overflow bin.
+  struct UsageWarpApproxStats
+  {
+    long long observations = 0, paired_observations = 0;
+    long long attempted_samples = 0, paired_samples = 0;
+    std::array<long long, WARP_APPROX_PAIR_REJECT_COUNT> pair_reject{};
+    std::array<long long, WARP_APPROX_SAMPLE_REJECT_COUNT> center_reject{};
+    std::array<long long, WARP_APPROX_SAMPLE_REJECT_COUNT> sample_reject{};
+    // Method index: 0 = raw-image affine, 1 = tangent-plane affine.
+    std::array<double, 2> position_sse{}, shape_sse{}, center_sse{};
+    std::array<std::vector<long long>, 2> shape_hist;
+
+    void reset()
+    {
+      observations = paired_observations = attempted_samples = paired_samples = 0;
+      pair_reject.fill(0);
+      center_reject.fill(0);
+      sample_reject.fill(0);
+      position_sse.fill(0.0);
+      shape_sse.fill(0.0);
+      center_sse.fill(0.0);
+      for (auto &hist : shape_hist) std::fill(hist.begin(), hist.end(), 0);
+    }
+  };
+
   struct PoseInfoStatsCell
   {
     long long active_frames = 0;
@@ -749,6 +786,10 @@ public:
 
   long long usage_stats_frames_ = 0;
   long long usage_stats_total_frames_ = 0;
+  // Stage index: 0 = all attempted historical candidates, 1 = accepted subset.
+  // Histograms are allocated lazily, only when usage_stats_en collects valid samples.
+  std::array<UsageWarpApproxStats, 2> usage_warp_approx_, usage_total_warp_approx_;
+  double usage_warp_approx_seconds_ = 0.0, usage_total_warp_approx_seconds_ = 0.0;
   std::vector<UsageStatsCell> usage_camera_pairs_;
   std::vector<UsageStatsCell> usage_total_camera_pairs_;
   std::vector<UsageStatsCell> usage_current_camera_pairs_;
@@ -1174,6 +1215,9 @@ public:
   int usageRmsBin(double rms) const;
   void resetUsageStatsWindow();
   void resetUsageStatsTotals();
+  void recordUsageWarpApproximation(const PerCameraData &ctx, const Feature &reference, const VisualPoint &point,
+                                    const V2D &current_raw_center, const VirtualTrackPatch *track, bool accepted);
+  void printUsageWarpApproximation() const;
   void recordUsageObservation(const PerCameraData &ctx, const Feature &ref_ftr, const VisualPoint &pt,
                               const V2D &cur_px, const Matrix2d &A_cur_ref, bool accepted,
                               const std::vector<double> &sse_levels = std::vector<double>(),

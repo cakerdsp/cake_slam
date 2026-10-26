@@ -3970,6 +3970,8 @@ int VIOManager::usageRmsBin(double rms) const
 void VIOManager::resetUsageStatsWindow()
 {
   usage_stats_frames_ = 0;
+  for (auto &stats : usage_warp_approx_) stats.reset();
+  usage_warp_approx_seconds_ = 0.0;
   usage_camera_pairs_.assign(std::max(0, numCameras() * numCameras()), UsageStatsCell());
   if (cross_camera_current_residual_en)
   {
@@ -3991,6 +3993,8 @@ void VIOManager::resetUsageStatsWindow()
 void VIOManager::resetUsageStatsTotals()
 {
   usage_stats_total_frames_ = 0;
+  for (auto &stats : usage_total_warp_approx_) stats.reset();
+  usage_total_warp_approx_seconds_ = 0.0;
   usage_total_camera_pairs_.assign(std::max(0, numCameras() * numCameras()), UsageStatsCell());
   if (cross_camera_current_residual_en)
   {
@@ -4007,6 +4011,266 @@ void VIOManager::resetUsageStatsTotals()
   usage_total_pose_same_.reset();
   usage_total_pose_cross_.reset();
   if (cross_camera_current_residual_en) usage_total_pose_current_cross_.reset();
+}
+
+void VIOManager::recordUsageWarpApproximation(const PerCameraData &ctx, const Feature &reference,
+                                             const VisualPoint &point, const V2D &current_raw_center,
+                                             const VirtualTrackPatch *track, bool accepted)
+{
+  if (!usage_stats_en) return;
+  const double start = omp_get_wtime();
+  std::array<UsageWarpApproxStats *, 4> destinations = {
+      &usage_warp_approx_[0], &usage_total_warp_approx_[0],
+      accepted ? &usage_warp_approx_[1] : nullptr,
+      accepted ? &usage_total_warp_approx_[1] : nullptr};
+  auto update = [&](const auto &operation) {
+    for (auto *stats : destinations)
+      if (stats != nullptr) operation(*stats);
+  };
+  auto finish = [&]() {
+    const double elapsed = omp_get_wtime() - start;
+    usage_warp_approx_seconds_ += elapsed;
+    usage_total_warp_approx_seconds_ += elapsed;
+  };
+  auto reject_pair = [&](WarpApproxPairReject reason) {
+    update([&](UsageWarpApproxStats &stats) { ++stats.pair_reject[reason]; });
+    finish();
+  };
+  update([](UsageWarpApproxStats &stats) { ++stats.observations; });
+  if (track == nullptr || !reference.virtual_patch_valid_)
+  {
+    reject_pair(WARP_APPROX_NO_SEED);
+    return;
+  }
+  if (!normal_en || !point.is_normal_initialized_ || !point.normal_.array().isFinite().all() ||
+      point.normal_.norm() <= virtual_min_z)
+  {
+    reject_pair(WARP_APPROX_NO_PLANE);
+    return;
+  }
+  if (ctx.new_frame == nullptr || ctx.cam == nullptr || reference.camera_id_ < 0 ||
+      reference.camera_id_ >= numCameras() || !std::isfinite(virtual_focal_length) ||
+      virtual_focal_length <= 0.0 || patch_size_half <= 0 || patch_size != 2 * patch_size_half)
+  {
+    reject_pair(WARP_APPROX_BAD_GEOMETRY);
+    return;
+  }
+  const PerCameraData &ref_ctx = cameras_[reference.camera_id_];
+  auto valid_pixel = [](const PerCameraData &camera, const V2D &px) {
+    return camera.cam != nullptr && px.array().isFinite().all() &&
+           px[0] >= 0.0 && px[1] >= 0.0 && px[0] < camera.width - 1 && px[1] < camera.height - 1 &&
+           camera.cam->isInFrame(px.cast<int>(), 0);
+  };
+  const V3D point_ref = reference.T_f_w_ * point.pos_;
+  const V3D point_cur = ctx.new_frame->T_f_w_ * point.pos_;
+  const V3D normal_world = point.normal_.normalized();
+  const V3D normal_ref = reference.T_f_w_.rotationMatrix() * normal_world;
+  const V3D normal_cur = ctx.new_frame->T_f_w_.rotationMatrix() * normal_world;
+  const V2D virtual_center = virtualProject(track->T_vcur_w_seed * point.pos_);
+  if (!point_ref.array().isFinite().all() || !point_cur.array().isFinite().all() ||
+      !normal_ref.array().isFinite().all() || !normal_cur.array().isFinite().all() ||
+      !virtual_center.array().isFinite().all() || !valid_pixel(ctx, current_raw_center) ||
+      !valid_pixel(ref_ctx, reference.px_) ||
+      !valid_pixel(ref_ctx, reference.px_ + V2D(4.0, 0.0)) ||
+      !valid_pixel(ref_ctx, reference.px_ + V2D(0.0, 4.0)) ||
+      !track->R_ccur_from_vcur_seed.array().isFinite().all() ||
+      !reference.R_c_from_v_.array().isFinite().all())
+  {
+    reject_pair(WARP_APPROX_BAD_GEOMETRY);
+    return;
+  }
+
+  // Controlled geometry comparison: rebuild BOTH affine approximations at level 0.
+  // Stored reference.level_, search levels and adaptive pitch are not shape errors.
+  // This diagnoses the representation at retrieval-time poses, not optimizer residuals.
+  const SE3d T_cur_ref = ctx.new_frame->T_f_w_ * reference.T_f_w_.inverse();
+  const SE3d T_ref_cur = T_cur_ref.inverse();
+  Matrix2d raw_affine, tangent_affine;
+  getWarpMatrixAffineHomography(ref_ctx, ctx, reference.px_, point_ref, normal_ref, T_cur_ref, 0, raw_affine);
+  const bool tangent_ok = getWarpMatrixAffineHomographyVirtual(
+      reference.T_v_w_ * point.pos_, reference.T_v_w_.rotationMatrix() * normal_world,
+      track->T_vcur_w_seed * reference.T_v_w_.inverse(), 0, tangent_affine);
+  if (!tangent_ok || !raw_affine.array().isFinite().all() ||
+      std::fabs(raw_affine.determinant()) <= 1.0e-9)
+  {
+    reject_pair(WARP_APPROX_BAD_AFFINE);
+    return;
+  }
+  const Matrix2d raw_inverse = raw_affine.inverse();
+  const Matrix2d tangent_inverse = tangent_affine.inverse();
+  if (!raw_inverse.array().isFinite().all() || !tangent_inverse.array().isFinite().all())
+  {
+    reject_pair(WARP_APPROX_BAD_AFFINE);
+    return;
+  }
+  const double plane_distance = normal_cur.dot(point_cur);
+  const V2D reference_virtual_center(virtual_support_radius, virtual_support_radius);
+  // Return all locations in the SAME reference raw image. No intensity reads or
+  // support-image construction: invalid geometry is counted, never replaced by zero.
+  auto locations = [&](const V2D &offset, V2D &exact, std::array<V2D, 2> &predicted) -> int {
+    const V3D ray_cur = track->R_ccur_from_vcur_seed * virtualCam2World(virtual_center + offset);
+    const double denominator = normal_cur.dot(ray_cur);
+    if (!std::isfinite(denominator) || std::fabs(denominator) <= kS2Eps)
+      return WARP_APPROX_RAY_PLANE;
+    const double distance = plane_distance / denominator;
+    if (!std::isfinite(distance) || distance <= virtual_min_z) return WARP_APPROX_RAY_PLANE;
+    V2D current_px;
+    if (!projectRawFisheyeIfValid(ctx, ray_cur, 0, current_px)) return WARP_APPROX_CURRENT_PROJECTION;
+    const V3D exact_ref = T_ref_cur * (distance * ray_cur);
+    const V3D exact_virtual_ref = reference.R_v_from_c_ * exact_ref;
+    if (!exact_virtual_ref.array().isFinite().all() || exact_virtual_ref[2] <= virtual_min_z ||
+        !projectRawFisheyeIfValid(ref_ctx, exact_ref, 0, exact)) return WARP_APPROX_EXACT_PROJECTION;
+    predicted[0] = reference.px_ + raw_inverse * (current_px - current_raw_center);
+    if (!valid_pixel(ref_ctx, predicted[0])) return WARP_APPROX_RAW_PROJECTION;
+    const V2D reference_virtual_px = reference_virtual_center + tangent_inverse * offset;
+    const V3D reference_ray = reference.R_c_from_v_ * virtualCam2World(reference_virtual_px);
+    if (!projectRawFisheyeIfValid(ref_ctx, reference_ray, 0, predicted[1]))
+      return WARP_APPROX_TANGENT_PROJECTION;
+    return -1;
+  };
+  V2D exact_center;
+  std::array<V2D, 2> predicted_center, center_error;
+  int center_failure = locations(V2D::Zero(), exact_center, predicted_center);
+  if (center_failure < 0)
+  {
+    for (int method = 0; method < 2; ++method)
+    {
+      center_error[method] = predicted_center[method] - exact_center;
+      if (!std::isfinite(center_error[method].squaredNorm())) center_failure = WARP_APPROX_NONFINITE;
+    }
+  }
+  if (center_failure >= 0)
+  {
+    update([&](UsageWarpApproxStats &stats) { ++stats.center_reject[center_failure]; });
+    reject_pair(WARP_APPROX_BAD_CENTER);
+    return;
+  }
+  update([&](UsageWarpApproxStats &stats) {
+    ++stats.paired_observations;
+    for (int method = 0; method < 2; ++method)
+    {
+      stats.center_sse[method] += center_error[method].squaredNorm();
+      if (stats.shape_hist[method].empty()) stats.shape_hist[method].assign(kWarpApproxHistBins, 0);
+    }
+  });
+  for (int y = 0; y < patch_size; ++y)
+  {
+    for (int x = 0; x < patch_size; ++x)
+    {
+      update([](UsageWarpApproxStats &stats) { ++stats.attempted_samples; });
+      V2D exact;
+      std::array<V2D, 2> predicted;
+      int failure = locations(V2D(x - patch_size_half, y - patch_size_half), exact, predicted);
+      std::array<double, 2> position_squared{}, shape_squared{};
+      std::array<int, 2> bins{};
+      if (failure < 0)
+      {
+        for (int method = 0; method < 2; ++method)
+        {
+          const V2D error = predicted[method] - exact;
+          position_squared[method] = error.squaredNorm();
+          // Remove only the central translation; do not refit scale, shear or rotation.
+          shape_squared[method] = (error - center_error[method]).squaredNorm();
+          if (!std::isfinite(position_squared[method]) || !std::isfinite(shape_squared[method]))
+          {
+            failure = WARP_APPROX_NONFINITE;
+            break;
+          }
+          const double shape_error = std::sqrt(shape_squared[method]);
+          bins[method] = shape_error >= (kWarpApproxHistBins - 1) * kWarpApproxHistStep
+                             ? kWarpApproxHistBins - 1
+                             : std::min(kWarpApproxHistBins - 1, static_cast<int>(shape_error / kWarpApproxHistStep));
+        }
+      }
+      if (failure >= 0)
+      {
+        update([&](UsageWarpApproxStats &stats) { ++stats.sample_reject[failure]; });
+        continue;
+      }
+      // Pairwise complete samples: either both methods contribute, or neither does.
+      update([&](UsageWarpApproxStats &stats) {
+        ++stats.paired_samples;
+        for (int method = 0; method < 2; ++method)
+        {
+          stats.position_sse[method] += position_squared[method];
+          stats.shape_sse[method] += shape_squared[method];
+          ++stats.shape_hist[method][bins[method]];
+        }
+      });
+    }
+  }
+  finish();
+}
+
+void VIOManager::printUsageWarpApproximation() const
+{
+  if (!usage_stats_en) return;
+  if (!virtual_fisheye_patch_en)
+  {
+    printf("[ VIO Usage Stats ][WARP_APPROX] unavailable: run tangent-plane mode to evaluate both representations on the same observations.\n");
+    return;
+  }
+  printf("\033[1;35m[ VIO Usage Stats ][WARP_APPROX] paired seed geometry; grid=%dx%d fv=%.3f; reference/search/pyramid levels=0; units=reference_raw_px.\033[0m\n",
+         patch_size, patch_size, virtual_focal_length);
+  printf("[ VIO Usage Stats ][WARP_APPROX] reference=landmark_plane_model (not ground truth); no intensity/interpolation error; shape=center-translation removed, no affine refit.\n");
+  printf("[ VIO Usage Stats ][WARP_APPROX] P95 upper bound: %.3f px bins, overflow >=64 px; runtime AS=%d pose_affine=%d excluded from fixed-grid comparison.\n",
+         kWarpApproxHistStep, virtual_adaptive_sampling_en ? 1 : 0, virtual_pose_affine_en ? 1 : 0);
+  const char *pair_reasons[] = {"seed_unavailable", "plane_unavailable", "geometry_invalid", "affine_invalid", "center_invalid"};
+  const char *sample_reasons[] = {"ray_plane", "current_projection", "exact_projection", "raw_prediction", "tangent_prediction", "nonfinite"};
+  auto rms = [](double sse, long long count) {
+    if (count == 0) return std::string("n/a");
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(6) << std::sqrt(sse / static_cast<double>(count));
+    return out.str();
+  };
+  auto p95 = [&](const UsageWarpApproxStats &stats, int method) {
+    if (stats.paired_samples == 0) return std::string("n/a");
+    const long long rank = stats.paired_samples - stats.paired_samples / 20; // ceil(0.95*N).
+    long long cumulative = 0;
+    for (int bin = 0; bin < kWarpApproxHistBins; ++bin)
+    {
+      cumulative += stats.shape_hist[method][bin];
+      if (cumulative < rank) continue;
+      if (bin == kWarpApproxHistBins - 1) return std::string(">=64.00");
+      std::ostringstream out;
+      out << std::fixed << std::setprecision(2) << (bin + 1) * kWarpApproxHistStep;
+      return out.str();
+    }
+    return std::string("n/a");
+  };
+  for (int scope = 0; scope < 2; ++scope)
+  {
+    const char *scope_name = scope == 0 ? "Window" : "Run Total";
+    const auto &stages = scope == 0 ? usage_warp_approx_ : usage_total_warp_approx_;
+    const double elapsed = scope == 0 ? usage_warp_approx_seconds_ : usage_total_warp_approx_seconds_;
+    const long long frames = scope == 0 ? usage_stats_frames_ : usage_stats_total_frames_;
+    printf("[ VIO Usage Stats ][WARP_APPROX][%s] compute_ms=%.3f mean_ms_per_frame=%.3f (excludes printing).\n",
+           scope_name, 1000.0 * elapsed, frames > 0 ? 1000.0 * elapsed / frames : 0.0);
+    for (int stage = 0; stage < 2; ++stage)
+    {
+      const char *stage_name = stage == 0 ? "candidates" : "accepted_subset";
+      const auto &stats = stages[stage];
+      printf("[ VIO Usage Stats ][WARP_APPROX][%s][%s] pairs=%lld/%lld samples=%lld/%lld (paired-valid/attempted).\n",
+             scope_name, stage_name, stats.paired_observations, stats.observations,
+             stats.paired_samples, stats.attempted_samples);
+      for (int method = 0; method < 2; ++method)
+        printf("[ VIO Usage Stats ][WARP_APPROX][%s][%s] %s position_rmse_px=%s shape_rmse_px=%s shape_p95_upper_px=%s center_rmse_px=%s\n",
+               scope_name, stage_name, method == 0 ? "Raw" : "Tangent",
+               rms(stats.position_sse[method], stats.paired_samples).c_str(),
+               rms(stats.shape_sse[method], stats.paired_samples).c_str(), p95(stats, method).c_str(),
+               rms(stats.center_sse[method], stats.paired_observations).c_str());
+      auto print_rejects = [&](const char *unit, const auto &counts, const char *const *names) {
+        if (std::accumulate(counts.begin(), counts.end(), 0LL) == 0) return;
+        printf("[ VIO Usage Stats ][WARP_APPROX][%s][%s] %s_reject:", scope_name, stage_name, unit);
+        for (size_t i = 0; i < counts.size(); ++i)
+          if (counts[i] > 0) printf(" %s=%lld", names[i], counts[i]);
+        printf("\n");
+      };
+      print_rejects("pair", stats.pair_reject, pair_reasons);
+      print_rejects("center", stats.center_reject, sample_reasons);
+      print_rejects("sample", stats.sample_reject, sample_reasons);
+    }
+  }
 }
 
 void VIOManager::recordCurrentCrossCameraUsage(const CurrentCrossCameraPair &pair, int stage,
@@ -5220,6 +5484,7 @@ void VIOManager::printUsageStatsTable(int frame_id)
                 usage_total_cross_region_pairs_, usage_total_view_angle_bins_, usage_total_footprint_bins_,
                 usage_total_anisotropy_bins_, usage_total_pose_all_,
                 usage_total_pose_same_, usage_total_pose_cross_, usage_total_pose_current_cross_, true);
+  printUsageWarpApproximation();
 }
 void VIOManager::maybePrintUsageStatsTable(int frame_id)
 {
@@ -6192,6 +6457,8 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       recordUsageObservation(ctx, *candidate.reference, *candidate.point, candidate.current_raw_center_px, usage_affine, false);
       recordUsagePreGateMetrics(ctx, *candidate.reference, *candidate.point, candidate.current_raw_center_px,
                                 usage_affine, result.level_sse, result.level_ncc, result.level_valid);
+      recordUsageWarpApproximation(ctx, *candidate.reference, *candidate.point, candidate.current_raw_center_px,
+                                   result.search_level >= 0 ? &result.track : nullptr, result.valid);
     }
     build_virtual_support_time_ += result.build_time;
     virtual_affine_time_ += result.affine_time;
