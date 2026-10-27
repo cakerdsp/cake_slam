@@ -1204,6 +1204,7 @@ public:
   void queueReferenceRetirement(VisualPoint &point, Feature &feature);
   void queuePointRetirement(VisualPoint &point);
   void flushVisualMapRetirements();
+  void queueStaleVisualMapPoints(int frame_id);
   void printVisualMapManageStats(int frame_id) const;
   void plotTrackedPoints(PerCameraData &ctx);
   void updateFrameState(PerCameraData &ctx, const StatesGroup &state_value);

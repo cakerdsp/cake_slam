@@ -4,7 +4,8 @@
 The weight estimator is translated from include/fixed_gray_weights.h. Sampling
 reuses the online 16x16 common-tangent grid, footprint/preblur, 5x5 statistics,
 two-way geometry checks and region-level validation. The image-only frontend
-uses full-image SIFT and local tangent affine fits WITHOUT LiDAR plane priors.
+uses calibrated matching views and grouped tangent affine fits WITHOUT LiDAR
+plane priors. Several disjoint color blocks may share one checked geometry fit.
 It is explicitly not a replay of color_gray_init::estimate(snapshot).
 
 Example:
@@ -16,6 +17,7 @@ Example:
 import argparse
 import csv
 import hashlib
+import itertools
 import json
 import math
 import sys
@@ -192,15 +194,19 @@ def raw_jacobian(chart, h, q):
     return result
 
 
-def sift_matches(source, reference, max_features):
+def sift_matches(source, reference, max_features, contrast_threshold=0.04, equalize=False):
     if hasattr(cv2, "SIFT_create"):
-        detector = cv2.SIFT_create(nfeatures=max_features)
+        detector = cv2.SIFT_create(nfeatures=max_features, contrastThreshold=contrast_threshold)
     elif hasattr(cv2, "xfeatures2d") and hasattr(cv2.xfeatures2d, "SIFT_create"):
-        detector = cv2.xfeatures2d.SIFT_create(nfeatures=max_features)
+        detector = cv2.xfeatures2d.SIFT_create(nfeatures=max_features, contrastThreshold=contrast_threshold)
     else:
         raise ValueError("SIFT unavailable; use a separate Python environment with requirements_offline_color.txt")
-    keys_s, desc_s = detector.detectAndCompute(fixed_gray(source, DEFAULT_WEIGHTS), None)
-    keys_r, desc_r = detector.detectAndCompute(fixed_gray(reference, DEFAULT_WEIGHTS), None)
+    gray_s, gray_r = fixed_gray(source, DEFAULT_WEIGHTS), fixed_gray(reference, DEFAULT_WEIGHTS)
+    if equalize:
+        clahe = cv2.createCLAHE(clipLimit=2., tileGridSize=(8, 8))
+        gray_s, gray_r = clahe.apply(gray_s), clahe.apply(gray_r)
+    keys_s, desc_s = detector.detectAndCompute(gray_s, None)
+    keys_r, desc_r = detector.detectAndCompute(gray_r, None)
     counts = {"source_keypoints": len(keys_s), "reference_keypoints": len(keys_r)}
     if desc_s is None or desc_r is None or min(len(keys_s), len(keys_r)) < 2:
         return np.empty((0, 4)), counts
@@ -220,6 +226,54 @@ def sift_matches(source, reference, max_features):
         pairs.append(value)
     counts["unique_mutual_matches"] = len(pairs)
     return np.asarray(pairs).reshape(-1, 4), counts
+
+
+def tangent_sift_matches(source, reference, source_camera, reference_camera, focal, max_features,
+                         contrast_threshold=0.04, equalize=False):
+    """Use calibrated forward tangent views for descriptors; sample ORIGINAL RGB later."""
+    height, width = reference.shape[:2]
+    y, x = np.mgrid[:height, :width]
+    origin = np.array([(width-1)/2., (height-1)/2.])
+    q = np.column_stack((x.ravel(), y.ravel())) - origin
+    charts, views, masks = [], [], []
+    for image, camera in ((source, source_camera), (reference, reference_camera)):
+        chart = Chart(camera, [camera.cx, camera.cy], focal)
+        raw = chart.to_raw(q).reshape(height, width, 2).astype(np.float32)
+        valid = (np.isfinite(raw).all(axis=2) & (raw[..., 0] >= 0) & (raw[..., 1] >= 0)
+                 & (raw[..., 0] < image.shape[1]-1) & (raw[..., 1] < image.shape[0]-1))
+        mask = cv2.erode(valid.astype(np.uint8), np.ones((17, 17), np.uint8),
+                         borderType=cv2.BORDER_CONSTANT, borderValue=0)
+        views.append(cv2.remap(image, raw, None, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT))
+        masks.append(mask)
+        charts.append(chart)
+    matches, counts = sift_matches(views[0], views[1], max_features, contrast_threshold, equalize)
+    kept = [pair for pair in matches if masks[0][int(pair[1]), int(pair[0])]
+            and masks[1][int(pair[3]), int(pair[2])]]
+    values = np.asarray(kept, dtype=float).reshape(-1, 4)
+    if len(values):
+        values = np.column_stack((charts[0].to_raw(values[:, :2]-origin),
+                                  charts[1].to_raw(values[:, 2:]-origin)))
+    values = deduplicate_matches(values)
+    counts.update(domain="tangent", native_unique_matches=len(values))
+    return values, counts, views
+
+
+def wide_tangent_matches(source, reference, source_camera, reference_camera, focal, max_features):
+    """Broader descriptor search only; original RGB and geometry gates stay unchanged."""
+    batches, counts = [], []
+    for factor in (0.7, 1., 1.4):
+        for equalize in (False, True):
+            matches, count, _ = tangent_sift_matches(
+                source, reference, source_camera, reference_camera, focal*factor,
+                max_features, 0.01, equalize)
+            batches.append(matches)
+            counts.append(dict(count, focal=focal*factor, descriptor_clahe=equalize))
+    raw, count = sift_matches(source, reference, max_features, 0.01, True)
+    batches.append(raw)
+    counts.append(dict(count, domain="raw", descriptor_clahe=True))
+    merged = deduplicate_matches(np.concatenate(batches))
+    return merged, {"domain": "wide_tangent_and_raw", "batches": counts,
+                    "unique_mutual_matches": len(merged), "descriptor_contrast_threshold": 0.01}
 
 
 def span_ok(points):
@@ -287,15 +341,16 @@ def box_overlap(a, b):
     return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
 
 
-def prepare_raw_grid(image, raw, minification):
+def prepare_raw_grid(image, raw, minification, uncertainty_radius=0.):
     sigma = 0.8 * math.sqrt(max(0., minification ** 2 - 1))
     if not np.isfinite(sigma) or sigma > 6:
         raise ValueError("prefilter_sigma_gt_6")
     halo = int(math.ceil(3 * sigma)) + 2
     if not np.isfinite(raw).all():
         raise ValueError("nonfinite_sampling_projection")
-    low = np.floor(raw.min(axis=0)).astype(int) - halo
-    high = np.ceil(raw.max(axis=0)).astype(int) + halo + 2
+    margin = int(math.ceil(uncertainty_radius))
+    low = np.floor(raw.min(axis=0)).astype(int) - halo - margin
+    high = np.ceil(raw.max(axis=0)).astype(int) + halo + margin + 2
     if min(low) < 0 or high[0] > image.shape[1] or high[1] > image.shape[0]:
         raise ValueError("filter_halo_outside_image")
     box = tuple(int(v) for v in (low[0], low[1], high[0], high[1]))
@@ -309,7 +364,7 @@ def prepare_raw_grid(image, raw, minification):
     supported = np.ones(len(xy), dtype=bool)
     for dx, dy in ((0, 0), (0, 1), (1, 0), (1, 1)):
         supported &= unclipped[xy[:, 1]+dy, xy[:, 0]+dx] != 0
-    return {"box": box, "crop": crop, "map": local, "sigma": sigma,
+    return {"box": box, "crop": crop, "map": local, "sigma": sigma, "raw_mask": unclipped,
             "supported": supported.reshape(16, 16)}
 
 
@@ -321,10 +376,12 @@ def resample(grid, image):
     return cv2.remap(image, grid["map"], None, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
 
-def sample_region(source, reference, geometry):
+def sample_region(source, reference, geometry, center=None, uncertainty_models=None):
     source_chart, reference_chart, forward, reverse, hull, support = geometry
     moments = cv2.moments(hull)
-    center = np.array([moments["m10"], moments["m01"]]) / moments["m00"]
+    if center is None:
+        center = np.array([moments["m10"], moments["m01"]]) / moments["m00"]
+    center = np.asarray(center, dtype=float)
     inverse = np.linalg.inv(forward)
     ja, jb = raw_jacobian(source_chart, inverse, center), raw_jacobian(reference_chart, np.eye(3), center)
     sa, sb = np.linalg.svd(ja, compute_uv=False), np.linalg.svd(jb, compute_uv=False)
@@ -342,8 +399,14 @@ def sample_region(source, reference, geometry):
     cycle = source_chart.to_raw(transform(reverse, q))
     valid = np.array([cv2.pointPolygonTest(hull, tuple(v), False) >= 0 for v in q])
     valid &= np.linalg.norm(cycle-raw_s, axis=1) <= 1.5
-    grid_s = prepare_raw_grid(source, raw_s, sa[0]*step)
-    grid_r = prepare_raw_grid(reference, raw_r, sb[0]*step)
+    if uncertainty_models:
+        for model in uncertainty_models:
+            alternative = source_chart.to_raw(transform(model, q))
+            if not np.isfinite(alternative).all() or np.max(np.linalg.norm(alternative-raw_s, axis=1)) > 2.:
+                raise ValueError("sampling_prediction_spread_gt_2px")
+    uncertainty = 2. if uncertainty_models else 0.
+    grid_s = prepare_raw_grid(source, raw_s, sa[0]*step, uncertainty)
+    grid_r = prepare_raw_grid(reference, raw_r, sb[0]*step, uncertainty)
     valid = valid.reshape(16, 16) & grid_s["supported"] & grid_r["supported"]
     bgr = resample(grid_s, grid_s["crop"])
     reference_patch = resample(grid_r, fixed_gray(grid_r["crop"], DEFAULT_WEIGHTS))
@@ -357,12 +420,182 @@ def sample_region(source, reference, geometry):
     mask &= (gray_mean > 4) & (gray_mean < 251) & (gray_square-gray_mean**2 <= 36)
     mask &= np.all((rgb_mean > 4) & (rgb_mean < 251) & (rgb_square-rgb_mean**2 <= 36), axis=2)
     mask &= np.isfinite(gray_mean) & np.isfinite(rgb_mean).all(axis=2)
+    if uncertainty_models:
+        # Require color stability over the geometric uncertainty neighborhood.
+        # Six gray levels is the existing sqrt(36) local-variance scale, not a
+        # relaxed fitting RMSE. No color residual/model is used to select groups.
+        for angle in np.arange(8) * (math.pi/4):
+            delta = uncertainty * np.array([math.cos(angle), math.sin(angle)], np.float32)
+            for grid, native, baseline, rgb_case in (
+                    (grid_s, grid_s["crop"], rgb_mean, True),
+                    (grid_r, fixed_gray(grid_r["crop"], DEFAULT_WEIGHTS), gray_mean, False)):
+                shifted = dict(grid, map=grid["map"]+delta)
+                xy = np.floor(shifted["map"].reshape(-1, 2)).astype(int)
+                ok = np.ones(len(xy), bool)
+                for dx, dy in ((0, 0), (0, 1), (1, 0), (1, 1)):
+                    ok &= grid["raw_mask"][xy[:, 1]+dy, xy[:, 0]+dx] != 0
+                ok = cv2.erode(ok.reshape(16, 16).astype(np.uint8), np.ones((5, 5), np.uint8),
+                               borderType=cv2.BORDER_CONSTANT, borderValue=0) != 0
+                patch = resample(shifted, native)
+                mean = cv2.GaussianBlur(patch, (5, 5), 1.)
+                square = cv2.GaussianBlur(patch*patch, (5, 5), 1.)
+                if rgb_case:
+                    mean, square = mean[..., ::-1], square[..., ::-1]
+                    stable = np.all((np.abs(mean-baseline) <= 6.) & (square-mean*mean <= 36.), axis=2)
+                else:
+                    stable = (np.abs(mean-baseline) <= 6.) & (square-mean*mean <= 36.)
+                mask &= ok & stable
     if not mask.any():
         raise ValueError("no_valid_color_samples")
     return {"source_grid": grid_s, "reference_grid": grid_r, "rgb": rgb_mean[mask].astype(float),
             "target": gray_mean[mask].astype(float), "mask": mask, "valid": valid,
             "reference_patch": reference_patch, "default_patch": default_patch,
             "support_indices": support, "step": float(step)}
+
+
+def fit_affine(points, observed):
+    if len(points) < 3 or not span_ok(points) or not span_ok(observed):
+        return None
+    value = np.eye(3)
+    value[:2] = np.linalg.lstsq(np.column_stack((points, np.ones(len(points)))), observed, rcond=None)[0].T
+    return value if np.isfinite(value).all() and np.linalg.det(value[:2, :2]) > 1e-9 else None
+
+
+def validate_group(indices, a, b, matches, chart_s, chart_r):
+    """Sparse affine support: each point must survive a leave-one-out prediction.
+
+    This is a geometric consistency check on a RANSAC-selected set, not an
+    independent ground-truth accuracy measurement or proof of a 3-D plane.
+    """
+    ids = np.asarray(indices, int)
+    if len(ids) < 4:
+        return None
+    forward, reverse = fit_affine(a[ids], b[ids]), fit_affine(b[ids], a[ids])
+    if forward is None or reverse is None:
+        return None
+    errors, models = [], []
+    for i in ids:
+        train = ids[ids != i]
+        f, r = fit_affine(a[train], b[train]), fit_affine(b[train], a[train])
+        if f is None or r is None:
+            return None
+        errors.extend((float(np.linalg.norm(chart_r.to_raw(transform(f, a[i:i+1]))[0]-matches[i, 2:])),
+                       float(np.linalg.norm(chart_s.to_raw(transform(r, b[i:i+1]))[0]-matches[i, :2]))))
+        models.extend((np.linalg.inv(f), r))
+    if not np.isfinite(errors).all() or max(errors) > 2. or np.mean(errors) > 1.25:
+        return None
+    hull = cv2.convexHull(b[ids].astype(np.float32))
+    box = cv2.minAreaRect(hull)[1]
+    if cv2.contourArea(hull) < 100 or min(box) < 8 or max(box) > 8*min(box):
+        return None
+    return {"geometry": (chart_s, chart_r, forward, reverse, hull, ids), "models": models,
+            "indices": ids.tolist(), "loo_max_raw_px": max(errors), "loo_mean_raw_px": float(np.mean(errors)),
+            "hull_area_virtual_px2": float(cv2.contourArea(hull))}
+
+
+def discover_groups(matches, source_camera, reference_camera, focal, context, max_trials=4096):
+    if len(matches) < 4:
+        return [], {"geometry_groups": 0, "group_hypotheses": 0}
+    cs = Chart(source_camera, [source_camera.cx, source_camera.cy], focal)
+    cr = Chart(reference_camera, [reference_camera.cx, reference_camera.cy], focal)
+    a, b = cs.to_chart(matches[:, :2]), cr.to_chart(matches[:, 2:])
+    valid = np.flatnonzero(np.isfinite(a).all(axis=1) & np.isfinite(b).all(axis=1))
+    if len(valid) <= 32:
+        hypotheses = itertools.islice(itertools.combinations(valid, 3), max_trials)
+    else:
+        # Bounded deterministic local RANSAC for denser image pairs.
+        random = np.random.default_rng(7)
+        proposals = []
+        for _ in range(max_trials):
+            seed = int(random.choice(valid))
+            nearest = valid[np.argsort(np.linalg.norm(a[valid]-a[seed], axis=1))[:12]]
+            proposals.append(tuple(sorted(random.choice(nearest, 3, replace=False))))
+        hypotheses = iter(proposals)
+    seen, candidates, tried, checked = set(), {}, 0, set()
+    for triple in hypotheses:
+        tried += 1
+        triple = np.asarray(triple, int)
+        model = fit_affine(a[triple], b[triple])
+        if model is None:
+            continue
+        error_r = np.linalg.norm(cr.to_raw(transform(model, a[valid]))-matches[valid, 2:], axis=1)
+        error_s = np.linalg.norm(cs.to_raw(transform(np.linalg.inv(model), b[valid]))-matches[valid, :2], axis=1)
+        ids = tuple(valid[(error_r <= 2.) & (error_s <= 2.)])
+        if len(ids) < 4 or ids in seen:
+            continue
+        seen.add(ids)
+        ids_set = set(ids)
+        if any(len(ids_set.intersection(key)) >= 0.85*max(len(ids), len(key)) for key in candidates):
+            continue
+        subsets = [ids] + ([tuple(j for j in ids if j != i) for i in ids] if len(ids) > 4 else [])
+        for subset in subsets:
+            if subset in checked:
+                continue
+            checked.add(subset)
+            selection = np.asarray(subset, int)
+            if np.max(np.ptp(a[selection], axis=0)) > context or np.max(np.ptp(b[selection], axis=0)) > 2*context:
+                continue
+            group = validate_group(selection, a, b, matches, cs, cr)
+            if group is not None:
+                candidates[subset] = group
+                break
+    groups = sorted(candidates.values(), key=lambda g: (-len(g["indices"]), -g["hull_area_virtual_px2"], g["indices"]))
+    return groups, {"geometry_groups": len(groups), "group_hypotheses": tried,
+                    "forward_chart_matches": len(valid)}
+
+
+def collect_grouped_regions(source, reference, source_camera, reference_camera, matches, args):
+    groups, counts = discover_groups(matches, source_camera, reference_camera, args.virtual_focal, args.context)
+    regions, rejected, used_groups, attempted = [], Counter(), [], 0
+    # All spatially disjoint tiles share a verified model; a tile need not
+    # contain six SIFT points itself. Original-image filter footprints may not
+    # overlap, even when the geometry group is shared by several color regions.
+    candidates = []
+    color_image = cv2.GaussianBlur(source.astype(np.float32), (5, 5), 1.)
+    # Nearby RANSAC consensuses often describe the same physical image area.
+    # Bound candidate enumeration before projecting/color-ranking each window.
+    groups = groups[:32]
+    counts["sampling_geometry_groups"] = len(groups)
+    for group_index, group in enumerate(groups):
+        hull = group["geometry"][4].reshape(-1, 2)
+        low, high = hull.min(axis=0), hull.max(axis=0)
+        centers = np.array([(x, y) for y in np.arange(math.ceil(low[1]/8)*8, high[1], 8.)
+                            for x in np.arange(math.ceil(low[0]/8)*8, high[0], 8.)
+                            if cv2.pointPolygonTest(group["geometry"][4], (float(x), float(y)), False) >= 0])
+        if not len(centers):
+            continue
+        scores = np.zeros(len(centers))
+        if getattr(args, "prefer_color", False):
+            raw = group["geometry"][0].to_raw(transform(np.linalg.inv(group["geometry"][2]), centers))
+            valid = np.isfinite(raw).all(axis=1) & (raw[:, 0] >= 0) & (raw[:, 1] >= 0)
+            valid &= (raw[:, 0] < source.shape[1]-1) & (raw[:, 1] < source.shape[0]-1)
+            raw, centers = raw[valid], centers[valid]
+            color = color_image[np.rint(raw[:, 1]).astype(int), np.rint(raw[:, 0]).astype(int)]
+            scores = (color.max(axis=1)-color.min(axis=1))/np.maximum(color.max(axis=1), 8.)
+        candidates.extend((float(score), group_index, center) for score, center in zip(scores, centers))
+    if getattr(args, "prefer_color", False):
+        candidates.sort(key=lambda item: -item[0])
+    for _, group_index, center in candidates:
+        if len(regions) >= args.max_regions or attempted >= args.max_candidates:
+            break
+        group = groups[group_index]
+        attempted += 1
+        try:
+            region = sample_region(source, reference, group["geometry"], center, group["models"])
+            if any(box_overlap(region["source_grid"]["box"], old["source_grid"]["box"])
+                   or box_overlap(region["reference_grid"]["box"], old["reference_grid"]["box"]) for old in regions):
+                raise ValueError("overlapping_filter_support")
+            region.update(id=len(regions), geometry_group=group_index, center_virtual=center.tolist())
+            regions.append(region)
+        except (ValueError, np.linalg.LinAlgError, cv2.error) as error:
+            rejected[str(error).splitlines()[0]] += 1
+    for group_index, group in enumerate(groups):
+        used_groups.append({k: v for k, v in group.items() if k not in ("geometry", "models")})
+        used_groups[-1].update(group_id=group_index,
+                               color_regions=[r["id"] for r in regions if r["geometry_group"] == group_index])
+    counts["color_windows_tested"] = attempted
+    counts["color_windows_available"] = len(candidates)
+    return regions, rejected, counts, used_groups
 
 
 def collect_regions(source, reference, source_camera, reference_camera, matches, args):
@@ -469,10 +702,14 @@ def plot_results(source, reference, matches, regions, weights, report, out):
             ax.set_xticks([])
             ax.set_yticks([])
             if col == 0:
-                ax.set_ylabel("Region {}\n{}".format(region["id"], "held out" if held else "training"))
+                partition = ("held out" if held else "training") if report["training_regions"] else "not fitted"
+                ax.set_ylabel("Region {}\n{}; {} samples".format(region["id"], partition, len(region["rgb"])))
+            if col < 3:
+                yy, xx = np.nonzero(region["mask"])
+                ax.scatter(xx, yy, s=4, color="#009E73", marker=".", linewidths=0)
             if col == 4:
                 fig.colorbar(im, ax=axes[row, 3:], shrink=0.65, label="Gray levels")
-    fig.suptitle("Aligned native 8-bit gray patches; NO exposure-scale correction", fontsize=11)
+    fig.suptitle("Native gray patches; green dots: accepted RGB samples; NO exposure correction", fontsize=11)
     save_figure(fig, out, "patches_gray_only", report["synthetic_test_inputs"])
     rgb = np.concatenate([region["rgb"] for region in regions])
     target = np.concatenate([region["target"] for region in regions])
@@ -507,6 +744,12 @@ def main(argv=None):
     parser.add_argument("--max-features", type=int, default=6000)
     parser.add_argument("--max-regions", type=int, default=12)
     parser.add_argument("--max-candidates", type=int, default=300)
+    parser.add_argument("--matching-domain", choices=("tangent", "raw", "wide"), default="tangent",
+                        help="Descriptor images only; RGB is always sampled from the originals")
+    parser.add_argument("--prefer-color", action="store_true", help="Prioritize chromatic sampling windows")
+    parser.add_argument("--no-plots", action="store_true", help="Save statistics only for a quick fitting pass")
+    parser.add_argument("--geometry-mode", choices=("grouped", "legacy"), default="grouped",
+                        help="Shared sparse geometry groups, or the earlier per-block geometry fit")
     parser.add_argument("--matches-csv", type=Path, help="Optional checked source_u,source_v,reference_u,reference_v rows")
     parser.add_argument("--evaluate-weights", type=Path, help="Apply a previous report's weights WITHOUT refitting")
     parser.add_argument("--synthetic-input", action="store_true", help="Label generated TEST inputs in every figure")
@@ -538,8 +781,28 @@ def main(argv=None):
         matches = deduplicate_matches(matches)
         counts["unique_provided_matches"] = len(matches)
     else:
-        matches, counts = sift_matches(source, reference, args.max_features)
-    regions, rejections = collect_regions(source, reference, source_camera, reference_camera, matches, args)
+        if args.matching_domain == "wide":
+            matches, counts = wide_tangent_matches(source, reference, source_camera, reference_camera,
+                                                   args.virtual_focal, args.max_features)
+        elif args.matching_domain == "tangent":
+            matches, counts, views = tangent_sift_matches(
+                source, reference, source_camera, reference_camera, args.virtual_focal, args.max_features)
+            for name, view in zip(("source", "reference"), views):
+                write_png(out / (name + "_matching_view.png"), view)
+        else:
+            matches, counts = sift_matches(source, reference, args.max_features)
+            counts["domain"] = "raw"
+    with (out / "matches.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["source_u", "source_v", "reference_u", "reference_v"])
+        writer.writerows(matches)
+    groups = []
+    if args.geometry_mode == "grouped":
+        regions, rejections, geometry_counts, groups = collect_grouped_regions(
+            source, reference, source_camera, reference_camera, matches, args)
+        counts.update(geometry_counts)
+    else:
+        regions, rejections = collect_regions(source, reference, source_camera, reference_camera, matches, args)
     rgb = np.concatenate([region["rgb"] for region in regions]) if regions else np.empty((0, 3))
     target = np.concatenate([region["target"] for region in regions]) if regions else np.empty(0)
     ids = np.concatenate([np.full(len(region["rgb"]), region["id"], int) for region in regions]) if regions else np.empty(0, int)
@@ -568,9 +831,22 @@ def main(argv=None):
     if args.evaluate_weights and not report["evaluation_completed"]:
         status = "NO VALID SAMPLES FOR FIXED-WEIGHT EVALUATION"
     report.update({"status": status,
-                   "geometry_mode": "image_only_local_tangent_affine_no_lidar_prior",
+                   "geometry_mode": "image_only_" + args.geometry_mode + "_tangent_affine_no_lidar_prior",
+                   "geometry_groups": groups,
+                   "sampling_checks": {"grid": [16, 16], "color_kernel": [5, 5],
+                                       "local_variance_max": 36,
+                                       "raw_filter_footprints_disjoint": True,
+                                       "group_loo_error_max_px": 2. if args.geometry_mode == "grouped" else None,
+                                       "sampling_prediction_spread_max_px": 2. if args.geometry_mode == "grouped" else None,
+                                       "sampling_jitter_radius_px": 2. if args.geometry_mode == "grouped" else 0.,
+                                       "sampling_jitter_mean_change_max": 6. if args.geometry_mode == "grouped" else None},
                    "source_camera": args.source_camera, "reference_camera": args.reference_camera,
                    "regions": len(regions), "samples": len(rgb), "matching": counts,
+                   "color_regions": [{"id": region["id"], "samples": len(region["rgb"]),
+                                      "geometry_group": region.get("geometry_group"),
+                                      "source_filter_box": region["source_grid"]["box"],
+                                      "reference_filter_box": region["reference_grid"]["box"]}
+                                     for region in regions],
                    "rejections": dict(rejections), "virtual_focal": args.virtual_focal,
                    "synthetic_test_inputs": args.synthetic_input,
                    "versions": {"opencv": cv2.__version__, "numpy": np.__version__},
@@ -600,7 +876,8 @@ def main(argv=None):
             writer.writerow([int(region), "validation" if int(region) in report["validation_regions"] else "training", *color, value])
     with (out / "report.json").open("w", encoding="utf-8") as stream:
         json.dump(report, stream, ensure_ascii=False, indent=2, allow_nan=False)
-    plot_results(source, reference, matches, regions, weights, report, out)
+    if not args.no_plots:
+        plot_results(source, reference, matches, regions, weights, report, out)
     print(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
     print("Output:", out.resolve())
     successful = report["evaluation_completed"] if args.evaluate_weights else report["accepted"]

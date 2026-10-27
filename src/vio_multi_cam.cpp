@@ -10555,6 +10555,26 @@ void VIOManager::flushVisualMapRetirements()
   }
 
   std::set<VisualPoint *> retiring_points(retired_visual_points_.begin(), retired_visual_points_.end());
+  for (const auto &entry : retired_visual_refs_)
+  {
+    VisualPoint *point = entry.first;
+    Feature *feature = entry.second;
+    if (point == nullptr || feature == nullptr || retiring_points.count(point) != 0) continue;
+    point->deleteFeatureRef(feature);
+    // A seed can lose its last reference before reaching the point-rejection
+    // threshold. Empty points will never be retrieved for further evidence.
+    // Retire them here, after frame-local aliases have been reset, regardless
+    // of their validation state or whether they ever had a successful match.
+    if (point->obs_.empty())
+    {
+      queuePointRetirement(*point);
+      retiring_points.insert(point);
+    }
+  }
+  retired_visual_refs_.clear();
+
+  // Reference deletion can add points to the retirement set. Clear backlinks
+  // only after that set is complete and before freeing any of its members.
   if (!retiring_points.empty())
   {
     for (auto &voxel : feat_map)
@@ -10568,16 +10588,7 @@ void VIOManager::flushVisualMapRetirements()
       }
     }
   }
-  for (const auto &entry : retired_visual_refs_)
-  {
-    VisualPoint *point = entry.first;
-    Feature *feature = entry.second;
-    if (point == nullptr || feature == nullptr || retiring_points.count(point) != 0) continue;
-    point->deleteFeatureRef(feature);
-  }
-  retired_visual_refs_.clear();
-
-  for (VisualPoint *point : retired_visual_points_)
+  for (VisualPoint *point : retiring_points)
   {
     if (point == nullptr) continue;
     const VOXEL_LOCATION key(point->map_voxel_x_, point->map_voxel_y_, point->map_voxel_z_);
@@ -10607,6 +10618,46 @@ void VIOManager::flushVisualMapRetirements()
     delete point;
   }
   retired_visual_points_.clear();
+}
+
+void VIOManager::queueStaleVisualMapPoints(int frame_id)
+{
+  if (!visual_map_manage_en || frame_id % 20 != 0) return;
+  for (auto &voxel : feat_map)
+  {
+    if (voxel.second == nullptr) continue;
+    for (VisualPoint *point : voxel.second->voxel_points)
+    {
+      if (point == nullptr || point->pending_delete_) continue;
+      // Backstop for empty points not touched by this frame's reference queue.
+      // Keep candidates with observations: "not validated" is not "empty".
+      if (point->obs_.empty())
+      {
+        queuePointRetirement(*point);
+        continue;
+      }
+      if (point->state_ == VisualPoint::State::SUSPECT &&
+          point->last_success_frame_ >= 0 &&
+          frame_id - point->last_success_frame_ >= visual_point_stale_frames)
+      {
+        bool has_usable_reference = point->hasUsableReference(0, true, false);
+        if (visual_map_manage_shadow_en && has_usable_reference)
+        {
+          has_usable_reference = false;
+          for (Feature *feature : point->obs_)
+          {
+            if (feature != nullptr && feature->ref_state_ == Feature::RefState::VALIDATED &&
+                !feature->pending_delete_ && shadow_retired_ref_suggestions_.count(feature->ref_id_) == 0)
+            {
+              has_usable_reference = true;
+              break;
+            }
+          }
+        }
+        if (!has_usable_reference) queuePointRetirement(*point);
+      }
+    }
+  }
 }
 
 void VIOManager::printVisualMapManageStats(int frame_id) const
@@ -13630,37 +13681,7 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     plotTrackedPoints(ctx);
     if (plot_flag) projectPatchFromRefToCur(ctx, plane_map);
   }
-  if (visual_map_manage_en && mf.frame_id % 20 == 0)
-  {
-    for (auto &voxel : feat_map)
-    {
-      if (voxel.second == nullptr) continue;
-      for (VisualPoint *point : voxel.second->voxel_points)
-      {
-        if (point == nullptr || point->pending_delete_) continue;
-        if (point->state_ == VisualPoint::State::SUSPECT &&
-            point->last_success_frame_ >= 0 &&
-            mf.frame_id - point->last_success_frame_ >= visual_point_stale_frames)
-        {
-          bool has_usable_reference = point->hasUsableReference(0, true, false);
-          if (visual_map_manage_shadow_en && has_usable_reference)
-          {
-            has_usable_reference = false;
-            for (Feature *feature : point->obs_)
-            {
-              if (feature != nullptr && feature->ref_state_ == Feature::RefState::VALIDATED &&
-                  !feature->pending_delete_ && shadow_retired_ref_suggestions_.count(feature->ref_id_) == 0)
-              {
-                has_usable_reference = true;
-                break;
-              }
-            }
-          }
-          if (!has_usable_reference) queuePointRetirement(*point);
-        }
-      }
-    }
-  }
+  queueStaleVisualMapPoints(mf.frame_id);
   printVisualMapManageStats(mf.frame_id);
   if (colmap_output_en && numCameras() == 1) dumpDataForColmap();
   const double reference_end = omp_get_wtime();

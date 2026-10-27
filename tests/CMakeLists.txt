@@ -2,6 +2,22 @@ cmake_minimum_required(VERSION 3.10)
 project(cake_covariance_math_tests LANGUAGES CXX)
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 enable_testing()
+
+# Exercise the production lifecycle methods with small owning fixtures, without
+# requiring ROS/PCL. Keep the generated bodies synchronized with source edits.
+find_package(PythonInterp 3 REQUIRED)
+set(retirement_impl ${CMAKE_CURRENT_BINARY_DIR}/visual_map_retirement_impl.inc)
+add_custom_command(
+  OUTPUT ${retirement_impl}
+  COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/extract_visual_map_retirement.py
+          ${CMAKE_CURRENT_SOURCE_DIR}/.. ${retirement_impl}
+  DEPENDS extract_visual_map_retirement.py ../src/vio_multi_cam.cpp ../src/visual_point_multi_cam.cpp
+  VERBATIM)
+add_executable(visual_map_retirement_test visual_map_retirement_test.cpp ${retirement_impl})
+target_compile_features(visual_map_retirement_test PRIVATE cxx_std_17)
+target_include_directories(visual_map_retirement_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME visual_map_retirement_test COMMAND visual_map_retirement_test)
+
 foreach(test estimator_covariance directional_update virtual_sampling fixed_gray_weights)
   if(test STREQUAL "fixed_gray_weights")
     add_executable(${test}_math_test ${test}_test.cpp)
