@@ -126,7 +126,7 @@ cfg = yaml.safe_load(open(source_path, encoding="utf-8"))
 enabled = mode == "on"
 cfg.setdefault("common", {}).update(directional_update_en=False)
 vio = cfg.setdefault("vio", {})
-vio.update(visual_map_manage_en=enabled, visual_geom_filter_en=enabled, visual_map_manage_shadow_en=False, visual_map_retirement_apply_en=True, virtual_adaptive_sampling_en=False, color_gray_init_en=False, visual_map_manage_log_en=False, visual_geom_filter_log_en=False, usage_stats_en=False)
+vio.update(visual_map_manage_en=enabled, visual_geom_filter_en=enabled, visual_map_manage_shadow_en=False, visual_map_retirement_apply_en=True, virtual_adaptive_sampling_en=False, virtual_pose_affine_en=False, color_gray_init_en=False, visual_map_manage_log_en=False, visual_geom_filter_log_en=False, usage_stats_en=False)
 vio.update(dict.fromkeys(["visual_ref_current_select_en", "visual_ref_fallback_en", "visual_ref_lifecycle_en", "visual_ref_view_coverage_en", "visual_ref_nis_en", "visual_point_seed_validation_en", "visual_point_footprint_redundancy_en", "visual_point_information_prune_en", "visual_point_replacement_en", "visual_ref_post_ekf_build_en"], True))
 cfg.setdefault("pcd_save", {}).update(pcd_save_en=False, colmap_output_en=False)
 cfg.setdefault("image_save", {}).update(img_save_en=False)
@@ -304,4 +304,11 @@ ROS1 私有参数：include/utils/ros1_param.h 将点号名称转换为斜杠路
 Linux /proc 文档：https://docs.kernel.org/filesystems/proc.html
 pidstat 手册：https://man7.org/linux/man-pages/man1/pidstat.1.html
 ROS Noetic 日志配置实现：https://github.com/ros/rosconsole/blob/noetic-devel/src/rosconsole/impl/rosconsole_log4cxx.cpp
+
+## 11. 新增自动分项统计
+
+`debug.memory_stats_en` 为独立开关，三个多相机主配置默认关闭。
+完整分项、自动峰值/均值/最终汇总及 NUC 查看方法见
+[自动分项内存统计](memory_breakdown_usage.md)。不需要为统计重新开启 usage_stats_en。
+如需保持本教程原先只测外部 RSS 的时间口径，请保持 memory_stats_en=false。
 

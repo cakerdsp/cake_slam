@@ -7,6 +7,9 @@
 #include <array>
 #include <cmath>
 #include <mutex>
+#include <string>
+
+namespace memory_stats { struct Snapshot; }
 
 namespace virtual_sampling
 {
@@ -114,6 +117,8 @@ public:
     levels_[0] = base;
   }
 
+  void collectMemoryStats(memory_stats::Snapshot &snapshot, const std::string &key) const;
+
   bool prepare(double extra_sigma, FilteredImage &out)
   {
     out = FilteredImage{};
@@ -166,7 +171,7 @@ private:
   static constexpr int kMaxLevel = 5;
   std::array<cv::Mat, kMaxLevel + 1> levels_;
   int built_level_ = 0;
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
 
   static double levelVariance(int level)
   {

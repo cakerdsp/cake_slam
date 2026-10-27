@@ -46,6 +46,8 @@ which is included as part of this source code package.
 #include <vikit/vision.h>
 #include <vikit/pinhole_camera.h>
 
+namespace memory_stats { struct Snapshot; }
+
 struct VirtualPatchImage
 {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -960,6 +962,7 @@ public:
 
   VIOManager();
   ~VIOManager();
+  void collectMemoryStats(memory_stats::Snapshot &snapshot) const;
   void configureCameras(int num_cameras);
   void setCameraCalibration(int camera_id, const std::string &topic, const std::string &camera_namespace,
                             const std::vector<double> &R, const std::vector<double> &P);

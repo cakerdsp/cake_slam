@@ -21,6 +21,8 @@ which is included as part of this source code package.
 #include <nav_msgs/Odometry.h>
 #include <utils/so3_math.h>
 
+namespace memory_stats { struct Snapshot; }
+
 const bool time_list(PointType &x,
                      PointType &y); //{return (x.curvature < y.curvature);};
 
@@ -52,6 +54,7 @@ public:
   void disable_exposure_est();
   void Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, PointCloudXYZI::Ptr cur_pcl_un_);
   void UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
+  void collectMemoryStats(memory_stats::Snapshot &snapshot) const;
 
   ofstream fout_imu;
   double IMU_mean_acc_norm;

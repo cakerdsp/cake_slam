@@ -13,6 +13,7 @@ which is included as part of this source code package.
 #include "LIVMapper_multi_cam.h"
 #include "utils/ros1_param.h"
 #include "color_gray_initializer.h"
+#include "memory_stats.h"
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -21,6 +22,10 @@ which is included as part of this source code package.
 #include <iomanip>
 #include <limits>
 #include <thread>
+#include <cctype>
+#include <ctime>
+#include <sstream>
+#include <unistd.h>
 #include <vikit/abstract_camera.h>
 #include <vikit/camera_loader.h>
 
@@ -42,6 +47,10 @@ struct ColorGrayStartup
   std::atomic<bool> done{false};
   std::thread worker;
   color_gray_init::Result result;
+  bool track_snapshot_memory = false;
+  std::uint64_t snapshot_payload_bytes = 0;
+  std::uint64_t snapshot_capacity_bytes = 0;
+  std::uint64_t snapshot_objects = 0;
 
   ~ColorGrayStartup()
   {
@@ -60,6 +69,28 @@ struct ColorGrayStartup
 
   void launch(color_gray_init::Snapshot snapshot)
   {
+    if (track_snapshot_memory)
+    {
+      try
+      {
+        memory_stats::Snapshot accounting;
+        accounting.vector("color_snapshot", snapshot.cameras);
+        accounting.vector("color_snapshot", snapshot.planes);
+        for (const auto &camera : snapshot.cameras) accounting.mat("color_snapshot", camera.bgr);
+        const auto found = accounting.components.find("color_snapshot");
+        if (found != accounting.components.end())
+        {
+          snapshot_payload_bytes = found->second.payload_bytes;
+          snapshot_capacity_bytes = found->second.capacity_bytes;
+          snapshot_objects = found->second.objects;
+        }
+      }
+      catch (const std::exception &error)
+      {
+        track_snapshot_memory = false;
+        ROS_WARN("[Memory] Color snapshot accounting unavailable: %s", error.what());
+      }
+    }
     cancel.store(false, std::memory_order_relaxed);
     done.store(false, std::memory_order_relaxed);
     ++attempts;
@@ -226,13 +257,117 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh, std::string node_name)
   initializeComponents(this->node);          // initialize components errors
   path.header.stamp = ros::Time::now();
   path.header.frame_id = "camera_init";
+  if (memory_stats_en) initializeMemoryStats();
 }
 
 LIVMapper::~LIVMapper()
 {
+  if (memory_stats_reporter_)
+  {
+    maybeRecordMemoryStats("destructor", true, true);
+    finalizeMemoryStats();
+  }
   // Join before VIO/camera owners are destroyed; cancellation is cooperative
   // between bounded OpenCV calls, never a detached thread.
   color_gray_startup_.reset();
+}
+
+void LIVMapper::initializeMemoryStats()
+{
+  if (!memory_stats_en) return;
+  try
+  {
+    std::string tag = seq_name.empty() ? "sequence" : seq_name;
+    for (char &value : tag)
+      if (!std::isalnum(static_cast<unsigned char>(value)) && value != '-' && value != '_') value = '_';
+    const std::time_t now = std::time(nullptr);
+    std::tm calendar{};
+    localtime_r(&now, &calendar);
+    std::ostringstream run_name;
+    run_name << tag << '_' << std::put_time(&calendar, "%Y%m%d_%H%M%S") << '_' << ::getpid();
+    const std::filesystem::path base = memory_stats_output_dir.empty()
+        ? std::filesystem::path(ROOT_DIR) / "Log" / "memory"
+        : std::filesystem::path(memory_stats_output_dir);
+    memory_stats::Config config;
+    config.enabled = true;
+    config.sample_interval_sec = memory_stats_interval_sec;
+    config.print_interval_sec = memory_stats_print_interval_sec;
+    config.output_dir = std::filesystem::absolute(base / run_name.str()).string();
+    memory_stats_reporter_.reset(new memory_stats::Reporter(std::move(config)));
+    maybeRecordMemoryStats("initialized", true);
+  }
+  catch (const std::exception &error)
+  {
+    ROS_WARN("[Memory] Cannot initialize statistics: %s; SLAM continues.", error.what());
+    memory_stats_reporter_.reset();
+  }
+}
+
+void LIVMapper::maybeRecordMemoryStats(const char *stage, bool force, bool final)
+{
+  if (!memory_stats_reporter_ || !memory_stats_reporter_->due(force)) return;
+  try
+  {
+    const double start = omp_get_wtime();
+    memory_stats::Snapshot snapshot;
+    collectMemoryStats(snapshot);
+    snapshot.collection_ms = (omp_get_wtime() - start) * 1000.0;
+    const double data_time = LidarMeasures.last_lio_update_time >= 0.0
+        ? LidarMeasures.last_lio_update_time : -1.0;
+    int frame = data_time >= 0.0 ? frame_num : -1;
+    if (LidarMeasures.lio_vio_flg == VIO && !LidarMeasures.measures.empty())
+      frame = LidarMeasures.measures.back().multi_cam_frame.frame_id;
+    memory_stats_reporter_->record(std::move(snapshot), data_time, frame, stage, final);
+  }
+  catch (const std::exception &error)
+  {
+    ROS_WARN("[Memory] Snapshot failed: %s; statistics stopped, SLAM continues.", error.what());
+    finalizeMemoryStats();
+  }
+}
+
+void LIVMapper::finalizeMemoryStats()
+{
+  if (!memory_stats_reporter_) return;
+  memory_stats_reporter_->finalize();
+  memory_stats_reporter_.reset();
+}
+
+void LIVMapper::collectColorGrayMemoryStats(memory_stats::Snapshot &snapshot) const
+{
+  const ColorGrayStartup *startup = color_gray_startup_.get();
+  if (startup == nullptr) return;
+  snapshot.object("optional.color_gray.startup", startup, sizeof(*startup));
+  snapshot.text("optional.color_gray.wait_reason", startup->last_reason);
+  // The immutable input is held by the worker closure. Read only the scalar
+  // inventory prepared by the owner thread before worker launch.
+  if (startup->track_snapshot_memory && startup->worker.joinable() &&
+      !startup->done.load(std::memory_order_acquire))
+    snapshot.add("optional.color_gray.worker_snapshot", startup->snapshot_payload_bytes,
+                 startup->snapshot_capacity_bytes, startup->snapshot_objects);
+  if (!startup->worker.joinable() || startup->done.load(std::memory_order_acquire))
+  {
+    const auto &result = startup->result;
+    snapshot.vector("optional.color_gray.result.weights", result.weights);
+    snapshot.vector("optional.color_gray.result.cameras", result.cameras);
+    snapshot.vector("optional.color_gray.result.pairs", result.pairs);
+    snapshot.text("optional.color_gray.result.reason", result.reason);
+    for (const auto &camera : result.cameras)
+      snapshot.text("optional.color_gray.result.camera_reason", camera.reason);
+    for (const auto &pair : result.pairs)
+    {
+      snapshot.text("optional.color_gray.result.stop_reason", pair.stop_reason);
+      snapshot.vector("optional.color_gray.result.stages", pair.stages);
+      for (const auto &stage : pair.stages)
+      {
+        snapshot.text("optional.color_gray.result.stage_name", stage.name);
+        snapshot.text("optional.color_gray.result.stage_unit", stage.unit);
+        snapshot.map("optional.color_gray.result.rejections", stage.rejected);
+        for (const auto &rejection : stage.rejected)
+          snapshot.text("optional.color_gray.result.rejection_name", rejection.first);
+      }
+    }
+  }
 }
 
 void LIVMapper::readParameters(ros::NodeHandle &nh)
@@ -341,6 +476,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<bool>("vio.tukey_robust_en", false);
   try_declare.template operator()<bool>("vio.usage_stats_en", false);
   try_declare.template operator()<int>("vio.usage_stats_window", 100);
+  try_declare.template operator()<bool>("debug.memory_stats_en", false);
+  try_declare.template operator()<double>("debug.memory_stats_interval_sec", 1.0);
+  try_declare.template operator()<double>("debug.memory_stats_print_interval_sec", 10.0);
+  try_declare.template operator()<std::string>("debug.memory_stats_output_dir", "");
   try_declare.template operator()<bool>("vio.cross_camera_reference_en", false);
   try_declare.template operator()<bool>("vio.cross_camera_current_residual_en", false);
   try_declare.template operator()<bool>("vio.online_extrinsic_en", false);
@@ -599,6 +738,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "vio.tukey_robust_en", tukey_robust_en);
   getRosParam(this->node, "vio.usage_stats_en", usage_stats_en);
   getRosParam(this->node, "vio.usage_stats_window", usage_stats_window);
+  getRosParam(this->node, "debug.memory_stats_en", memory_stats_en);
+  getRosParam(this->node, "debug.memory_stats_interval_sec", memory_stats_interval_sec);
+  getRosParam(this->node, "debug.memory_stats_print_interval_sec", memory_stats_print_interval_sec);
+  getRosParam(this->node, "debug.memory_stats_output_dir", memory_stats_output_dir);
   getRosParam(this->node, "vio.cross_camera_reference_en", cross_camera_reference_en);
   getRosParam(this->node, "vio.cross_camera_current_residual_en", cross_camera_current_residual_en);
   getRosParam(this->node, "vio.online_extrinsic_en", online_extrinsic_en);
@@ -1305,6 +1448,7 @@ void LIVMapper::prepareColorGrayInitialization(const MeasureGroup &meas)
     // Wait for IMU readiness without suppressing the normal VIO call.
     if (imu_en && p_imu->imu_need_init) return;
     color_gray_startup_.reset(new ColorGrayStartup());
+    color_gray_startup_->track_snapshot_memory = static_cast<bool>(memory_stats_reporter_);
     auto &startup = *color_gray_startup_;
     std::string unsupported;
     if (frontend_mode != 0 || !virtual_fisheye_patch_en || num_cameras < 2)
@@ -1667,6 +1811,7 @@ void LIVMapper::run(ros::NodeHandle &nh)
     ros::spinOnce();
     if (!sync_packages(LidarMeasures))
     {
+      if (memory_stats_reporter_) maybeRecordMemoryStats("idle");
       rate.sleep();
       continue;
     }
@@ -1677,9 +1822,16 @@ void LIVMapper::run(ros::NodeHandle &nh)
     // if (!p_imu->imu_time_init) continue;
 
     stateEstimationAndMapping();
+    if (memory_stats_reporter_)
+      maybeRecordMemoryStats(LidarMeasures.lio_vio_flg == VIO ? "after_vio" : "after_lio");
   }
   if (color_gray_startup_) color_gray_startup_->cancel.store(true, std::memory_order_relaxed);
   savePCD();
+  if (memory_stats_reporter_)
+  {
+    maybeRecordMemoryStats("final", true, true);
+    finalizeMemoryStats();
+  }
 }
 
 void LIVMapper::prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr)

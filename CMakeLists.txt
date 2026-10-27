@@ -6,6 +6,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(CAKE_MEMORY_PROFILE_SYMBOLS "Keep debug symbols for optional heaptrack analysis" OFF)
+if(CAKE_MEMORY_PROFILE_SYMBOLS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options(-g -fno-omit-frame-pointer)
+endif()
+
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -fexceptions")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -g")
 
@@ -162,13 +167,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 add_library(vio_multi_cam
   src/vio_multi_cam.cpp
+  src/vio_memory_stats.cpp
   src/frame_multi_cam.cpp
   src/visual_point_multi_cam.cpp
 )
 add_library(lio_multi_cam src/voxel_map_multi_cam.cpp)
 add_library(pre_multi_cam src/preprocess_multi_cam.cpp)
 add_library(imu_proc_multi_cam src/IMU_Processing_multi_cam.cpp)
-add_library(laser_mapping_multi_cam src/LIVMapper_multi_cam.cpp)
+add_library(memory_stats src/memory_stats.cpp)
+target_link_libraries(memory_stats ${catkin_LIBRARIES} ${OpenCV_LIBRARIES})
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  # Preserve diagnostic interval/mean checks on ARM fast-math builds.
+  target_compile_options(memory_stats PRIVATE -fno-fast-math)
+endif()
+add_library(laser_mapping_multi_cam src/LIVMapper_multi_cam.cpp src/mapper_memory_stats.cpp)
 
 add_dependencies(vikit_common_vendor ${catkin_EXPORTED_TARGETS})
 add_dependencies(vikit_ros_vendor ${catkin_EXPORTED_TARGETS})
@@ -178,6 +190,7 @@ add_dependencies(lio_multi_cam ${catkin_EXPORTED_TARGETS})
 add_dependencies(pre_multi_cam ${catkin_EXPORTED_TARGETS})
 add_dependencies(imu_proc_multi_cam ${catkin_EXPORTED_TARGETS})
 add_dependencies(laser_mapping_multi_cam ${catkin_EXPORTED_TARGETS})
+add_dependencies(memory_stats ${catkin_EXPORTED_TARGETS})
 
 set(COMMON_LIBS
   ${catkin_LIBRARIES}
@@ -193,16 +206,17 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 target_link_libraries(utils ${COMMON_LIBS})
-target_link_libraries(vio_multi_cam color_gray_initializer ${COMMON_LIBS})
+target_link_libraries(vio_multi_cam color_gray_initializer memory_stats ${COMMON_LIBS})
 target_link_libraries(lio_multi_cam utils ${COMMON_LIBS})
 target_link_libraries(pre_multi_cam ${COMMON_LIBS})
-target_link_libraries(imu_proc_multi_cam ${COMMON_LIBS})
+target_link_libraries(imu_proc_multi_cam memory_stats ${COMMON_LIBS})
 target_link_libraries(laser_mapping_multi_cam
   vio_multi_cam
   lio_multi_cam
   pre_multi_cam
   imu_proc_multi_cam
   utils
+  memory_stats
   ${COMMON_LIBS}
 )
 
@@ -219,6 +233,7 @@ endif()
 
 install(TARGETS
   color_gray_initializer
+  memory_stats
   vikit_common_vendor
   vikit_ros_vendor
   utils
@@ -239,4 +254,7 @@ install(DIRECTORY include/
 
 install(DIRECTORY config launch rviz_cfg
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+install(PROGRAMS scripts/view_memory_stats.py
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/scripts
 )

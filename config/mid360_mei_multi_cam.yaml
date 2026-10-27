@@ -324,6 +324,10 @@ image_save:
   interval: 1
 
 debug:
+  memory_stats_en: false
+  memory_stats_interval_sec: 1.0
+  memory_stats_print_interval_sec: 10.0
+  memory_stats_output_dir: ""
   plot_time: -10.0
   frame_cnt: 6
   # Follow up to eight camera-0 debug probes; each probe saves at most 12 paired observations.

@@ -32,6 +32,7 @@ which is included as part of this source code package.
 #include <memory>
 
 struct ColorGrayStartup;
+namespace memory_stats { struct Snapshot; class Reporter; }
 
 struct CameraInputConfig
 {
@@ -95,6 +96,11 @@ public:
   void savePoseEvaluation(const char *stage);
   void savePCD();
   void processImu();
+  void collectMemoryStats(memory_stats::Snapshot &snapshot);
+  void collectColorGrayMemoryStats(memory_stats::Snapshot &snapshot) const;
+  void initializeMemoryStats();
+  void maybeRecordMemoryStats(const char *stage, bool force = false, bool final = false);
+  void finalizeMemoryStats();
 
   bool sync_packages(LidarMeasureGroup &meas);
   void prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr);
@@ -199,6 +205,12 @@ public:
   bool tukey_robust_en = false;
   bool usage_stats_en = false;
   int usage_stats_window = 100;
+  // Independent diagnostic; no reporter or traversal is created when disabled.
+  bool memory_stats_en = false;
+  double memory_stats_interval_sec = 1.0;
+  double memory_stats_print_interval_sec = 10.0;
+  std::string memory_stats_output_dir;
+  std::unique_ptr<memory_stats::Reporter> memory_stats_reporter_;
   bool directional_update_en = false;
   double directional_drop_variance_reduction = 0.05;
   double directional_full_variance_reduction = 0.50;

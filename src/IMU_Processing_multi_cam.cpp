@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "IMU_Processing_multi_cam.h"
+#include "memory_stats.h"
 #include <cassert>
 
 const bool time_list(PointType &x, PointType &y) { return (x.curvature < y.curvature); }
@@ -37,6 +38,26 @@ ImuProcess::ImuProcess() : Eye3d(M3D::Identity()),
 }
 
 ImuProcess::~ImuProcess() {}
+
+void ImuProcess::collectMemoryStats(memory_stats::Snapshot &snapshot) const
+{
+  snapshot.object("imu.object", this, sizeof(*this));
+  // Embedded object headers and fixed-size matrices are covered by sizeof(*this).
+  snapshot.vector("imu.cloud.wait_proc.points", pcl_wait_proc.points);
+  snapshot.text("imu.cloud.wait_proc.frame_id", pcl_wait_proc.header.frame_id);
+  if (cur_pcl_un_ && snapshot.object("imu.cloud.undistorted.object", cur_pcl_un_.get(), sizeof(*cur_pcl_un_)))
+  {
+    snapshot.vector("imu.cloud.undistorted.points", cur_pcl_un_->points);
+    snapshot.text("imu.cloud.undistorted.frame_id", cur_pcl_un_->header.frame_id);
+  }
+  if (last_imu && snapshot.object("imu.last_message.object", last_imu.get(), sizeof(*last_imu)))
+    snapshot.text("imu.last_message.frame_id", last_imu->header.frame_id);
+  snapshot.vector("imu.poses", IMUpose);
+  snapshot.eigen("imu.propagation.cross", propagation_workspace_.cross);
+  snapshot.eigen("imu.propagation.propagated_cross", propagation_workspace_.propagated_cross);
+  snapshot.eigen("imu.propagation.camera_noise", propagation_workspace_.camera_noise);
+  snapshot.vector("imu.propagation.camera_indices", propagation_workspace_.camera_indices);
+}
 
 void ImuProcess::Reset()
 {

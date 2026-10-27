@@ -858,6 +858,16 @@ void VIOManager::initializeVIO()
   validateVisualMapManageConfig();
   patch_size_total = patch_size * patch_size;
   patch_size_half = static_cast<int>(patch_size / 2);
+  // Raw and virtual paths share this grid (current cross-camera residuals
+  // and fixed-template gradients also index it when virtual patches are off).
+  core_patch_offsets_.resize(patch_size_total);
+  for (int y = 0; y < patch_size; ++y)
+  {
+    for (int x = 0; x < patch_size; ++x)
+    {
+      core_patch_offsets_[y * patch_size + x] = V2F(x - patch_size_half, y - patch_size_half);
+    }
+  }
   patch_buffer.resize(patch_size_total);
   warp_len = patch_size_total * patch_pyrimid_level;
   border = (patch_size_half + 1) * (1 << patch_pyrimid_level);
@@ -964,15 +974,6 @@ void VIOManager::initializeVIO()
         V3F ray((x - virtual_support_radius) / static_cast<float>(virtual_focal_length),
                 (y - virtual_support_radius) / static_cast<float>(virtual_focal_length), 1.0f);
         virtual_support_ray_lut_[y * virtual_support_size + x] = ray.normalized();
-      }
-    }
-
-    core_patch_offsets_.resize(patch_size_total);
-    for (int y = 0; y < patch_size; ++y)
-    {
-      for (int x = 0; x < patch_size; ++x)
-      {
-        core_patch_offsets_[y * patch_size + x] = V2F(x - patch_size_half, y - patch_size_half);
       }
     }
 
