@@ -292,6 +292,7 @@ void LIVMapper::initializeMemoryStats()
     config.enabled = true;
     config.sample_interval_sec = memory_stats_interval_sec;
     config.print_interval_sec = memory_stats_print_interval_sec;
+    config.target_overhead_ratio = memory_stats_target_overhead_ratio;
     config.output_dir = std::filesystem::absolute(base / run_name.str()).string();
     memory_stats_reporter_.reset(new memory_stats::Reporter(std::move(config)));
     maybeRecordMemoryStats("initialized", true);
@@ -318,6 +319,7 @@ void LIVMapper::maybeRecordMemoryStats(const char *stage, bool force, bool final
     if (LidarMeasures.lio_vio_flg == VIO && !LidarMeasures.measures.empty())
       frame = LidarMeasures.measures.back().multi_cam_frame.frame_id;
     memory_stats_reporter_->record(std::move(snapshot), data_time, frame, stage, final);
+    memory_stats_reporter_->finishCheckpoint(omp_get_wtime() - start);
   }
   catch (const std::exception &error)
   {
@@ -477,8 +479,9 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<bool>("vio.usage_stats_en", false);
   try_declare.template operator()<int>("vio.usage_stats_window", 100);
   try_declare.template operator()<bool>("debug.memory_stats_en", false);
-  try_declare.template operator()<double>("debug.memory_stats_interval_sec", 1.0);
-  try_declare.template operator()<double>("debug.memory_stats_print_interval_sec", 10.0);
+  try_declare.template operator()<double>("debug.memory_stats_interval_sec", 10.0);
+  try_declare.template operator()<double>("debug.memory_stats_print_interval_sec", 60.0);
+  try_declare.template operator()<double>("debug.memory_stats_target_overhead_ratio", 0.02);
   try_declare.template operator()<std::string>("debug.memory_stats_output_dir", "");
   try_declare.template operator()<bool>("vio.cross_camera_reference_en", false);
   try_declare.template operator()<bool>("vio.cross_camera_current_residual_en", false);
@@ -741,6 +744,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "debug.memory_stats_en", memory_stats_en);
   getRosParam(this->node, "debug.memory_stats_interval_sec", memory_stats_interval_sec);
   getRosParam(this->node, "debug.memory_stats_print_interval_sec", memory_stats_print_interval_sec);
+  getRosParam(this->node, "debug.memory_stats_target_overhead_ratio", memory_stats_target_overhead_ratio);
   getRosParam(this->node, "debug.memory_stats_output_dir", memory_stats_output_dir);
   getRosParam(this->node, "vio.cross_camera_reference_en", cross_camera_reference_en);
   getRosParam(this->node, "vio.cross_camera_current_residual_en", cross_camera_current_residual_en);

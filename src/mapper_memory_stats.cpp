@@ -80,9 +80,20 @@ void collectMeasure(Snapshot &snapshot, const MeasureGroup &measure)
 void collectPointUncertainty(Snapshot &snapshot, const std::vector<pointWithVar> &points)
 {
   // Iterate size(), never capacity(): spare vector slots do not contain objects.
+  // Many retained points share the same scan object. Preserve the exact shared
+  // reference count, but avoid a string/map/hash lookup for every repeated point.
+  const std::string key = "lidar.scan_uncertainty";
+  const void *previous = nullptr;
+  std::uint64_t repeated = 0;
   for (const pointWithVar &point : points)
     if (point.scan_uncertainty)
-      snapshot.object("lidar.scan_uncertainty", point.scan_uncertainty.get(), sizeof(*point.scan_uncertainty));
+    {
+      const void *identity = point.scan_uncertainty.get();
+      if (identity == previous) ++repeated;
+      else snapshot.object(key, identity, sizeof(*point.scan_uncertainty));
+      previous = identity;
+    }
+  if (repeated != 0) snapshot.components[key].shared_references += repeated;
 }
 
 void collectTree(Snapshot &snapshot, const VoxelOctoTree *tree)

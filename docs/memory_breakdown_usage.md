@@ -23,8 +23,9 @@ source devel/setup.bash
 ```yaml
 debug:
   memory_stats_en: true
-  memory_stats_interval_sec: 1.0
-  memory_stats_print_interval_sec: 10.0
+  memory_stats_interval_sec: 10.0
+  memory_stats_print_interval_sec: 60.0
+  memory_stats_target_overhead_ratio: 0.02
   memory_stats_output_dir: "/home/cak/tangent_memory"
 ```
 
@@ -32,11 +33,18 @@ debug:
 不要再添加第二个同名 `debug:` 段。参数在节点启动时读取，修改后重新启动节点。
 
 - `memory_stats_en: false`：不创建 reporter、文件或对象遍历，不读取 `/proc`。
-- `memory_stats_interval_sec`：单调墙钟采样间隔；0 表示每个安全检查点都采样，
-  数据较大时不建议这样设置。
-- `memory_stats_print_interval_sec`：控制台完整分项汇报间隔。
+- `memory_stats_interval_sec`：全量采样的最小间隔，默认 10 秒。
+- `memory_stats_target_overhead_ratio`：默认 0.02。根据上一轮完整检查点耗时
+  （遍历、汇总、打印、写盘和临时去重表销毁）自动延长冷却时间，目标约为墙钟的 2%。
+  这是自适应退让目标，不是逐帧延迟保证；设置为 0 才关闭自动退让。
+- `memory_stats_print_interval_sec`：控制台模块汇总的最小间隔，默认 60 秒。
+  全部分项仍保存在 CSV，可用查看脚本展开。
 - 输出目录为空：使用编译源码根目录下的 `Log/memory/`。
 - 每轮自动创建 `<seq_name>_<时间>_<PID>` 子目录，避免覆盖此前实验。
+
+初始化及正常结束仍强制采样。原先每秒扫描全图的设置应改为上述配置；即使旧 YAML
+仍写 1 秒，新的退让目标也会依据实际采集成本自动降低频率。单次全量采集仍同步执行，
+仍可能暂停主线程，分项采样峰值也会变稀；内核 VmHWM 在最终读取时保留进程高水位。
 
 启用后会打印 `Memory statistics output: ...` 的完整路径。内存统计使用独立
 `ros.cake_slam.memory_stats` INFO logger，不必恢复所有 IMU/图像到达 INFO。

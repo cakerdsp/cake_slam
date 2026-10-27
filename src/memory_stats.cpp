@@ -93,6 +93,15 @@ using Values = std::array<long double, 6>;
 using Components = std::map<std::string, Component>;
 const char* const kTotal = "__accounted_total__";
 
+std::string consoleGroup(const std::string& key) {
+  for (const char* prefix : {"vio.map", "vio.camera_", "vio.ekf", "vio.retirement", "lidar.map", "lidar.workspace"}) {
+    const std::string match(prefix);
+    if (key.compare(0, match.size(), match) == 0)
+      return match == "vio.camera_" ? "vio.camera_buffers" : match;
+  }
+  return key.substr(0, key.find('.'));
+}
+
 Values values(const Component& value) {
   return {{static_cast<long double>(value.payload_bytes),
            static_cast<long double>(value.capacity_bytes),
@@ -307,6 +316,12 @@ Sampling and summaries
 ----------------------
 All sample/print intervals and weighted means use steady-clock WALL time, not
 data/simulation time. First sample_id is 0; every accepted sample is flushed.
+The configured sample interval is a minimum. After each full checkpoint, the
+owner measures collector + reporter + temporary-registry destruction wall time.
+With target_overhead_ratio > 0 the next cooldown is at least that measured cost
+divided by the target ratio. This is adaptive backoff, not a real-time guarantee.
+Initialization/finalization can force a snapshot. Normal console output shows
+simultaneous module aggregates; full per-component data remains in the CSVs.
 memory_samples.csv is long-form: one component per sample, plus the reserved
 __accounted_total__ row. An absent known component is zero (released storage).
 Before a category first appears, its value is also zero for summary statistics.
@@ -384,9 +399,12 @@ those measurements have different coverage and physical/reserved semantics.
 struct Reporter::Impl {
   explicit Impl(Config value) : config(std::move(value)), started(Clock::now()) {
     if (!std::isfinite(config.sample_interval_sec) || config.sample_interval_sec < 0)
-      config.sample_interval_sec = 1.0;
+      config.sample_interval_sec = 10.0;
     if (!std::isfinite(config.print_interval_sec) || config.print_interval_sec < 0)
-      config.print_interval_sec = 10.0;
+      config.print_interval_sec = 60.0;
+    if (!std::isfinite(config.target_overhead_ratio) || config.target_overhead_ratio < 0 ||
+        config.target_overhead_ratio >= 1) config.target_overhead_ratio = 0.02;
+    sample_cooldown_sec = config.sample_interval_sec;
   }
 
   Config config;
@@ -402,10 +420,12 @@ struct Reporter::Impl {
   double last_wall = 0;
   double data_time = std::numeric_limits<double>::quiet_NaN();
   double collection_ms = 0;
+  double sample_cooldown_sec = 10.0;
   int frame = -1;
   std::string stage;
   Components current;
   std::map<std::string, Accumulator> stats;
+  std::map<std::string, Accumulator> console_groups;
   Accumulator total_stats;
   ProcessMemory process;
   std::array<OptionalAccumulator, 7> process_stats;
@@ -442,7 +462,10 @@ struct Reporter::Impl {
       if (!coverage || !samples_file || !process_file) throw std::runtime_error("cannot write output headers");
       files_enabled = true;
       writeSummary();
-      ROS_INFO_STREAM_NAMED("memory_stats", "Memory statistics output: " << directory.string());
+      ROS_INFO_STREAM_NAMED("memory_stats", "Memory statistics output: " << directory.string()
+          << "; minimum_interval=" << config.sample_interval_sec << " s"
+          << "; target_overhead_ratio=" << config.target_overhead_ratio
+          << "; console=module_summary (full detail in CSV)");
     } catch (const std::exception& error) {
       closeFiles();
       ROS_ERROR_STREAM_NAMED("memory_stats", "Memory statistics file output disabled: " << error.what());
@@ -633,7 +656,7 @@ struct Reporter::Impl {
       if (final) stream << " final_est=" << current_estimate / 1048576.0L << " MiB";
       ROS_INFO_STREAM_NAMED("memory_stats", "[Memory] " << stream.str());
     };
-    for (const auto& entry : stats) component(entry.first, entry.second);
+    for (const auto& entry : console_groups) component(entry.first, entry.second);
     component(kTotal, total_stats);
     last_print = now;
     printed = true;
@@ -661,7 +684,16 @@ bool Reporter::due(bool force) const noexcept {
   if (!impl_ || impl_->finalized) return false;
   return force || !impl_->sampled ||
       std::chrono::duration<double>(Clock::now() - impl_->last_sample).count() >=
-          impl_->config.sample_interval_sec;
+          impl_->sample_cooldown_sec;
+}
+
+void Reporter::finishCheckpoint(double elapsed_sec) noexcept {
+  if (!impl_ || impl_->finalized || !std::isfinite(elapsed_sec) || elapsed_sec < 0) return;
+  double cooldown = impl_->config.sample_interval_sec;
+  if (impl_->config.target_overhead_ratio > 0)
+    cooldown = std::max(cooldown, elapsed_sec / impl_->config.target_overhead_ratio);
+  impl_->sample_cooldown_sec = cooldown;
+  impl_->last_sample = Clock::now();
 }
 
 void Reporter::record(Snapshot snapshot, double data_time, int frame,
@@ -682,6 +714,7 @@ void Reporter::record(Snapshot snapshot, double data_time, int frame,
       for (const auto& previous : state.stats) snapshot.components.emplace(previous.first, Component{});
       state.current = std::move(snapshot.components);
       Component total;
+      Components groups;
       for (const auto& entry : state.current) {
         state.stats[entry.first].update(entry.second, hold_sec, location);
         total.payload_bytes += entry.second.payload_bytes;
@@ -689,7 +722,15 @@ void Reporter::record(Snapshot snapshot, double data_time, int frame,
         total.overhead_estimate_bytes += entry.second.overhead_estimate_bytes;
         total.objects += entry.second.objects;
         total.shared_references += entry.second.shared_references;
+        Component& group = groups[consoleGroup(entry.first)];
+        group.payload_bytes += entry.second.payload_bytes;
+        group.capacity_bytes += entry.second.capacity_bytes;
+        group.overhead_estimate_bytes += entry.second.overhead_estimate_bytes;
+        group.objects += entry.second.objects;
+        group.shared_references += entry.second.shared_references;
       }
+      for (const auto& previous : state.console_groups) groups.emplace(previous.first, Component{});
+      for (const auto& group : groups) state.console_groups[group.first].update(group.second, hold_sec, location);
       state.total_stats.update(total, hold_sec, location);
       if (!state.sampled) state.first_wall = wall;
       state.last_wall = wall;

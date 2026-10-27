@@ -354,8 +354,10 @@ image_save:
 debug:
   # Independent memory accounting; false skips snapshots and creates no files.
   memory_stats_en: false
-  memory_stats_interval_sec: 1.0
-  memory_stats_print_interval_sec: 10.0
+  memory_stats_interval_sec: 10.0
+  memory_stats_print_interval_sec: 60.0
+  # Back off further when the last full checkpoint exceeds this wall-time budget.
+  memory_stats_target_overhead_ratio: 0.02
   # Empty: Log/memory/<seq_name>_<timestamp>_<pid> under the source root.
   memory_stats_output_dir: ""
   plot_time: -10.0

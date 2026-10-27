@@ -14,6 +14,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 namespace memory_stats {
@@ -127,19 +128,27 @@ struct Snapshot {
   struct AllocationIdentity {
     std::string domain;
     const void* pointer;
-    bool operator<(const AllocationIdentity& other) const {
-      if (domain != other.domain) return domain < other.domain;
-      return std::less<const void*>()(pointer, other.pointer);
+    bool operator==(const AllocationIdentity& other) const {
+      return pointer == other.pointer && domain == other.domain;
     }
   };
-  std::set<const void*, std::less<const void*>> seen_objects_;
-  std::set<AllocationIdentity> seen_allocations_;
+  struct AllocationHash {
+    std::size_t operator()(const AllocationIdentity& value) const {
+      const std::size_t pointer = std::hash<const void*>{}(value.pointer);
+      const std::size_t domain = std::hash<std::string>{}(value.domain);
+      return pointer ^ (domain + 0x9e3779b9U + (pointer << 6) + (pointer >> 2));
+    }
+  };
+  std::unordered_set<const void*> seen_objects_;
+  std::unordered_set<AllocationIdentity, AllocationHash> seen_allocations_;
 };
 
 struct Config {
   bool enabled = false;
-  double sample_interval_sec = 1.0;
-  double print_interval_sec = 10.0;
+  double sample_interval_sec = 10.0;
+  double print_interval_sec = 60.0;
+  // Target, not a hard real-time guarantee. Zero disables automatic backoff.
+  double target_overhead_ratio = 0.02;
   std::string output_dir;
 };
 
@@ -155,6 +164,8 @@ class Reporter {
   bool due(bool force = false) const noexcept;
   void record(Snapshot snapshot, double data_time, int frame,
               const std::string& stage, bool final = false) noexcept;
+  // Owner measures through record() return, including dedup-registry destruction.
+  void finishCheckpoint(double elapsed_sec) noexcept;
   void finalize() noexcept;
 
  private:

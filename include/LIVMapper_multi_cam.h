@@ -207,8 +207,9 @@ public:
   int usage_stats_window = 100;
   // Independent diagnostic; no reporter or traversal is created when disabled.
   bool memory_stats_en = false;
-  double memory_stats_interval_sec = 1.0;
-  double memory_stats_print_interval_sec = 10.0;
+  double memory_stats_interval_sec = 10.0;
+  double memory_stats_print_interval_sec = 60.0;
+  double memory_stats_target_overhead_ratio = 0.02;
   std::string memory_stats_output_dir;
   std::unique_ptr<memory_stats::Reporter> memory_stats_reporter_;
   bool directional_update_en = false;
