@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <variant>
 #include <vector>
 
 // Error coordinates: right SO(3) increments and additive world-frame position.
@@ -200,54 +201,141 @@ struct Update
   Eigen::VectorXd correction;
   Eigen::MatrixXd gain_times_jacobian;
   Eigen::MatrixXd covariance;
+  bool used_joseph_fallback = false;
 };
 
-// H' R^-1 H and H' R^-1 (z-h) are supplied in full state coordinates.
-// Zero gain rows freeze means, while Joseph's formula still updates both
-// cross-covariance blocks. Restoring old rows/columns is not a Schmidt update.
+// Storage is owned by one estimator, never by a global/thread-local cache.
+// Common layouts use fixed Eigen storage; other layouts retain runtime sizes.
 template <int Dimension>
-inline Update updateImpl(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &information,
-                         const Eigen::VectorXd &information_vector,
-                         const Eigen::VectorXd &prior_delta, const std::vector<int> &active)
+struct UpdateStorage
 {
   using Matrix = Eigen::Matrix<double, Dimension, Dimension>;
   using Vector = Eigen::Matrix<double, Dimension, 1>;
+  Matrix p, info, identity, posterior_information, b, selected_b, gain, covariance, a, temporary;
+  Vector selected_prior, correction;
+  Eigen::Matrix<int, Dimension, 1> selected;
+  Eigen::LLT<Matrix> prior_llt, posterior_llt, covariance_llt;
+};
+
+template <typename Matrix>
+inline void symmetrizeInPlace(Matrix &matrix)
+{
+  for (Eigen::Index c = 0; c < matrix.cols(); ++c)
+    for (Eigen::Index r = c + 1; r < matrix.rows(); ++r)
+      matrix(r, c) = matrix(c, r) = 0.5 * (matrix(r, c) + matrix(c, r));
+}
+
+// H' R^-1 H and H' R^-1 (z-h) are supplied in full state coordinates.
+// Commit outputs only after validation: a rejected trial must not overwrite
+// the last accepted result, even when the caller reuses its output buffers.
+template <int Dimension>
+inline void updateIntoImpl(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &information,
+                           const Eigen::VectorXd &information_vector,
+                           const Eigen::VectorXd &prior_delta, const std::vector<int> &active,
+                           UpdateStorage<Dimension> &w, Update &result)
+{
   const int n = static_cast<int>(prior.rows());
-  const Matrix p = symmetric(Matrix(prior));
-  const Matrix info = symmetric(Matrix(information));
-  const Matrix identity = Matrix::Identity(n, n);
-  const Eigen::LLT<Matrix> prior_llt(p);
-  if (prior_llt.info() != Eigen::Success) throw std::runtime_error("full prior covariance is not positive definite");
-  const Eigen::LLT<Matrix> posterior_llt(symmetric(prior_llt.solve(identity) + info));
-  if (posterior_llt.info() != Eigen::Success) throw std::runtime_error("posterior information is not positive definite");
-  const Matrix b = posterior_llt.solve(identity);
-  Matrix selected_b = Matrix::Zero(n, n);
-  Vector selected_prior = Vector::Zero(n);
+  if constexpr (Dimension == Eigen::Dynamic)
+  {
+    w.p = prior;
+    w.info = information;
+    symmetrizeInPlace(w.p);
+    symmetrizeInPlace(w.info);
+  }
+  else
+  {
+    // Retain the original fixed-size expression evaluation order. These
+    // temporaries use stack storage and do not cause heap allocations.
+    using Matrix = typename UpdateStorage<Dimension>::Matrix;
+    w.p = symmetric(Matrix(prior));
+    w.info = symmetric(Matrix(information));
+  }
+  w.identity.setIdentity(n, n);
+  w.prior_llt.compute(w.p);
+  if (w.prior_llt.info() != Eigen::Success) throw std::runtime_error("full prior covariance is not positive definite");
+  if constexpr (Dimension == Eigen::Dynamic)
+  {
+    w.posterior_information = w.prior_llt.solve(w.identity);
+    w.posterior_information += w.info;
+    symmetrizeInPlace(w.posterior_information);
+    w.posterior_llt.compute(w.posterior_information);
+  }
+  else
+    w.posterior_llt.compute(symmetric(w.prior_llt.solve(w.identity) + w.info));
+  if (w.posterior_llt.info() != Eigen::Success) throw std::runtime_error("posterior information is not positive definite");
+  w.b = w.posterior_llt.solve(w.identity);
+  w.selected_b.setZero(n, n);
+  w.selected_prior.setZero(n);
+  w.selected.setZero(n);
   for (int index : active)
   {
     if (index < 0 || index >= n) throw std::invalid_argument("invalid active covariance index");
-    selected_b.row(index) = b.row(index);
-    selected_prior[index] = prior_delta[index];
+    w.selected_b.row(index) = w.b.row(index);
+    w.selected_prior[index] = prior_delta[index];
+    w.selected[index] = 1;
   }
-  const Matrix gain_times_jacobian = selected_b * info;
-  const Vector rhs = information_vector;
-  const Vector delta = prior_delta;
-  const Vector correction = selected_b * rhs + selected_prior - gain_times_jacobian * delta;
-  const Matrix a = identity - gain_times_jacobian;
-  const Matrix covariance = symmetric(a * p * a.transpose() + selected_b * info * selected_b.transpose());
-  if (!correction.allFinite() || !covariance.allFinite() ||
-      Eigen::LLT<Matrix>(covariance).info() != Eigen::Success)
+  w.gain.noalias() = w.selected_b * w.info;
+  w.correction.noalias() = w.selected_b * information_vector;
+  w.correction += w.selected_prior;
+  w.correction.noalias() -= w.gain * prior_delta;
+
+  // Joseph with zero gain rows: B + (I-S)(P-B)(I-S). Only the
+  // frozen/frozen marginal is restored; cross-covariances remain those of B.
+  w.covariance = w.b;
+  symmetrizeInPlace(w.covariance);
+  for (int c = 0; c < n; ++c)
+    if (!w.selected[c])
+      for (int r = 0; r < n; ++r)
+        if (!w.selected[r]) w.covariance(r, c) = w.p(r, c);
+  bool valid_covariance = w.covariance.allFinite();
+  if (valid_covariance)
+  {
+    w.covariance_llt.compute(w.covariance);
+    valid_covariance = w.covariance_llt.info() == Eigen::Success;
+  }
+  const bool fallback = !valid_covariance;
+  if (fallback)
+  {
+    // Numerical fallback uses the original Joseph expression, without jitter
+    // or changing measurement noise. Scratch is separate from result.
+    w.a = w.identity - w.gain;
+    w.temporary.noalias() = w.a * w.p;
+    w.covariance.noalias() = w.temporary * w.a.transpose();
+    w.temporary.noalias() = w.gain * w.selected_b.transpose();
+    w.covariance += w.temporary;
+    symmetrizeInPlace(w.covariance);
+    valid_covariance = w.covariance.allFinite();
+    if (valid_covariance)
+    {
+      w.covariance_llt.compute(w.covariance);
+      valid_covariance = w.covariance_llt.info() == Eigen::Success;
+    }
+  }
+  if (!w.correction.allFinite() || !valid_covariance)
     throw std::runtime_error("invalid full posterior covariance");
-  Update result;
-  result.gain_times_jacobian = gain_times_jacobian;
-  result.correction = correction;
-  result.covariance = covariance;
-  return result;
+  result.gain_times_jacobian = w.gain;
+  result.correction = w.correction;
+  result.covariance = w.covariance;
+  result.used_joseph_fallback = fallback;
 }
 
-inline Update update(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &information,
-                     const Eigen::VectorXd &information_vector,
-                     const Eigen::VectorXd &prior_delta, const std::vector<int> &active)
+class UpdateWorkspace
+{
+  std::variant<std::monostate, UpdateStorage<19>, UpdateStorage<20>,
+               UpdateStorage<21>, UpdateStorage<Eigen::Dynamic>> storage_;
+public:
+  template <int Dimension> UpdateStorage<Dimension> &storage()
+  {
+    if (!std::holds_alternative<UpdateStorage<Dimension>>(storage_))
+      storage_.template emplace<UpdateStorage<Dimension>>();
+    return std::get<UpdateStorage<Dimension>>(storage_);
+  }
+};
+
+inline void updateInto(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &information,
+                       const Eigen::VectorXd &information_vector,
+                       const Eigen::VectorXd &prior_delta, const std::vector<int> &active,
+                       UpdateWorkspace &workspace, Update &result)
 {
   const int n = static_cast<int>(prior.rows());
   if (prior.cols() != n || information.rows() != n || information.cols() != n ||
@@ -257,11 +345,21 @@ inline Update update(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &inform
     throw std::runtime_error("invalid covariance update input");
   switch (n)
   {
-    case 19: return updateImpl<19>(prior, information, information_vector, prior_delta, active);
-    case 20: return updateImpl<20>(prior, information, information_vector, prior_delta, active);
-    case 21: return updateImpl<21>(prior, information, information_vector, prior_delta, active);
-    default: return updateImpl<Eigen::Dynamic>(prior, information, information_vector, prior_delta, active);
+    case 19: return updateIntoImpl(prior, information, information_vector, prior_delta, active, workspace.storage<19>(), result);
+    case 20: return updateIntoImpl(prior, information, information_vector, prior_delta, active, workspace.storage<20>(), result);
+    case 21: return updateIntoImpl(prior, information, information_vector, prior_delta, active, workspace.storage<21>(), result);
+    default: return updateIntoImpl(prior, information, information_vector, prior_delta, active, workspace.storage<Eigen::Dynamic>(), result);
   }
+}
+
+inline Update update(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &information,
+                     const Eigen::VectorXd &information_vector,
+                     const Eigen::VectorXd &prior_delta, const std::vector<int> &active)
+{
+  UpdateWorkspace workspace;
+  Update result;
+  updateInto(prior, information, information_vector, prior_delta, active, workspace, result);
+  return result;
 }
 
 // Covariance upper bound for a sum of vectors whose cross-correlations are

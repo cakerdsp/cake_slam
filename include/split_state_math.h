@@ -110,6 +110,8 @@ struct PatchWorkspace : PatchInformation
   PixelJacobian pixel_split;
   Eigen::VectorXd residual, weight, weighted_residual, pixel;
   Eigen::MatrixXd nuisance, reference_noise, compact;
+  Eigen::MatrixXd pose_affine_delta, normalized_pose_affine_delta;
+  Eigen::VectorXd normalized_pose_affine_values;
   Eigen::MatrixXd nuisance_root, innovation_root;
   estimator_covariance::NisWorkspace nis;
   std::vector<int> solve_to_patch, patch_to_solve;
@@ -134,6 +136,7 @@ struct PatchWorkspace : PatchInformation
     if (need_nis)
     {
       nuisance.resize(rows, 9);
+      pose_affine_delta.resize(rows, 3);
       nuisance_root.resize(rows, 9);
       innovation_root.resize(rows, 9 + kMotionDim + n);
     }
@@ -168,6 +171,50 @@ struct PatchWorkspace : PatchInformation
     compact.topLeftCorner(rows, kMotionDim) = motion.topRows(rows);
     compact.topRightCorner(rows, camera.cols()) = camera.topRows(rows);
   }
+};
+
+// Current/current pairs are processed serially. Keep their trial statistics
+// separate until the existing complete-patch acceptance rule commits them.
+struct PairWorkspace
+{
+  Eigen::MatrixXd hessian, source_jacobians, target_jacobians;
+  Eigen::MatrixXd normalized_source_jacobian, normalized_target_jacobian, jacobians;
+  Eigen::VectorXd gradient, source_jacobian, target_jacobian, jacobian;
+  Eigen::VectorXd normalized_source, normalized_target, residuals;
+  std::vector<double> source_values, target_values;
+
+  void reset(int rows, int dimension, bool need_gradient, bool normalized)
+  {
+    hessian.setZero(dimension, dimension);
+    if (need_gradient) gradient.setZero(dimension);
+    source_jacobian.resize(dimension);
+    target_jacobian.resize(dimension);
+    jacobian.resize(dimension);
+    if (normalized)
+    {
+      source_values.resize(rows);
+      target_values.resize(rows);
+      source_jacobians.setZero(rows, dimension);
+      target_jacobians.setZero(rows, dimension);
+      normalized_source.resize(rows);
+      normalized_target.resize(rows);
+      normalized_source_jacobian.resize(rows, dimension);
+      normalized_target_jacobian.resize(rows, dimension);
+      residuals.resize(rows);
+      jacobians.resize(rows, dimension);
+    }
+  }
+};
+
+// These buffers are transient solve inputs/results, not accepted or rollback
+// state. A trust-region retry may overwrite them without changing snapshots.
+struct SolveWorkspace
+{
+  Eigen::MatrixXd hessian, full_information;
+  Eigen::VectorXd gradient, full_information_vector, solution;
+  std::vector<int> active_indices;
+  estimator_covariance::UpdateWorkspace covariance;
+  estimator_covariance::Update update;
 };
 
 // IMU propagation has F = diag(F_body, I_camera) and diagonal camera process

@@ -8164,7 +8164,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
   const bool allow_extrinsic_rotation = online_extrinsic_active && online_extrinsic_rot_en;
   const bool allow_extrinsic_translation = online_extrinsic_active && online_extrinsic_trans_en;
   const StatesGroup state_before_visual_update = *state;
-  const Eigen::MatrixXd cov_before_visual_update = state->cov;
+  const Eigen::MatrixXd &cov_before_visual_update = state_before_visual_update.cov;
   std::vector<uint8_t> final_active_extrinsic_rot(state->num_cameras, 0);
   std::vector<uint8_t> final_active_extrinsic_trans(state->num_cameras, 0);
   std::vector<uint8_t> final_active_time_groups(state->num_time_offset_groups, 0);
@@ -8430,8 +8430,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
           addSolveBlock(state->extrinsicTransIndex(camera_id), 3);
       }
       const int solve_dim = static_cast<int>(solve_to_full.size());
-      Eigen::MatrixXd hessian = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
-      Eigen::VectorXd gradient = Eigen::VectorXd::Zero(solve_dim);
+      auto &hessian = visual_solve_workspace_.hessian;
+      auto &gradient = visual_solve_workspace_.gradient;
+      hessian.setZero(solve_dim, solve_dim);
+      gradient.setZero(solve_dim);
       auto &split_information = visual_information_workspace_;
       split_information.reset(solve_dim - split_state_math::kBodyDim);
       auto addJacobianValue = [&](Eigen::VectorXd &jacobian, int full_index, double value) {
@@ -8442,11 +8444,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
       auto addJacobianSegment = [&](Eigen::VectorXd &jacobian, int full_index, const auto &value) {
         for (int k = 0; k < value.size(); ++k)
           addJacobianValue(jacobian, full_index + k, value[k]);
-      };
-      auto fullVectorToSolve = [&](const Eigen::VectorXd &full_vector) {
-        Eigen::VectorXd reduced(solve_dim);
-        for (int k = 0; k < solve_dim; ++k) reduced[k] = full_vector[solve_to_full[k]];
-        return reduced;
       };
       auto fullCovToSolve = [&](const Eigen::MatrixXd &full_cov) {
         Eigen::MatrixXd reduced(solve_dim, solve_dim);
@@ -8460,11 +8457,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
         for (int r = 0; r < reduced.rows(); ++r)
           for (int c = 0; c < reduced.cols(); ++c)
             full(solve_to_full[r], solve_to_full[c]) = reduced(r, c);
-        return full;
-      };
-      auto solveVectorToFull = [&](const Eigen::VectorXd &reduced) {
-        Eigen::VectorXd full = Eigen::VectorXd::Zero(full_state_dim);
-        for (int k = 0; k < reduced.size(); ++k) full[solve_to_full[k]] = reduced[k];
         return full;
       };
       if (usage_stats_en)
@@ -8614,9 +8606,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
               reference_noise_jacobian = result.reference_jacobian;
             }
             double normalized_patch_weight = 1.0;
-            Eigen::MatrixXd pose_affine_nuisance_delta;
+            auto &pose_affine_nuisance_delta = patch_workspace.pose_affine_delta;
             if (virtual_pose_affine_en && compute_reference_nis)
-              pose_affine_nuisance_delta = Eigen::MatrixXd::Zero(patch_size_total, 3);
+              pose_affine_nuisance_delta.setZero();
             auto accumulateObservation = [&](const Eigen::VectorXd &jacobian, double residual, int patch_index) {
               ++result.linearized;
               const double weight = normalized_patch_weight *
@@ -8637,7 +8629,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 // a world-frame camera translation. The reference part is already
                 // expressed in world coordinates by referenceUncertaintyJacobian.
                 patch_nuisance.block<1, 3>(local_dof, 6) -= jacobian.segment<3>(3).transpose();
-                if (pose_affine_nuisance_delta.rows() != 0)
+                if (virtual_pose_affine_en && compute_reference_nis)
                   patch_nuisance.block<1, 3>(local_dof, 6) += pose_affine_nuisance_delta.row(patch_index);
               }
               patch_error += weight * weight * residual * residual;
@@ -8661,7 +8653,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
               {
                 patch_nuisance.row(local_dof) = reference_noise_jacobian.row(patch_index);
                 patch_nuisance.block<1, 3>(local_dof, 6) -= patch_workspace.motion.block<1, 3>(local_dof, 3);
-                if (pose_affine_nuisance_delta.rows() != 0)
+                if (virtual_pose_affine_en && compute_reference_nis)
                   patch_nuisance.block<1, 3>(local_dof, 6) += pose_affine_nuisance_delta.row(patch_index);
               }
               patch_error += weight * weight * residual * residual;
@@ -8680,13 +8672,13 @@ void VIOManager::computeJacobianAndUpdateEKF()
               if (!normalizePatchWithJacobian(current_values, raw_current_jacobian, zncc_min_std,
                                               normalized_current, normalized_current_jacobian))
                 return false;
-              if (pose_affine_nuisance_delta.rows() != 0)
+              if (virtual_pose_affine_en && compute_reference_nis)
               {
-                Eigen::VectorXd unused_values;
-                Eigen::MatrixXd normalized_delta;
+                auto &unused_values = patch_workspace.normalized_pose_affine_values;
+                auto &normalized_delta = patch_workspace.normalized_pose_affine_delta;
                 if (!normalizePatchWithJacobian(current_values, pose_affine_nuisance_delta, zncc_min_std,
                                                 unused_values, normalized_delta)) return false;
-                pose_affine_nuisance_delta = std::move(normalized_delta);
+                pose_affine_nuisance_delta = normalized_delta;
               }
               if (compute_reference_nis)
               {
@@ -8908,7 +8900,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
                     addPatchJacobianSegment(jacobian, 3, extra_pose.tail<3>().transpose());
                     // Keep the existing center-only landmark-noise approximation;
                     // the added deformation belongs only to the pose Jacobian.
-                    if (pose_affine_nuisance_delta.rows() != 0)
+                    if (virtual_pose_affine_en && compute_reference_nis)
                       pose_affine_nuisance_delta.row(patch_index) = extra_pose.tail<3>();
                   }
                   addPatchMotionTimeJacobian(jacobian, Jimg_Jpi_R);
@@ -9436,25 +9428,20 @@ void VIOManager::computeJacobianAndUpdateEKF()
           return jacobian.array().isFinite().all() && std::isfinite(value);
         };
 
-        Eigen::MatrixXd pair_hessian = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
-        Eigen::VectorXd pair_gradient;
-        if (virtual_pose_affine_en) pair_gradient = Eigen::VectorXd::Zero(solve_dim);
+        auto &pair_workspace = visual_pair_workspace_;
+        pair_workspace.reset(patch_size_total, solve_dim, virtual_pose_affine_en, zncc_residual_en);
+        auto &pair_hessian = pair_workspace.hessian;
+        auto &pair_gradient = pair_workspace.gradient;
         int pair_residuals = 0;
         double pair_error = 0.0;
-        std::vector<double> source_values;
-        std::vector<double> target_values;
-        Eigen::MatrixXd source_jacobians;
-        Eigen::MatrixXd target_jacobians;
+        auto &source_values = pair_workspace.source_values;
+        auto &target_values = pair_workspace.target_values;
+        auto &source_jacobians = pair_workspace.source_jacobians;
+        auto &target_jacobians = pair_workspace.target_jacobians;
         bool complete_pair_patch = true;
-        if (zncc_residual_en)
-        {
-          source_values.resize(patch_size_total);
-          target_values.resize(patch_size_total);
-          source_jacobians = Eigen::MatrixXd::Zero(patch_size_total, solve_dim);
-          target_jacobians = Eigen::MatrixXd::Zero(patch_size_total, solve_dim);
-        }
-        Eigen::VectorXd source_jacobian(solve_dim);
-        Eigen::VectorXd target_jacobian(solve_dim);
+        auto &source_jacobian = pair_workspace.source_jacobian;
+        auto &target_jacobian = pair_workspace.target_jacobian;
+        auto &jacobian = pair_workspace.jacobian;
         for (int patch_index = 0; patch_index < patch_size_total; ++patch_index)
         {
           V2D target_offset = (core_patch_offsets_[patch_index] * static_cast<float>(scale)).cast<double>();
@@ -9504,8 +9491,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           const double sqrt_robust_weight =
               tukey_robust_en ? tukeySqrtWeight(raw_residual, outlier_threshold) : 1.0;
           const double residual = sqrt_weight * sqrt_robust_weight * raw_residual;
-          const Eigen::VectorXd jacobian =
-              sqrt_weight * sqrt_robust_weight * (source_jacobian - target_jacobian);
+          jacobian = sqrt_weight * sqrt_robust_weight * (source_jacobian - target_jacobian);
           if (virtual_pose_affine_en)
           {
             if (!std::isfinite(residual) || !jacobian.allFinite())
@@ -9537,10 +9523,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
         if (zncc_residual_en)
         {
           if (!complete_pair_patch) continue;
-          Eigen::VectorXd normalized_source;
-          Eigen::VectorXd normalized_target;
-          Eigen::MatrixXd normalized_source_jacobian;
-          Eigen::MatrixXd normalized_target_jacobian;
+          auto &normalized_source = pair_workspace.normalized_source;
+          auto &normalized_target = pair_workspace.normalized_target;
+          auto &normalized_source_jacobian = pair_workspace.normalized_source_jacobian;
+          auto &normalized_target_jacobian = pair_workspace.normalized_target_jacobian;
           if (!normalizePatchWithJacobian(source_values, source_jacobians, zncc_min_std,
                                           normalized_source, normalized_source_jacobian) ||
               !normalizePatchWithJacobian(target_values, target_jacobians, zncc_min_std,
@@ -9549,8 +9535,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
             if (virtual_pose_affine_en) ++pose_affine_local_failures;
             continue;
           }
-          Eigen::VectorXd residuals = normalized_source - normalized_target;
-          Eigen::MatrixXd jacobians = normalized_source_jacobian - normalized_target_jacobian;
+          auto &residuals = pair_workspace.residuals;
+          auto &jacobians = pair_workspace.jacobians;
+          residuals = normalized_source - normalized_target;
+          jacobians = normalized_source_jacobian - normalized_target_jacobian;
           const double sqrt_robust_weight =
               normalizedPatchRobustSqrtWeight(residuals, zncc_robust_en && !tukey_robust_en,
                                               zncc_huber_delta);
@@ -9561,8 +9549,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
             const double tukey_sqrt_weight =
                 tukey_robust_en ? tukeySqrtWeight(residuals[row], outlier_threshold) : 1.0;
             const double combined_sqrt_weight = sqrt_weight * tukey_sqrt_weight;
-            const Eigen::VectorXd jacobian =
-                combined_sqrt_weight * jacobians.row(row).transpose();
+            jacobian = combined_sqrt_weight * jacobians.row(row).transpose();
             const double residual = combined_sqrt_weight * residuals[row];
             if (virtual_pose_affine_en)
             {
@@ -9821,8 +9808,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
         usage_final_residuals_current_cross = usage_iter_residuals_current_cross;
       }
       const Eigen::VectorXd prior_delta_full = state_before_visual_update - *state;
-      Eigen::MatrixXd solve_hessian = hessian;
-      Eigen::VectorXd solve_gradient = gradient;
       rollback_G = G;
       rollback_active_extrinsic_rot = final_active_extrinsic_rot;
       rollback_active_extrinsic_trans = final_active_extrinsic_trans;
@@ -9838,8 +9823,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
       rollback_last_max_time_update_ms = last_max_time_update_ms;
       rollback_directional_result = final_directional_result;
       rollback_posterior_covariance = final_posterior_covariance;
-      estimator_covariance::Update covariance_update;
-      std::vector<int> active_update_indices;
+      auto &covariance_update = visual_solve_workspace_.update;
+      auto &active_update_indices = visual_solve_workspace_.active_indices;
+      active_update_indices.clear();
+      active_update_indices.reserve(full_state_dim);
       for (int index : solve_to_full)
       {
         bool active = true;
@@ -9858,9 +9845,19 @@ void VIOManager::computeJacobianAndUpdateEKF()
       auto factorSolveSystem = [&]() {
         try
         {
-          covariance_update = estimator_covariance::update(
-              iteration_prior_cov, solveMatrixToFull(solve_hessian / measurement_cov),
-              solveVectorToFull(-solve_gradient / measurement_cov), prior_delta_full, active_update_indices);
+          auto &full_information = visual_solve_workspace_.full_information;
+          auto &full_information_vector = visual_solve_workspace_.full_information_vector;
+          full_information.setZero(full_state_dim, full_state_dim);
+          full_information_vector.setZero(full_state_dim);
+          for (int r = 0; r < solve_dim; ++r)
+          {
+            full_information_vector[solve_to_full[r]] = -gradient[r] / measurement_cov;
+            for (int c = 0; c < solve_dim; ++c)
+              full_information(solve_to_full[r], solve_to_full[c]) = hessian(r, c) / measurement_cov;
+          }
+          estimator_covariance::updateInto(iteration_prior_cov, full_information,
+              full_information_vector, prior_delta_full, active_update_indices,
+              visual_solve_workspace_.covariance, covariance_update);
           return true;
         }
         catch (const std::exception &error)
@@ -9879,7 +9876,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
         return;
       }
       G = covariance_update.gain_times_jacobian;
-      Eigen::VectorXd solution = covariance_update.correction;
+      auto &solution = visual_solve_workspace_.solution;
+      solution = covariance_update.correction;
       if (!calibrationUpdateWithinTrustRegion(solution, allow_extrinsic_rotation,
                                               allow_extrinsic_translation, active_time_groups))
       {

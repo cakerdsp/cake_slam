@@ -900,6 +900,8 @@ public:
     }
   };
   split_state_math::Information visual_information_workspace_;
+  split_state_math::PairWorkspace visual_pair_workspace_;
+  split_state_math::SolveWorkspace visual_solve_workspace_;
   std::vector<split_state_math::PatchWorkspace,
               Eigen::aligned_allocator<split_state_math::PatchWorkspace>> visual_patch_workspaces_;
   std::vector<std::vector<VisualPatchResult, Eigen::aligned_allocator<VisualPatchResult>>> visual_patch_results_;

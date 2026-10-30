@@ -18,7 +18,7 @@ target_compile_features(visual_map_retirement_test PRIVATE cxx_std_17)
 target_include_directories(visual_map_retirement_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME visual_map_retirement_test COMMAND visual_map_retirement_test)
 
-foreach(test estimator_covariance directional_update virtual_sampling fixed_gray_weights)
+foreach(test estimator_covariance estimator_update_workspace directional_update virtual_sampling fixed_gray_weights)
   if(test STREQUAL "fixed_gray_weights")
     add_executable(${test}_math_test ${test}_test.cpp)
   else()
@@ -35,6 +35,7 @@ foreach(test estimator_covariance directional_update virtual_sampling fixed_gray
   endif()
   add_test(NAME ${test}_math_test COMMAND ${test}_math_test)
 endforeach()
+target_compile_definitions(estimator_update_workspace_math_test PRIVATE EIGEN_RUNTIME_NO_MALLOC)
 
 # Optional image tests do not make the existing Eigen-only tests depend on OpenCV.
 find_package(OpenCV QUIET COMPONENTS core imgproc)

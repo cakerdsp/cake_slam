@@ -579,11 +579,11 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       for (int c = 0; c < lio_state_dim; ++c)
         full_information(lio_to_full[r], lio_to_full[c]) = H_T_H(r, c);
     }
-    estimator_covariance::Update update;
+    auto &update = covariance_update_;
     try
     {
-      update = estimator_covariance::update(iteration_prior_cov, full_information,
-                                             full_information_vector, state_propagat - state_, lio_to_full);
+      estimator_covariance::updateInto(iteration_prior_cov, full_information,
+          full_information_vector, state_propagat - state_, lio_to_full, covariance_workspace_, update);
     }
     catch (const std::exception &error)
     {
