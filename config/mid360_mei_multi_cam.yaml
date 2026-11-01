@@ -160,13 +160,8 @@ vio:
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
   virtual_raw_score_select_en: true
-  # Master switch: false runs the original unsplit path and ignores all patch_budget/score options.
-  patch_budget_en: false
-  # These settings only apply when patch_budget_en is true.
-  patch_budget_points: 400
-  patch_budget_mode: global
-  patch_score_mode: lidar_directional
-  patch_budget_log_en: false
+  # Module defaults are shared in config/visual_patch_budget.yaml.
+  # Override patch_budget_en here or through the common launch arguments.
   # Original budget, used unchanged when patch_budget_en is false.
   max_total_points: 500
   points_per_camera_min: 50

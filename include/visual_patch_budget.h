@@ -17,14 +17,16 @@ inline Mode parseMode(const std::string &name)
   if (name == "legacy") return Mode::Legacy;
   if (name == "sequential") return Mode::Sequential;
   if (name == "global") return Mode::Global;
-  throw std::invalid_argument("vio.patch_budget_mode must be legacy, sequential or global");
+  throw std::invalid_argument("[visual_patch_budget] vio.patch_budget_mode='" + name +
+                              "'; expected legacy, sequential or global");
 }
 inline Score parseScore(const std::string &name)
 {
   if (name == "shi_tomasi") return Score::ShiTomasi;
   if (name == "isotropic") return Score::Isotropic;
   if (name == "lidar_directional") return Score::LidarDirectional;
-  throw std::invalid_argument("vio.patch_score_mode must be shi_tomasi, isotropic or lidar_directional");
+  throw std::invalid_argument("[visual_patch_budget] vio.patch_score_mode='" + name +
+                              "'; expected shi_tomasi, isotropic or lidar_directional");
 }
 
 struct RuntimeSettings
@@ -67,24 +69,27 @@ inline std::vector<int> allocate(const std::vector<CameraScores> &cameras,
                                  int budget, int minimum, int maximum)
 {
   if (budget < 0 || minimum < 0 || maximum < minimum)
-    throw std::invalid_argument("invalid visual patch budget bounds");
+    throw std::invalid_argument("[visual_patch_budget] invalid bounds: budget=" + std::to_string(budget) +
+                                ", minimum=" + std::to_string(minimum) + ", maximum=" + std::to_string(maximum));
   std::vector<int> quotas(cameras.size(), 0), caps(cameras.size(), 0);
   std::int64_t reserved = 0;
   for (size_t c = 0; c < cameras.size(); ++c)
   {
     for (size_t previous = 0; previous < c; ++previous)
       if (cameras[previous].camera_id == cameras[c].camera_id)
-        throw std::invalid_argument("duplicate camera ID in visual patch budget");
+        throw std::invalid_argument("[visual_patch_budget] duplicate camera_id=" + std::to_string(cameras[c].camera_id));
     const auto &scores = cameras[c].scores;
     for (size_t i = 0; i < scores.size(); ++i)
       if (!std::isfinite(scores[i]) || scores[i] < 0 || (i && scores[i] > scores[i - 1]))
-        throw std::invalid_argument("visual patch scores must be finite, nonnegative and descending");
+        throw std::invalid_argument("[visual_patch_budget] scores must be finite, nonnegative and descending; camera_id=" +
+                                    std::to_string(cameras[c].camera_id) + ", score_index=" + std::to_string(i));
     caps[c] = static_cast<int>(std::min(scores.size(), static_cast<size_t>(maximum)));
     quotas[c] = std::min(minimum, caps[c]);
     reserved += quotas[c];
   }
   if (reserved > budget)
-    throw std::invalid_argument("visual patch budget cannot satisfy camera minimum quotas");
+    throw std::invalid_argument("[visual_patch_budget] budget=" + std::to_string(budget) +
+                                " cannot satisfy reserved minimum quotas=" + std::to_string(reserved));
   for (int remaining = budget - static_cast<int>(reserved); remaining > 0; --remaining)
   {
     int best = -1;

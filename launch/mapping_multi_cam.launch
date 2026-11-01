@@ -1,0 +1,36 @@
+<launch>
+  <!-- Shared ROS1 entry point for existing and new datasets. -->
+  <arg name="params_file" />
+  <arg name="camera_params_file" />
+  <arg name="use_rviz" default="true" />
+  <arg name="memory_profile_prefix" default="" />
+  <arg name="rviz_config_file" default="$(find cake_slam)/rviz_cfg/cake_slam_ros1.rviz" />
+
+  <!-- Empty overrides preserve the merged YAML settings. -->
+  <arg name="patch_budget_en" default="" />
+  <arg name="patch_budget_mode" default="" />
+  <arg name="patch_score_mode" default="" />
+  <arg name="patch_budget_points" default="" />
+  <arg name="patch_budget_log_en" default="" />
+  <arg name="visual_map_manage_en" default="" />
+  <arg name="visual_map_manage_shadow_en" default="" />
+  <arg name="visual_map_retirement_apply_en" default="" />
+  <arg name="cross_camera_current_residual_en" default="" />
+
+  <node pkg="cake_slam" type="cake_slam_mapping_multi_cam" name="laserMapping" output="screen" launch-prefix="$(arg memory_profile_prefix)">
+    <rosparam command="load" file="$(find cake_slam)/config/visual_patch_budget.yaml" />
+    <rosparam command="load" file="$(arg params_file)" />
+    <rosparam command="load" file="$(arg camera_params_file)" />
+    <param if="$(eval arg('patch_budget_en') != '')" name="vio/patch_budget_en" type="bool" value="$(arg patch_budget_en)" />
+    <param if="$(eval arg('patch_budget_mode') != '')" name="vio/patch_budget_mode" type="str" value="$(arg patch_budget_mode)" />
+    <param if="$(eval arg('patch_score_mode') != '')" name="vio/patch_score_mode" type="str" value="$(arg patch_score_mode)" />
+    <param if="$(eval arg('patch_budget_points') != '')" name="vio/patch_budget_points" type="int" value="$(arg patch_budget_points)" />
+    <param if="$(eval arg('patch_budget_log_en') != '')" name="vio/patch_budget_log_en" type="bool" value="$(arg patch_budget_log_en)" />
+    <param if="$(eval arg('visual_map_manage_en') != '')" name="vio/visual_map_manage_en" type="bool" value="$(arg visual_map_manage_en)" />
+    <param if="$(eval arg('visual_map_manage_shadow_en') != '')" name="vio/visual_map_manage_shadow_en" type="bool" value="$(arg visual_map_manage_shadow_en)" />
+    <param if="$(eval arg('visual_map_retirement_apply_en') != '')" name="vio/visual_map_retirement_apply_en" type="bool" value="$(arg visual_map_retirement_apply_en)" />
+    <param if="$(eval arg('cross_camera_current_residual_en') != '')" name="vio/cross_camera_current_residual_en" type="bool" value="$(arg cross_camera_current_residual_en)" />
+  </node>
+
+  <node if="$(arg use_rviz)" pkg="rviz" type="rviz" name="rviz" args="-d $(arg rviz_config_file)" />
+</launch>

@@ -41,7 +41,7 @@ assert frame_body.index('processMultiCameraFrameWithPatchBudget(') > frame_body.
 assert retrieval_body.index('prepareVirtualCandidates(') > retrieval_body.index('return;')
 
 # The command-line module limit must not overwrite the original YAML limit.
-launch = ET.parse(root / 'launch/mapping_mid360_mei_multi_cam.launch').getroot()
+launch = ET.parse(root / 'launch/mapping_multi_cam.launch').getroot()
 params = {p.attrib['name']: p.attrib for node in launch.findall('node') for p in node.findall('param')}
 assert params['vio/patch_budget_points']['value'] == '$(arg patch_budget_points)'
 assert params['vio/patch_budget_en']['type'] == 'bool'

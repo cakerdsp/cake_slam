@@ -4,11 +4,31 @@
   <arg name="hilti22_params_file" default="$(find cake_slam)/config/HILTI22_multi_cam.yaml" />
   <arg name="camera_params_file" default="$(find cake_slam)/config/camera_fisheye_HILTI22_multi_cam.yaml" />
   <arg name="rviz_config_file" default="$(find cake_slam)/rviz_cfg/cake_slam_ros1.rviz" />
+  <!-- Common overrides: identical to the other dataset launch wrappers. -->
+  <arg name="patch_budget_en" default="" />
+  <arg name="patch_budget_mode" default="" />
+  <arg name="patch_score_mode" default="" />
+  <arg name="patch_budget_points" default="" />
+  <arg name="patch_budget_log_en" default="" />
+  <arg name="visual_map_manage_en" default="" />
+  <arg name="visual_map_manage_shadow_en" default="" />
+  <arg name="visual_map_retirement_apply_en" default="" />
+  <arg name="cross_camera_current_residual_en" default="" />
 
-  <node pkg="cake_slam" type="cake_slam_mapping_multi_cam" name="laserMapping" output="screen" launch-prefix="$(arg memory_profile_prefix)">
-    <rosparam command="load" file="$(arg hilti22_params_file)" />
-    <rosparam command="load" file="$(arg camera_params_file)" />
-  </node>
-
-  <node if="$(arg use_rviz)" pkg="rviz" type="rviz" name="rviz" args="-d $(arg rviz_config_file)" />
+  <include file="$(find cake_slam)/launch/mapping_multi_cam.launch">
+    <arg name="params_file" value="$(arg hilti22_params_file)" />
+    <arg name="camera_params_file" value="$(arg camera_params_file)" />
+    <arg name="use_rviz" value="$(arg use_rviz)" />
+    <arg name="memory_profile_prefix" value="$(arg memory_profile_prefix)" />
+    <arg name="rviz_config_file" value="$(arg rviz_config_file)" />
+    <arg name="patch_budget_en" value="$(arg patch_budget_en)" />
+    <arg name="patch_budget_mode" value="$(arg patch_budget_mode)" />
+    <arg name="patch_score_mode" value="$(arg patch_score_mode)" />
+    <arg name="patch_budget_points" value="$(arg patch_budget_points)" />
+    <arg name="patch_budget_log_en" value="$(arg patch_budget_log_en)" />
+    <arg name="visual_map_manage_en" value="$(arg visual_map_manage_en)" />
+    <arg name="visual_map_manage_shadow_en" value="$(arg visual_map_manage_shadow_en)" />
+    <arg name="visual_map_retirement_apply_en" value="$(arg visual_map_retirement_apply_en)" />
+    <arg name="cross_camera_current_residual_en" value="$(arg cross_camera_current_residual_en)" />
+  </include>
 </launch>

@@ -7666,6 +7666,11 @@ void VIOManager::buildFixedTemplateGradientCache(int level)
 void VIOManager::buildCurrentCrossCameraPairs()
 {
   current_cross_camera_pairs_.clear();
+  if (patch_budget_en)
+  {
+    patch_budget_pair_observations_ = patch_budget_pair_bound_ = 0;
+    patch_budget_pair_attempted_ = patch_budget_pair_accepted_ = 0;
+  }
   if (!cross_camera_current_residual_en || numCameras() < 2) return;
   int adaptive_attempted = 0, adaptive_prepared = 0;
   double adaptive_time_sum = 0.0;
@@ -7688,8 +7693,16 @@ void VIOManager::buildCurrentCrossCameraPairs()
           ctx.visual_submap->contributes_to_ekf[index] == 0)
         continue;
       observations_by_point[point].push_back({ctx.camera_id, index});
+      if (patch_budget_en) ++patch_budget_pair_observations_;
     }
   }
+
+  // Each selected point has at most one accepted observation per camera. For
+  // N observations and C cameras: sum_p choose(m_p,2) <= N*(C-1)/2. Strict
+  // reference budgeting also gives N <= B. No extra residual is disabled or
+  // silently charged as a historical patch attempt to enforce this bound.
+  if (patch_budget_en)
+    patch_budget_pair_bound_ = patch_budget_pair_observations_ * std::max(0, numCameras() - 1) / 2;
 
   const int metric_levels = std::max(1, patch_pyrimid_level);
   for (auto &entry : observations_by_point)
@@ -7726,6 +7739,7 @@ void VIOManager::buildCurrentCrossCameraPairs()
             source.visual_submap->voxel_points[source_observation.submap_index] != point ||
             target.visual_submap->voxel_points[target_observation.submap_index] != point)
           continue;
+        if (patch_budget_en) ++patch_budget_pair_attempted_;
         CurrentCrossCameraPair pair;
         pair.point = point;
         pair.source_camera_id = source.camera_id;
@@ -7986,7 +8000,11 @@ void VIOManager::buildCurrentCrossCameraPairs()
 
   std::unordered_map<VisualPoint *, int> accepted_pair_count;
   for (const CurrentCrossCameraPair &pair : current_cross_camera_pairs_)
-    if (pair.accepted) ++accepted_pair_count[pair.point];
+    if (pair.accepted)
+    {
+      ++accepted_pair_count[pair.point];
+      if (patch_budget_en) ++patch_budget_pair_accepted_;
+    }
   for (CurrentCrossCameraPair &pair : current_cross_camera_pairs_)
     if (pair.accepted) pair.hessian_weight = 1.0 / std::max(1, accepted_pair_count[pair.point]);
   if (virtual_adaptive_sampling_en)
@@ -13750,6 +13768,11 @@ void VIOManager::processMultiCameraFrameWithPatchBudget(const MeasureGroup &meas
                                  visual_patch_score::fresh(patch_budget_geometry, mf.timestamp);
   if (patch_budget_geometry_fresh_) patch_budget_frame_weight_ = patch_budget_geometry.weight;
   patch_budget_sort_seconds_ = 0.0;
+  patch_budget_pair_observations_ = patch_budget_pair_bound_ = 0;
+  patch_budget_pair_attempted_ = patch_budget_pair_accepted_ = 0;
+  // Release previous-frame point/reference aliases before map retirement, also
+  // when this frame has no observations and the joint update returns early.
+  current_cross_camera_pairs_.clear();
   double budget_prepare_seconds = 0.0, budget_allocate_seconds = 0.0;
 
   // printf("[ VIO Debug ] processMultiCameraFrame begin frame=%d cameras=%d pg=%zu feat_map=%zu plane_map=%zu virtual=%d cross_ref=%d normal=%d inverse=%d raycast=%d\n",
@@ -13964,12 +13987,15 @@ void VIOManager::processMultiCameraFrameWithPatchBudget(const MeasureGroup &meas
     }
     printf("[PATCH_BUDGET] frame=%d t=%.9f mode=%d score=%d limit=%d scored=%d attempted=%d accepted=%d "
            "prepare_ms=%.6f sort_ms=%.6f allocate_ms=%.6f vio_ms=%.6f geometry_count=%d geometry_fresh=%d "
-           "geometry_aggregate_us=%.6f cameras_quota_attempted_accepted={%s}\n",
+           "geometry_aggregate_us=%.6f cameras_quota_attempted_accepted={%s} "
+           "pair_observations=%lld pair_bound=%lld pair_attempted=%lld pair_accepted=%lld\n",
            mf.frame_id, mf.timestamp, static_cast<int>(patch_budget_mode), static_cast<int>(patch_score),
            max_total_points, scored, attempted, accepted, 1000.0 * budget_prepare_seconds,
            1000.0 * patch_budget_sort_seconds_, 1000.0 * budget_allocate_seconds, 1000.0 * elapsed,
            patch_budget_geometry.count, patch_budget_geometry_fresh_ ? 1 : 0,
-           1.0e6 * patch_budget_geometry.aggregate_seconds, camera_counts.c_str());
+           1.0e6 * patch_budget_geometry.aggregate_seconds, camera_counts.c_str(),
+           static_cast<long long>(patch_budget_pair_observations_), static_cast<long long>(patch_budget_pair_bound_),
+           static_cast<long long>(patch_budget_pair_attempted_), static_cast<long long>(patch_budget_pair_accepted_));
   }
   ave_total = ave_total * (frame_count - 1) / frame_count + elapsed / frame_count;
   long long active_visual_point_count = 0;

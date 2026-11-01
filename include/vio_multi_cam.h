@@ -549,6 +549,12 @@ public:
   M3D patch_budget_frame_weight_ = M3D::Identity();
   bool patch_budget_geometry_fresh_ = false;
   double patch_budget_sort_seconds_ = 0.0;
+  // Separate from the historical reference-attempt budget. All current-camera
+  // pairs on selected observations retain their original residual/weight rules.
+  int64_t patch_budget_pair_observations_ = 0;
+  int64_t patch_budget_pair_bound_ = 0;
+  int64_t patch_budget_pair_attempted_ = 0;
+  int64_t patch_budget_pair_accepted_ = 0;
   std::vector<visual_patch_budget::CameraScores> patch_budget_camera_scores_;
   int max_total_points = 150;
   int points_per_camera_min = 50;

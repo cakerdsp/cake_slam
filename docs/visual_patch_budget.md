@@ -7,7 +7,7 @@
 | 参数 | 可选值 | 含义 |
 |---|---|---|
 | `vio.patch_budget_en` | `false/true` | 总开关；false 为原始路径，true 为新模块，启动时读取 |
-| `vio.max_total_points` | 原配置为 `500` | 关闭时使用的原预算参数 |
+| `vio.max_total_points` | 沿用各数据集原值 | 关闭时使用的原预算参数（自测/HILTI22 为 500，M2DGR 为 150） |
 | `vio.patch_budget_points` | 默认 `400` | 仅开启时使用的新模块预算，不覆盖原参数 |
 | `vio.patch_budget_mode` | `legacy` | 在新模块路径中使用按有效点数扣减的旧规则，候选尝试数可能超过配置值 |
 | | `sequential` | 原相机顺序，失败也扣预算，严格限制候选尝试数 |
@@ -17,14 +17,16 @@
 | | `lidar_directional` | 使用 LiDAR 平面法向量形成方向权重 |
 | `vio.patch_budget_log_en` | `false/true` | 输出逐帧预算、几何有效性和耗时 |
 
-只需修改 `config/mid360_mei_multi_cam.yaml` 中这一项，重新启动节点：
+自测、HILTI22、M2DGR 的 ROS1 多相机启动文件统一包含 `launch/mapping_multi_cam.launch`。公共模块默认值位于 `config/visual_patch_budget.yaml`，三套配置及新增数据集均使用相同的 C++ 参数读取与功能检查。优先级从低到高为：公共默认值、数据集 YAML、相机 YAML、显式 launch 参数。
+
+总开关可以在公共默认值或数据集 YAML 中设置，修改后重启节点：
 
 ```yaml
 vio:
   patch_budget_en: false  # false：原始路径；true：启用新模块
 ```
 
-当前 YAML 已为开启时配置 `global + lidar_directional + 400`。关闭后，即使保留这些设置或将 `patch_budget_log_en` 设为 true，它们也不会生效；仍使用原来的 `max_total_points: 500`。这里的 500 保持原有预算语义，并非严格的候选尝试次数上限。
+公共默认值为 `false + global + lidar_directional + 400`。关闭后，新模式、400 配额和新增日志选项均不生效，继续使用数据集原来的 `max_total_points` 及其预算语义。公共配置不修改地图管理、跨相机残差、相机标定和原预算值；这些已有功能按数据集 YAML 或显式启动参数运行。
 
 原始路径与 `patch_budget_mode: legacy` 有明确区别：总开关关闭时调用保留的原始 VIO 函数，跳过候选准备/处理拆分、全局调度和新增日志；LiDAR 调用原始残差函数，不收集方向统计，地图点 ID 也保留原行为。`legacy` 则是开启模块时可选的旧预算规则，用于对照实验。原始函数保存在 `src/vio_patch_budget_baseline.inc`，新增 LiDAR 统计放在 `src/voxel_patch_budget_geometry.inc`；两者由对应 cpp 包含，提交代码时需一并包含。
 
@@ -37,16 +39,35 @@ roslaunch cake_slam mapping_mid360_mei_multi_cam.launch \
   patch_budget_mode:=global \
   patch_score_mode:=lidar_directional \
   patch_budget_points:=400 \
-  patch_budget_log_en:=true
+  patch_budget_log_en:=true \
+  visual_map_manage_en:=true \
+  visual_map_manage_shadow_en:=false \
+  visual_map_retirement_apply_en:=true \
+  cross_camera_current_residual_en:=true
 ```
 
-恢复原始路径只需 `patch_budget_en:=false`。`patch_budget_points` 只覆盖 `vio.patch_budget_points`，不再修改原始预算。新增 launch 参数默认为空，省略时不会覆盖所选 YAML。最低/最高相机配额继续使用 `points_per_camera_min/max`，当前配置为 50/250。
+HILTI22 和 M2DGR 使用同样的参数，只需将启动文件替换为 `mapping_hilti22_multi_cam.launch` 或 `mapping_m2dgr_multi_cam.launch`。这三个入口都转发同一组参数。HILTI22 原配置为管理 shadow 模式且不实际应用退休；上例明确要求启用实际管理/退休，不让 shadow 状态与“管理已开启”混淆。启动日志会打印最终生效的管理、shadow、退休和当前跨相机残差状态。
 
-新预算/评分模式限定为 `frontend_mode=0`、dense virtual patch、`virtual_raw_score_select_en=true`。支持同时开启 `visual_map_manage_en`，并保留多参考选择、回退与地图生命周期管理。当前仍不支持 adaptive sampling、sparse patch、current-camera residual pairs 或 ZNCC 残差组合。基础图像噪声必须为有限正数，总预算必须满足所有相机的最低配额。
+新增数据集无需新增算法分支或复制启动逻辑，直接提供新配置：
+
+```bash
+roslaunch cake_slam mapping_multi_cam.launch \
+  params_file:=/absolute/path/new_dataset.yaml \
+  camera_params_file:=/absolute/path/new_camera.yaml \
+  patch_budget_en:=true \
+  visual_map_manage_en:=true \
+  visual_map_manage_shadow_en:=false \
+  visual_map_retirement_apply_en:=true \
+  cross_camera_current_residual_en:=true
+```
+
+恢复原始路径只需 `patch_budget_en:=false`。`patch_budget_points` 只覆盖 `vio.patch_budget_points`，不修改原始预算。可选 launch 参数默认为空，省略时不覆盖 YAML。最低/最高相机配额继续使用数据集的 `points_per_camera_min/max`。
+
+新预算/评分模式限定为 `frontend_mode=0`、dense virtual patch、`virtual_raw_score_select_en=true`，与这三套配置的当前前端一致。支持同时开启 `visual_map_manage_en` 和 `cross_camera_current_residual_en`，保留多参考选择、回退、地图生命周期及当前相机对残差的原始门限、归一化权重和 Jacobian。当前仍不支持 adaptive sampling、sparse patch 或 ZNCC 残差组合；这属于功能前提，不按数据集名称判断。基础图像噪声必须为有限正数，总预算须满足相机最低配额。
 
 与地图管理一起使用时，在实验配置中设置 `patch_budget_en: true` 和 `visual_map_manage_en: true`；原有 `visual_ref_current_select_en`、`visual_ref_fallback_en` 等管理选项继续生效。
 
-这些新增兼容性检查只在总开关为 true 时执行，关闭时不限制原有配置组合。
+这些新增检查只在总开关为 true 时执行。报错逐项给出参数名、实际值和要求，包括相机数量变化导致的最低配额不足；模式名拼写错误也显示实际输入。主程序统一报告异常并返回失败状态，不再用一条混合提示让用户猜测冲突来自地图管理、相机对或其他功能。新增数据集只要满足同一前端及参数要求，就经过完全相同的共享路径；更换前端或观测模型仍须满足对应数学和实现前提。
 
 ## 数学对象与开销
 
@@ -76,13 +97,17 @@ W = 0.1 * inverse(H + 0.1 I)
 
 分配器对“每个主参考单位成本”的静态评分目标仍是最优分配；启用回退后，备用参考会占用原本可用于后续点的名额，所以该目标只是分配依据，不代表实际最终观测集合最优。一个名额不等于固定毫秒数；新地图点生成、联合更新及其他后台工作不包含在次数上限中。此次兼容修改没有新增图像试读或读取 P；分组、配额检查与批次调度会有额外开销，尚未测量。
 
+当前跨相机残差复用已经选中的有效观测，不新增一轮用于选择器评分的图像试读，不截断现有的相机对列表。设进入配对的观测数为 N、相机数为 C，同一点 p 被 m_p 台相机观测，则可能的相机对数为 `sum_p m_p*(m_p-1)/2 <= N*(C-1)/2`。严格预算模式下 `N <= B`，所以相机对尝试数至多 `floor(B*(C-1)/2)`；三相机、B=400 时至多另有 400 次相机对尝试。400 是历史参考尝试预算，不是历史参考与相机对计算的合计上限，也不是整帧耗时上限。拒绝相机对也会计入尝试次数；其真实开销包含在 VIO/Joint EKF 阶段中。
+
+每帧在应用地图退休前清空上一帧的相机对引用；零观测帧即使跳过联合更新，也不会保留上一帧相机对的地图指针。
+
 ## 建议对照
 
 保持 bag、播放速率、日志和其他配置一致，仅按表改变策略及预算，每次启动独立进程。若评估地图管理开启的系统，各组均应保持 `visual_map_manage_en: true` 和相同的管理子选项：
 
 | 对照 | patch_budget_en | budget mode | score mode | 预算来源 |
 |---|---|---|---|---|
-| 原配置基线 | false | 忽略 | 忽略 | 原 max_total_points=500 |
+| 原配置基线 | false | 忽略 | 忽略 | 数据集原 max_total_points |
 | 严格预算基线 | true | sequential | shi_tomasi | patch_budget_points=400 |
 | 只改全局分配 | true | global | shi_tomasi | patch_budget_points=400 |
 | 新评分，顺序分配 | true | sequential | lidar_directional | patch_budget_points=400 |
@@ -98,6 +123,8 @@ W = 0.1 * inverse(H + 0.1 I)
 - `prepare_ms` 包含候选收集、评分及排序；`sort_ms` 是其中的排序子阶段，不能再次相加。
 - `allocate_ms` 是全局标量分配与截取；`vio_ms` 是整个 VIO 阶段，已经包含前述工作。
 - `geometry_aggregate_us` 只包含法向量汇总和 3×3 分解，不包含关联时的收集开销。几何收集的全部开销在既有 LIO 阶段计时内。
+- `pair_observations` 是进入当前相机配对的观测数；`pair_bound` 是由该数量及相机数计算出的理论数量上界，不是另一个配置预算。
+- `pair_attempted`/`pair_accepted` 分别统计实际开始处理及通过门限的当前相机对；它们单独统计，不混入历史参考的 `attempted`。原相机对计算与权重规则保留。
 
 先核对实际配额和上限，再比较公共时间段的 LIO+VIO 耗时、有效点数和共同真值时间戳上的 ATE。ROS 回放相位或线程调度可能造成波动，建议至少重复两次。新增调度开销平均 0.2 ms 是目标，不是已验证结果。
 
@@ -116,4 +143,4 @@ ctest --test-dir /tmp/cake-patch-budget-tests -R visual_patch --output-on-failur
 
 总开关测试检查 false 时忽略新模式、配额与日志设置，包括无效实验配置；原函数源码检查使用原提交的固定指纹，验证关闭路径的两个 VIO 与两个 LiDAR 函数保持原始函数体，以及 launch 配额参数隔离。源码一致性不代表编译后的二进制、每次回放轨迹或耗时逐位一致。
 
-前一版（尚不支持与地图管理同时开启）完成了 4 项独立检查及 YAML/launch 解析。此次地图管理兼容修改按用户要求只做代码阅读和差异检查，没有编译、运行测试或离线验证，也没有连接远端。此前检查结果不覆盖本次新增的分组与回退调度；完整编译和运行效果尚未验证。
+最初版本完成过 4 项独立检查及 YAML/launch 解析。之后的地图管理兼容，以及本次三套配置/跨相机残差/通用入口修改，均按用户要求只做简单静态检查：阅读差异、XML 结构与参数转发检查、git diff --check；没有编译、运行测试、离线实验或连接远端。既往检查结果不覆盖这些后续改动，完整编译和运行效果尚未验证。

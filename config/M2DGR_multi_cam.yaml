@@ -192,6 +192,8 @@ vio:
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
   virtual_raw_score_select_en: true
+  # Module defaults are shared in config/visual_patch_budget.yaml.
+  # Override patch_budget_en here or through the common launch arguments.
   max_total_points: 150
   points_per_camera_min: 50
   points_per_camera_max: 150

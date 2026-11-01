@@ -1,0 +1,9 @@
+# Dataset-independent module defaults. Loaded BEFORE dataset and camera YAMLs.
+# A dataset YAML may override these keys; explicit launch arguments take priority.
+# Existing map-management, camera-pair and estimator settings are not changed here.
+vio:
+  patch_budget_en: false
+  patch_budget_points: 400
+  patch_budget_mode: global
+  patch_score_mode: lidar_directional
+  patch_budget_log_en: false

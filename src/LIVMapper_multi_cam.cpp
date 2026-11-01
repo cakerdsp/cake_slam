@@ -872,15 +872,45 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
       patch_budget_en, patch_budget_mode, patch_score_mode, max_total_points, patch_budget_points, patch_budget_log_en);
   if (patch_budget_en)
   {
-    if (frontend_mode != 0 || !virtual_fisheye_patch_en || !virtual_raw_score_select_en || virtual_sparse_patch_en ||
-        virtual_adaptive_sampling_en || zncc_residual_en || cross_camera_current_residual_en)
-      throw std::runtime_error("visual patch budget/score requires direct dense virtual raw-score selection, "
-                               "without adaptive sampling, current-camera pairs or ZNCC residuals");
-    if (budget_settings.points < 0 || points_per_camera_min < 0 || points_per_camera_max < points_per_camera_min ||
-        static_cast<int64_t>(budget_settings.points) < static_cast<int64_t>(num_cameras) * points_per_camera_min)
-      throw std::runtime_error("visual patch budget must satisfy all camera minimum quotas and valid upper bounds");
+    // Validate runtime capabilities, never dataset names. List every offending
+    // setting so a shared error cannot disguise unrelated configuration issues.
+    std::ostringstream errors;
+    if (frontend_mode != 0)
+      errors << "\n - vio.frontend_mode=" << frontend_mode << "; requires 0 (direct frontend)";
+    if (!virtual_fisheye_patch_en)
+      errors << "\n - vio.virtual_fisheye_patch_en=false; requires true";
+    if (!virtual_raw_score_select_en)
+      errors << "\n - vio.virtual_raw_score_select_en=false; requires true";
+    if (virtual_sparse_patch_en)
+      errors << "\n - vio.virtual_sparse_patch_en=true; sparse sampling is not supported by this budget implementation";
+    if (virtual_adaptive_sampling_en)
+      errors << "\n - vio.virtual_adaptive_sampling_en=true; adaptive sampling is not supported by this budget implementation";
+    if (zncc_residual_en)
+      errors << "\n - vio.zncc_residual_en=true; the current score models raw-intensity, not normalized-patch derivatives";
+    if (budget_settings.points < 0)
+      errors << "\n - vio.patch_budget_points=" << budget_settings.points << "; requires a nonnegative value";
+    if (points_per_camera_min < 0)
+      errors << "\n - vio.points_per_camera_min=" << points_per_camera_min << "; requires a nonnegative value";
+    if (points_per_camera_max < points_per_camera_min)
+      errors << "\n - vio.points_per_camera_max=" << points_per_camera_max
+             << "; must be >= vio.points_per_camera_min=" << points_per_camera_min;
+    const int64_t minimum_total = static_cast<int64_t>(num_cameras) * points_per_camera_min;
+    if (points_per_camera_min >= 0 && static_cast<int64_t>(budget_settings.points) < minimum_total)
+      errors << "\n - vio.patch_budget_points=" << budget_settings.points
+             << "; common.num_cameras=" << num_cameras << " times vio.points_per_camera_min="
+             << points_per_camera_min << " requires at least " << minimum_total;
     if (!std::isfinite(IMG_POINT_COV) || IMG_POINT_COV <= 0)
-      throw std::runtime_error("visual patch scoring requires positive finite vio.img_point_cov");
+      errors << "\n - vio.img_point_cov=" << IMG_POINT_COV << "; requires a finite positive value";
+    if (!errors.str().empty())
+      throw std::runtime_error("[visual_patch_budget] invalid configuration with vio.patch_budget_en=true:" + errors.str());
+    ROS_INFO_STREAM("[visual_patch_budget] mode=" << patch_budget_mode << " score=" << patch_score_mode
+                    << " reference_budget=" << budget_settings.points
+                    << " strict_attempt_limit=" << (budget_settings.mode != visual_patch_budget::Mode::Legacy)
+                    << " cameras=" << num_cameras
+                    << " map_manage=" << visual_map_manage_en << " map_shadow=" << visual_map_manage_shadow_en
+                    << " map_retirement=" << visual_map_retirement_apply_en
+                    << " current_cross_camera_residual=" << cross_camera_current_residual_en
+                    << "; current pairs reuse selected observations and are counted separately");
   }
   if (usage_stats_window <= 0) throw std::runtime_error("vio.usage_stats_window must be positive");
 
