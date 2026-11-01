@@ -17,51 +17,36 @@
 | | `lidar_directional` | 使用 LiDAR 平面法向量形成方向权重 |
 | `vio.patch_budget_log_en` | `false/true` | 输出逐帧预算、几何有效性和耗时 |
 
-自测、HILTI22、M2DGR 的 ROS1 多相机启动文件统一包含 `launch/mapping_multi_cam.launch`。公共模块默认值位于 `config/visual_patch_budget.yaml`，三套配置及新增数据集均使用相同的 C++ 参数读取与功能检查。优先级从低到高为：公共默认值、数据集 YAML、相机 YAML、显式 launch 参数。
+参数分别保存在各数据集原有 YAML 的 `vio` 段：自测使用 `config/mid360_mei_multi_cam.yaml`，HILTI22 使用 `config/HILTI22_multi_cam.yaml`，M2DGR 使用 `config/M2DGR_multi_cam.yaml`。各自原有 launch 直接加载本数据集 YAML 和相机 YAML。
 
-总开关可以在公共默认值或数据集 YAML 中设置，修改后重启节点：
+直接修改所用数据集 YAML 中已存在的参数，修改后重启节点：
 
 ```yaml
 vio:
   patch_budget_en: false  # false：原始路径；true：启用新模块
+  patch_budget_points: 400
+  patch_budget_mode: global
+  patch_score_mode: lidar_directional
+  patch_budget_log_en: false
 ```
 
-公共默认值为 `false + global + lidar_directional + 400`。关闭后，新模式、400 配额和新增日志选项均不生效，继续使用数据集原来的 `max_total_points` 及其预算语义。公共配置不修改地图管理、跨相机残差、相机标定和原预算值；这些已有功能按数据集 YAML 或显式启动参数运行。
+三套 YAML 各自配置为 `false + global + lidar_directional + 400`，可以分别调整。关闭后，新模式、400 配额和新增日志选项均不生效，继续使用数据集原来的 `max_total_points` 及其预算语义。地图管理、跨相机残差、相机标定和原预算值继续使用各自原配置。
 
 原始路径与 `patch_budget_mode: legacy` 有明确区别：总开关关闭时调用保留的原始 VIO 函数，跳过候选准备/处理拆分、全局调度和新增日志；LiDAR 调用原始残差函数，不收集方向统计，地图点 ID 也保留原行为。`legacy` 则是开启模块时可选的旧预算规则，用于对照实验。原始函数保存在 `src/vio_patch_budget_baseline.inc`，新增 LiDAR 统计放在 `src/voxel_patch_budget_geometry.inc`；两者由对应 cpp 包含，提交代码时需一并包含。
 
-在远端完成正常 ROS1 编译后，可以直接传 launch 参数，无需修改原标定文件：
+在所用 YAML 中将 `patch_budget_en` 设为 `true` 后，继续使用对应的原启动文件。以下是三个入口，选择当前数据集的一条：
 
 ```bash
-roslaunch cake_slam mapping_mid360_mei_multi_cam.launch \
-  use_rviz:=false \
-  patch_budget_en:=true \
-  patch_budget_mode:=global \
-  patch_score_mode:=lidar_directional \
-  patch_budget_points:=400 \
-  patch_budget_log_en:=true \
-  visual_map_manage_en:=true \
-  visual_map_manage_shadow_en:=false \
-  visual_map_retirement_apply_en:=true \
-  cross_camera_current_residual_en:=true
+roslaunch cake_slam mapping_mid360_mei_multi_cam.launch
+roslaunch cake_slam mapping_hilti22_multi_cam.launch
+roslaunch cake_slam mapping_m2dgr_multi_cam.launch
 ```
 
-HILTI22 和 M2DGR 使用同样的参数，只需将启动文件替换为 `mapping_hilti22_multi_cam.launch` 或 `mapping_m2dgr_multi_cam.launch`。这三个入口都转发同一组参数。HILTI22 原配置为管理 shadow 模式且不实际应用退休；上例明确要求启用实际管理/退休，不让 shadow 状态与“管理已开启”混淆。启动日志会打印最终生效的管理、shadow、退休和当前跨相机残差状态。
+需要同时启用实际地图管理及跨相机残差时，在当前数据集 YAML 的 `vio` 段修改对应已有项：`visual_map_manage_en: true`、`visual_map_manage_shadow_en: false`、`visual_map_retirement_apply_en: true`、`cross_camera_current_residual_en: true`。HILTI22 原配置为 shadow 模式且不实际应用退休，开启管理时需留意这两项。启动日志会打印最终生效的管理、shadow、退休和当前跨相机残差状态。
 
-新增数据集无需新增算法分支或复制启动逻辑，直接提供新配置：
+新增数据集仍按原有方式配置自己的 YAML 和 launch。同一前端与残差模型使用相同的 C++ 兼容性修复，不依赖数据集名称，也不要求改变参数文件的组织方式。
 
-```bash
-roslaunch cake_slam mapping_multi_cam.launch \
-  params_file:=/absolute/path/new_dataset.yaml \
-  camera_params_file:=/absolute/path/new_camera.yaml \
-  patch_budget_en:=true \
-  visual_map_manage_en:=true \
-  visual_map_manage_shadow_en:=false \
-  visual_map_retirement_apply_en:=true \
-  cross_camera_current_residual_en:=true
-```
-
-恢复原始路径只需 `patch_budget_en:=false`。`patch_budget_points` 只覆盖 `vio.patch_budget_points`，不修改原始预算。可选 launch 参数默认为空，省略时不覆盖 YAML。最低/最高相机配额继续使用数据集的 `points_per_camera_min/max`。
+恢复原始路径只需在 YAML 中设置 `patch_budget_en: false`。`patch_budget_points` 不修改原始预算。自测 launch 原有的五项预算/评分命令行覆盖参数继续保留，省略时不覆盖 YAML；HILTI22 和 M2DGR 直接在各自 YAML 中配置。最低/最高相机配额继续使用数据集的 `points_per_camera_min/max`。
 
 新预算/评分模式限定为 `frontend_mode=0`、dense virtual patch、`virtual_raw_score_select_en=true`，与这三套配置的当前前端一致。支持同时开启 `visual_map_manage_en` 和 `cross_camera_current_residual_en`，保留多参考选择、回退、地图生命周期及当前相机对残差的原始门限、归一化权重和 Jacobian。当前仍不支持 adaptive sampling、sparse patch 或 ZNCC 残差组合；这属于功能前提，不按数据集名称判断。基础图像噪声必须为有限正数，总预算须满足相机最低配额。
 
@@ -143,4 +128,4 @@ ctest --test-dir /tmp/cake-patch-budget-tests -R visual_patch --output-on-failur
 
 总开关测试检查 false 时忽略新模式、配额与日志设置，包括无效实验配置；原函数源码检查使用原提交的固定指纹，验证关闭路径的两个 VIO 与两个 LiDAR 函数保持原始函数体，以及 launch 配额参数隔离。源码一致性不代表编译后的二进制、每次回放轨迹或耗时逐位一致。
 
-最初版本完成过 4 项独立检查及 YAML/launch 解析。之后的地图管理兼容，以及本次三套配置/跨相机残差/通用入口修改，均按用户要求只做简单静态检查：阅读差异、XML 结构与参数转发检查、git diff --check；没有编译、运行测试、离线实验或连接远端。既往检查结果不覆盖这些后续改动，完整编译和运行效果尚未验证。
+最初版本完成过 4 项独立检查及 YAML/launch 解析。之后的地图管理、跨相机残差兼容修改，以及恢复各数据集独立参数配置，均按用户要求只做简单静态检查：阅读差异、XML 结构与加载路径检查、git diff --check；没有编译、运行测试、离线实验或连接远端。既往检查结果不覆盖这些后续改动，完整编译和运行效果尚未验证。
