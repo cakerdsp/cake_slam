@@ -224,6 +224,11 @@ public:
   bool virtual_sparse_patch_en = false;
   bool virtual_s2_optimize_en = false;
   bool virtual_raw_score_select_en = false;
+  bool patch_budget_en = false;
+  int patch_budget_points = 400;
+  std::string patch_budget_mode = "global";
+  std::string patch_score_mode = "lidar_directional";
+  bool patch_budget_log_en = false;
   int max_total_points = 150;
   int points_per_camera_min = 50;
   int points_per_camera_max = 150;

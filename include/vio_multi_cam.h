@@ -18,6 +18,8 @@ which is included as part of this source code package.
 #include "split_state_math.h"
 #include "adaptive_image_pyramid.h"
 #include "virtual_sampling.h"
+#include "visual_patch_budget.h"
+#include "visual_patch_score.h"
 #include "pose_affine_warp.h"
 #include "color_gray_initializer.h"
 #include "fixed_gray_image.h"
@@ -283,6 +285,53 @@ struct FixedTemplateGradientCache
   }
 };
 
+struct VirtualPatchCandidate
+{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  VisualPoint *point = nullptr;
+  Feature *reference = nullptr;
+  V3D point_c_seed = V3D::Zero();
+  V2D current_raw_center_px = V2D::Zero();
+  double shi_tomasi_score = 0.0;
+  int reference_rank = 0;
+};
+
+struct VirtualCandidatePreparationStats
+{
+  int rejected_virtual_support_oob_ = 0;
+  int rejected_virtual_projection_invalid_ = 0;
+  int rejected_virtual_z_ = 0;
+  int rejected_virtual_affine_oob_ = 0;
+  double build_virtual_support_time_ = 0.0;
+  double virtual_affine_time_ = 0.0;
+  double virtual_candidate_select_time_ = 0.0;
+  double virtual_parallel_track_time_ = 0.0;
+  double virtual_result_collect_time_ = 0.0;
+  double virtual_warp_time_ = 0.0;
+  double virtual_current_core_time_ = 0.0;
+  int virtual_ref_support_materialized_count_ = 0;
+  int virtual_ref_support_materialize_fail_count_ = 0;
+  double virtual_ref_support_materialize_time_ = 0.0;
+  int virtual_map_grid_count_ = 0;
+  int virtual_candidate_null_count_ = 0;
+  int virtual_candidate_normal_uninit_count_ = 0;
+  int virtual_candidate_projection_fail_count_ = 0;
+  int virtual_candidate_range_reject_count_ = 0;
+  int virtual_candidate_close_view_fail_count_ = 0;
+  int virtual_candidate_ref_missing_count_ = 0;
+  int virtual_candidate_ref_invalid_count_ = 0;
+  int virtual_candidate_count_ = 0;
+  int virtual_valid_track_count_ = 0;
+  int virtual_track_rotation_fail_count_ = 0;
+  int virtual_track_support_fail_count_ = 0;
+  int virtual_track_affine_fail_count_ = 0;
+  int virtual_track_warp_fail_count_ = 0;
+  int virtual_track_current_z_fail_count_ = 0;
+  int virtual_track_current_core_fail_count_ = 0;
+  int virtual_track_ncc_reject_count_ = 0;
+  int virtual_track_photometric_reject_count_ = 0;
+};
+
 struct PerCameraData
 {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -359,6 +408,11 @@ struct PerCameraData
   std::shared_ptr<virtual_sampling::ImagePyramid> adaptive_image_pyramid;
   std::vector<std::pair<cv::Point2f, int>> rejected_visual_points_for_draw;
   FixedTemplateGradientCache fixed_template_cache;
+  std::vector<VirtualPatchCandidate> virtual_candidates;
+  VirtualCandidatePreparationStats virtual_preparation_stats;
+  bool virtual_retrieval_ready = false;
+  int budget_scored = 0, budget_quota = 0, budget_attempted = 0;
+  double budget_prepare_seconds = 0.0;
 };
 
 class VIOManager
@@ -477,6 +531,15 @@ public:
   int virtual_patch_margin = 4;
   int virtual_max_search_level = 1;
   bool virtual_raw_score_select_en = false;
+  bool patch_budget_en = false;
+  visual_patch_budget::Mode patch_budget_mode = visual_patch_budget::Mode::Legacy;
+  visual_patch_budget::Score patch_score = visual_patch_budget::Score::ShiTomasi;
+  bool patch_budget_log_en = false;
+  visual_patch_score::GeometrySummary patch_budget_geometry;
+  M3D patch_budget_frame_weight_ = M3D::Identity();
+  bool patch_budget_geometry_fresh_ = false;
+  double patch_budget_sort_seconds_ = 0.0;
+  std::vector<visual_patch_budget::CameraScores> patch_budget_camera_scores_;
   int max_total_points = 150;
   int points_per_camera_min = 50;
   int points_per_camera_max = 150;
@@ -1162,6 +1225,17 @@ public:
   bool passVisualGeometryFilter(const pointWithVar &candidate,
                                 const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
                                 VisualGeomRejectReason &reject_reason) const;
+  void processMultiCameraFrameBaseline(const MeasureGroup &meas, vector<pointWithVar> &pg,
+                                       const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+  void processMultiCameraFrameWithPatchBudget(const MeasureGroup &meas, vector<pointWithVar> &pg,
+                                            const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+  void retrieveFromVisualSparseMapVirtualBaseline(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
+                                                const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+                                                int raw_score_point_quota);
+  void prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
+                                const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+                                int raw_score_point_quota);
+  void processVirtualCandidates(PerCameraData &ctx, const cv::Mat &img);
   void retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
                                           const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
                                           int raw_score_point_quota = -1);

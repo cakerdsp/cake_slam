@@ -5637,6 +5637,27 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
                                                     const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
                                                     int raw_score_point_quota)
 {
+  if (!patch_budget_en)
+  {
+    retrieveFromVisualSparseMapVirtualBaseline(ctx, img, pg, plane_map, raw_score_point_quota);
+    return;
+  }
+  prepareVirtualCandidates(ctx, img, pg, plane_map, raw_score_point_quota);
+  processVirtualCandidates(ctx, img);
+}
+
+void VIOManager::prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
+                                                    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map,
+                                                    int raw_score_point_quota)
+{
+  const double preparation_start = omp_get_wtime();
+  using VirtualCandidate = VirtualPatchCandidate;
+  ctx.virtual_candidates.clear();
+  ctx.virtual_retrieval_ready = false;
+  ctx.budget_scored = 0;
+  ctx.budget_attempted = 0;
+  ctx.budget_quota = 0;
+  ctx.budget_prepare_seconds = 0.0;
   // One cache per current camera frame, shared by historical/current pairs.
   // No allocation or filter operation in the disabled path.
   if (virtual_adaptive_sampling_en)
@@ -5685,7 +5706,9 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     ctx.rejected_visual_points_for_draw.clear();
     ctx.rejected_visual_points_for_draw.reserve(ctx.length);
   }
+  ctx.virtual_preparation_stats = VirtualCandidatePreparationStats();
   if (feat_map.empty()) return;
+  ctx.virtual_retrieval_ready = true;
 
   const double candidate_select_start = omp_get_wtime();
   ctx.sub_feat_map.clear();
@@ -5807,55 +5830,6 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
   }
   for (const auto &key : delete_keys) ctx.sub_feat_map.erase(key);
 
-  struct VirtualCandidate
-  {
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-    VisualPoint *point = nullptr;
-    Feature *reference = nullptr;
-    V3D point_c_seed = V3D::Zero();
-    V2D current_raw_center_px = V2D::Zero();
-    double shi_tomasi_score = 0.0;
-    int reference_rank = 0;
-  };
-  enum VirtualRejectReason
-  {
-    VIRTUAL_REJECT_NONE = 0,
-    VIRTUAL_REJECT_ROTATION,
-    VIRTUAL_REJECT_SUPPORT_BUILD,
-    VIRTUAL_REJECT_AFFINE_MATRIX,
-    VIRTUAL_REJECT_REFERENCE_SUPPORT,
-    VIRTUAL_REJECT_REFERENCE_WARP,
-    VIRTUAL_REJECT_CURRENT_Z,
-    VIRTUAL_REJECT_CURRENT_CORE,
-    VIRTUAL_REJECT_NCC,
-    VIRTUAL_REJECT_PHOTOMETRIC
-  };
-  struct VirtualCandidateResult
-  {
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-    VirtualTrackPatch track;
-    vector<float> warped_reference;
-    vector<float> current_core;
-    std::vector<double> level_sse;
-    std::vector<double> level_ncc;
-    std::vector<uint8_t> level_valid;
-    std::vector<uint8_t> level_active;
-    float error = 0.0f;
-    double inverse_reference_exposure = 0.0;
-    double ncc = std::numeric_limits<double>::quiet_NaN();
-    double build_time = 0.0;
-    double affine_time = 0.0;
-    double ref_materialize_time = 0.0;
-    double warp_time = 0.0;
-    double current_core_time = 0.0;
-    double adaptive_time = 0.0;
-    bool adaptive_attempted = false;
-    int search_level = -1;
-    int warp_fail_pyramid_level = -1;
-    int rejection = 0;
-    bool ref_materialized = false;
-    bool valid = false;
-  };
   auto recordRejectedPoint = [&](const V2D &raw_px, int reason) {
     if (draw_rejected_points_en)
     {
@@ -5863,34 +5837,23 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
           cv::Point2f(static_cast<float>(raw_px[0]), static_cast<float>(raw_px[1])), reason);
     }
   };
-  auto drawReasonFromVirtualReject = [](int rejection) {
-    switch (rejection)
+  M3D weight_camera = M3D::Identity();
+  if (patch_score != visual_patch_budget::Score::ShiTomasi)
+    weight_camera = ctx.Rcw * patch_budget_frame_weight_ * ctx.Rcw.transpose();
+  auto computeShiTomasiCandidateScore = [&](const V2D &raw_px, const V3D &point_c) {
+    ++ctx.budget_scored;
+    if (patch_score == visual_patch_budget::Score::ShiTomasi)
     {
-    case VIRTUAL_REJECT_ROTATION:
-      return VIOManager::REJECT_DRAW_ROTATION;
-    case VIRTUAL_REJECT_SUPPORT_BUILD:
-      return VIOManager::REJECT_DRAW_SUPPORT_BUILD;
-    case VIRTUAL_REJECT_AFFINE_MATRIX:
-      return VIOManager::REJECT_DRAW_AFFINE;
-    case VIRTUAL_REJECT_REFERENCE_SUPPORT:
-      return VIOManager::REJECT_DRAW_REF_INVALID;
-    case VIRTUAL_REJECT_REFERENCE_WARP:
-      return VIOManager::REJECT_DRAW_WARP_REF;
-    case VIRTUAL_REJECT_CURRENT_Z:
-      return VIOManager::REJECT_DRAW_CURRENT_Z;
-    case VIRTUAL_REJECT_CURRENT_CORE:
-      return VIOManager::REJECT_DRAW_CURRENT_CORE;
-    case VIRTUAL_REJECT_NCC:
-      return VIOManager::REJECT_DRAW_NCC;
-    case VIRTUAL_REJECT_PHOTOMETRIC:
-      return VIOManager::REJECT_DRAW_PHOTOMETRIC;
-    default:
-      return VIOManager::REJECT_DRAW_RANGE;
+      const float score = vk::shiTomasiScore(img, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]));
+      return std::isfinite(score) ? (patch_budget_mode == visual_patch_budget::Mode::Legacy
+          ? static_cast<double>(score) : std::max(0.0, static_cast<double>(score))) : 0.0;
     }
-  };
-  auto computeShiTomasiCandidateScore = [&](const V2D &raw_px) {
-    const float score = vk::shiTomasiScore(img, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]));
-    return std::isfinite(score) ? static_cast<double>(score) : 0.0;
+    const Eigen::Matrix2d tensor = visual_patch_score::gradientTensor8x8(
+        img.data, img.step[0], img.cols, img.rows, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]));
+    MD(2, 3) projection;
+    if (!computeCameraModelProjectionJacobianForContext(ctx, point_c, projection)) return 0.0;
+    return visual_patch_score::sensitivity(tensor, projection, weight_camera,
+                                          state->inv_expo_time[ctx.camera_id], photometricNoiseCovariance());
   };
 
   vector<VirtualCandidate> candidates;
@@ -5985,7 +5948,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
         candidate.reference = managed_ref;
         candidate.point_c_seed = pt_c_seed;
         candidate.current_raw_center_px = raw_px;
-        candidate.shi_tomasi_score = computeShiTomasiCandidateScore(raw_px);
+        candidate.shi_tomasi_score = computeShiTomasiCandidateScore(raw_px, pt_c_seed);
         candidate.reference_rank = rank;
         candidates.push_back(candidate);
       }
@@ -6069,12 +6032,25 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     candidate.reference = ref_ftr;
     candidate.point_c_seed = pt_c_seed;
     candidate.current_raw_center_px = raw_px;
-    candidate.shi_tomasi_score = computeShiTomasiCandidateScore(raw_px);
+    candidate.shi_tomasi_score = computeShiTomasiCandidateScore(raw_px, pt_c_seed);
     candidates.push_back(candidate);
     }
   }
 
-  if (virtual_raw_score_select_en && raw_score_point_quota >= 0)
+  const double sort_start = omp_get_wtime();
+  if (patch_budget_mode != visual_patch_budget::Mode::Legacy && raw_score_point_quota >= 0)
+  {
+    // Strict modes have one primary candidate per camera/map-point. Managed
+    // reference fallback is rejected at configuration time.
+    const size_t keep = std::min(candidates.size(), static_cast<size_t>(raw_score_point_quota));
+    std::partial_sort(candidates.begin(), candidates.begin() + keep, candidates.end(),
+                      [](const VirtualCandidate &a, const VirtualCandidate &b) {
+                        if (a.shi_tomasi_score != b.shi_tomasi_score) return a.shi_tomasi_score > b.shi_tomasi_score;
+                        return a.point->point_id_ < b.point->point_id_;
+                      });
+    candidates.resize(keep);
+  }
+  else if (virtual_raw_score_select_en && raw_score_point_quota >= 0)
   {
     std::vector<int> primary_indices;
     primary_indices.reserve(candidates.size());
@@ -6097,9 +6073,163 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
       if (selected_points.count(candidate.point) != 0) selected_candidates.push_back(candidate);
     candidates.swap(selected_candidates);
   }
+  patch_budget_sort_seconds_ += omp_get_wtime() - sort_start;
   virtual_candidate_select_time_ = omp_get_wtime() - candidate_select_start;
   virtual_candidate_count_ = static_cast<int>(candidates.size());
 
+  // Strict modes retain only the bounded prefix. Legacy transfers ownership
+  // without another allocation and releases it after tracking as before.
+  if (patch_budget_mode == visual_patch_budget::Mode::Legacy)
+    ctx.virtual_candidates = std::move(candidates);
+  else
+    ctx.virtual_candidates.assign(candidates.begin(), candidates.end());
+  ctx.budget_quota = static_cast<int>(ctx.virtual_candidates.size());
+  ctx.virtual_preparation_stats.rejected_virtual_support_oob_ = rejected_virtual_support_oob_;
+  ctx.virtual_preparation_stats.rejected_virtual_projection_invalid_ = rejected_virtual_projection_invalid_;
+  ctx.virtual_preparation_stats.rejected_virtual_z_ = rejected_virtual_z_;
+  ctx.virtual_preparation_stats.rejected_virtual_affine_oob_ = rejected_virtual_affine_oob_;
+  ctx.virtual_preparation_stats.build_virtual_support_time_ = build_virtual_support_time_;
+  ctx.virtual_preparation_stats.virtual_affine_time_ = virtual_affine_time_;
+  ctx.virtual_preparation_stats.virtual_candidate_select_time_ = virtual_candidate_select_time_;
+  ctx.virtual_preparation_stats.virtual_parallel_track_time_ = virtual_parallel_track_time_;
+  ctx.virtual_preparation_stats.virtual_result_collect_time_ = virtual_result_collect_time_;
+  ctx.virtual_preparation_stats.virtual_warp_time_ = virtual_warp_time_;
+  ctx.virtual_preparation_stats.virtual_current_core_time_ = virtual_current_core_time_;
+  ctx.virtual_preparation_stats.virtual_ref_support_materialized_count_ = virtual_ref_support_materialized_count_;
+  ctx.virtual_preparation_stats.virtual_ref_support_materialize_fail_count_ = virtual_ref_support_materialize_fail_count_;
+  ctx.virtual_preparation_stats.virtual_ref_support_materialize_time_ = virtual_ref_support_materialize_time_;
+  ctx.virtual_preparation_stats.virtual_map_grid_count_ = virtual_map_grid_count_;
+  ctx.virtual_preparation_stats.virtual_candidate_null_count_ = virtual_candidate_null_count_;
+  ctx.virtual_preparation_stats.virtual_candidate_normal_uninit_count_ = virtual_candidate_normal_uninit_count_;
+  ctx.virtual_preparation_stats.virtual_candidate_projection_fail_count_ = virtual_candidate_projection_fail_count_;
+  ctx.virtual_preparation_stats.virtual_candidate_range_reject_count_ = virtual_candidate_range_reject_count_;
+  ctx.virtual_preparation_stats.virtual_candidate_close_view_fail_count_ = virtual_candidate_close_view_fail_count_;
+  ctx.virtual_preparation_stats.virtual_candidate_ref_missing_count_ = virtual_candidate_ref_missing_count_;
+  ctx.virtual_preparation_stats.virtual_candidate_ref_invalid_count_ = virtual_candidate_ref_invalid_count_;
+  ctx.virtual_preparation_stats.virtual_candidate_count_ = virtual_candidate_count_;
+  ctx.virtual_preparation_stats.virtual_valid_track_count_ = virtual_valid_track_count_;
+  ctx.virtual_preparation_stats.virtual_track_rotation_fail_count_ = virtual_track_rotation_fail_count_;
+  ctx.virtual_preparation_stats.virtual_track_support_fail_count_ = virtual_track_support_fail_count_;
+  ctx.virtual_preparation_stats.virtual_track_affine_fail_count_ = virtual_track_affine_fail_count_;
+  ctx.virtual_preparation_stats.virtual_track_warp_fail_count_ = virtual_track_warp_fail_count_;
+  ctx.virtual_preparation_stats.virtual_track_current_z_fail_count_ = virtual_track_current_z_fail_count_;
+  ctx.virtual_preparation_stats.virtual_track_current_core_fail_count_ = virtual_track_current_core_fail_count_;
+  ctx.virtual_preparation_stats.virtual_track_ncc_reject_count_ = virtual_track_ncc_reject_count_;
+  ctx.virtual_preparation_stats.virtual_track_photometric_reject_count_ = virtual_track_photometric_reject_count_;
+  ctx.budget_prepare_seconds = omp_get_wtime() - preparation_start;
+}
+
+void VIOManager::processVirtualCandidates(PerCameraData &ctx, const cv::Mat &img)
+{
+  using VirtualCandidate = VirtualPatchCandidate;
+  rejected_virtual_support_oob_ = ctx.virtual_preparation_stats.rejected_virtual_support_oob_;
+  rejected_virtual_projection_invalid_ = ctx.virtual_preparation_stats.rejected_virtual_projection_invalid_;
+  rejected_virtual_z_ = ctx.virtual_preparation_stats.rejected_virtual_z_;
+  rejected_virtual_affine_oob_ = ctx.virtual_preparation_stats.rejected_virtual_affine_oob_;
+  build_virtual_support_time_ = ctx.virtual_preparation_stats.build_virtual_support_time_;
+  virtual_affine_time_ = ctx.virtual_preparation_stats.virtual_affine_time_;
+  virtual_candidate_select_time_ = ctx.virtual_preparation_stats.virtual_candidate_select_time_;
+  virtual_parallel_track_time_ = ctx.virtual_preparation_stats.virtual_parallel_track_time_;
+  virtual_result_collect_time_ = ctx.virtual_preparation_stats.virtual_result_collect_time_;
+  virtual_warp_time_ = ctx.virtual_preparation_stats.virtual_warp_time_;
+  virtual_current_core_time_ = ctx.virtual_preparation_stats.virtual_current_core_time_;
+  virtual_ref_support_materialized_count_ = ctx.virtual_preparation_stats.virtual_ref_support_materialized_count_;
+  virtual_ref_support_materialize_fail_count_ = ctx.virtual_preparation_stats.virtual_ref_support_materialize_fail_count_;
+  virtual_ref_support_materialize_time_ = ctx.virtual_preparation_stats.virtual_ref_support_materialize_time_;
+  virtual_map_grid_count_ = ctx.virtual_preparation_stats.virtual_map_grid_count_;
+  virtual_candidate_null_count_ = ctx.virtual_preparation_stats.virtual_candidate_null_count_;
+  virtual_candidate_normal_uninit_count_ = ctx.virtual_preparation_stats.virtual_candidate_normal_uninit_count_;
+  virtual_candidate_projection_fail_count_ = ctx.virtual_preparation_stats.virtual_candidate_projection_fail_count_;
+  virtual_candidate_range_reject_count_ = ctx.virtual_preparation_stats.virtual_candidate_range_reject_count_;
+  virtual_candidate_close_view_fail_count_ = ctx.virtual_preparation_stats.virtual_candidate_close_view_fail_count_;
+  virtual_candidate_ref_missing_count_ = ctx.virtual_preparation_stats.virtual_candidate_ref_missing_count_;
+  virtual_candidate_ref_invalid_count_ = ctx.virtual_preparation_stats.virtual_candidate_ref_invalid_count_;
+  virtual_candidate_count_ = ctx.virtual_preparation_stats.virtual_candidate_count_;
+  virtual_valid_track_count_ = ctx.virtual_preparation_stats.virtual_valid_track_count_;
+  virtual_track_rotation_fail_count_ = ctx.virtual_preparation_stats.virtual_track_rotation_fail_count_;
+  virtual_track_support_fail_count_ = ctx.virtual_preparation_stats.virtual_track_support_fail_count_;
+  virtual_track_affine_fail_count_ = ctx.virtual_preparation_stats.virtual_track_affine_fail_count_;
+  virtual_track_warp_fail_count_ = ctx.virtual_preparation_stats.virtual_track_warp_fail_count_;
+  virtual_track_current_z_fail_count_ = ctx.virtual_preparation_stats.virtual_track_current_z_fail_count_;
+  virtual_track_current_core_fail_count_ = ctx.virtual_preparation_stats.virtual_track_current_core_fail_count_;
+  virtual_track_ncc_reject_count_ = ctx.virtual_preparation_stats.virtual_track_ncc_reject_count_;
+  virtual_track_photometric_reject_count_ = ctx.virtual_preparation_stats.virtual_track_photometric_reject_count_;
+
+  if (!ctx.virtual_retrieval_ready) return;
+  const auto &candidates = ctx.virtual_candidates;
+  virtual_candidate_count_ = static_cast<int>(candidates.size());
+  ctx.budget_attempted = virtual_candidate_count_;
+  enum VirtualRejectReason
+  {
+    VIRTUAL_REJECT_NONE = 0,
+    VIRTUAL_REJECT_ROTATION,
+    VIRTUAL_REJECT_SUPPORT_BUILD,
+    VIRTUAL_REJECT_AFFINE_MATRIX,
+    VIRTUAL_REJECT_REFERENCE_SUPPORT,
+    VIRTUAL_REJECT_REFERENCE_WARP,
+    VIRTUAL_REJECT_CURRENT_Z,
+    VIRTUAL_REJECT_CURRENT_CORE,
+    VIRTUAL_REJECT_NCC,
+    VIRTUAL_REJECT_PHOTOMETRIC
+  };
+  struct VirtualCandidateResult
+  {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    VirtualTrackPatch track;
+    vector<float> warped_reference;
+    vector<float> current_core;
+    std::vector<double> level_sse;
+    std::vector<double> level_ncc;
+    std::vector<uint8_t> level_valid;
+    std::vector<uint8_t> level_active;
+    float error = 0.0f;
+    double inverse_reference_exposure = 0.0;
+    double ncc = std::numeric_limits<double>::quiet_NaN();
+    double build_time = 0.0;
+    double affine_time = 0.0;
+    double ref_materialize_time = 0.0;
+    double warp_time = 0.0;
+    double current_core_time = 0.0;
+    double adaptive_time = 0.0;
+    bool adaptive_attempted = false;
+    int search_level = -1;
+    int warp_fail_pyramid_level = -1;
+    int rejection = 0;
+    bool ref_materialized = false;
+    bool valid = false;
+  };
+  auto recordRejectedPoint = [&](const V2D &raw_px, int reason) {
+    if (draw_rejected_points_en)
+    {
+      ctx.rejected_visual_points_for_draw.emplace_back(
+          cv::Point2f(static_cast<float>(raw_px[0]), static_cast<float>(raw_px[1])), reason);
+    }
+  };
+  auto drawReasonFromVirtualReject = [](int rejection) {
+    switch (rejection)
+    {
+    case VIRTUAL_REJECT_ROTATION:
+      return VIOManager::REJECT_DRAW_ROTATION;
+    case VIRTUAL_REJECT_SUPPORT_BUILD:
+      return VIOManager::REJECT_DRAW_SUPPORT_BUILD;
+    case VIRTUAL_REJECT_AFFINE_MATRIX:
+      return VIOManager::REJECT_DRAW_AFFINE;
+    case VIRTUAL_REJECT_REFERENCE_SUPPORT:
+      return VIOManager::REJECT_DRAW_REF_INVALID;
+    case VIRTUAL_REJECT_REFERENCE_WARP:
+      return VIOManager::REJECT_DRAW_WARP_REF;
+    case VIRTUAL_REJECT_CURRENT_Z:
+      return VIOManager::REJECT_DRAW_CURRENT_Z;
+    case VIRTUAL_REJECT_CURRENT_CORE:
+      return VIOManager::REJECT_DRAW_CURRENT_CORE;
+    case VIRTUAL_REJECT_NCC:
+      return VIOManager::REJECT_DRAW_NCC;
+    case VIRTUAL_REJECT_PHOTOMETRIC:
+      return VIOManager::REJECT_DRAW_PHOTOMETRIC;
+    default:
+      return VIOManager::REJECT_DRAW_RANGE;
+    }
+  };
   vector<VirtualCandidateResult> results(candidates.size());
   const double parallel_track_start = omp_get_wtime();
   for (int fallback_pass = 0; fallback_pass < 2; ++fallback_pass)
@@ -6611,6 +6741,11 @@ void VIOManager::retrieveFromVisualSparseMapVirtual(PerCameraData &ctx, const cv
     printf("[ VIO Virtual Sparse ] ref_materialized=%d ref_fail=%d ref_materialize_sum=%.6f s\n",
            virtual_ref_support_materialized_count_, virtual_ref_support_materialize_fail_count_,
            virtual_ref_support_materialize_time_);
+  if (patch_budget_mode == visual_patch_budget::Mode::Legacy)
+    std::vector<VirtualPatchCandidate>().swap(ctx.virtual_candidates);
+  else
+    ctx.virtual_candidates.clear();
+  ctx.virtual_retrieval_ready = false;
 }
 
 void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
@@ -11222,6 +11357,7 @@ void VIOManager::commitPendingNewPoints(
       if (point == nullptr)
       {
         point = new VisualPoint(pending.pt_var.point_w);
+        if (patch_budget_en && !visual_map_manage_en) point->point_id_ = next_visual_point_id_++;
         point->ensureCameraCount(numCameras());
         point->covariance_ = pending.pt_var.var;
         point->is_normal_initialized_ = true;
@@ -13520,12 +13656,30 @@ bool VIOManager::installFixedGrayWeights(const std::vector<Eigen::Vector3d> &wei
 void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointWithVar> &pg,
                                          const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
+  if (!patch_budget_en)
+  {
+    processMultiCameraFrameBaseline(meas, pg, plane_map);
+    return;
+  }
+  processMultiCameraFrameWithPatchBudget(meas, pg, plane_map);
+}
+
+void VIOManager::processMultiCameraFrameWithPatchBudget(const MeasureGroup &meas, vector<pointWithVar> &pg,
+                                         const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
+{
   if (!meas.has_multi_cam_frame) throw std::runtime_error("direct VIO requires MeasureGroup::multi_cam_frame");
   const MultiCameraFrame &mf = meas.multi_cam_frame;
   if (static_cast<int>(mf.images.size()) != numCameras())
     throw std::runtime_error("MultiCameraFrame image count does not match VIOManager camera count");
 
   const double frame_start = omp_get_wtime();
+  patch_budget_frame_weight_.setIdentity();
+  patch_budget_geometry_fresh_ = patch_score == visual_patch_budget::Score::LidarDirectional &&
+                                 visual_patch_score::fresh(patch_budget_geometry, mf.timestamp);
+  if (patch_budget_geometry_fresh_) patch_budget_frame_weight_ = patch_budget_geometry.weight;
+  patch_budget_sort_seconds_ = 0.0;
+  double budget_prepare_seconds = 0.0, budget_allocate_seconds = 0.0;
+
   // printf("[ VIO Debug ] processMultiCameraFrame begin frame=%d cameras=%d pg=%zu feat_map=%zu plane_map=%zu virtual=%d cross_ref=%d normal=%d inverse=%d raycast=%d\n",
   //        mf.frame_id, numCameras(), pg.size(), feat_map.size(), plane_map.size(), virtual_fisheye_patch_en ? 1 : 0,
   //        cross_camera_reference_en ? 1 : 0, normal_en ? 1 : 0, inverse_composition_en ? 1 : 0, raycast_en ? 1 : 0);
@@ -13575,6 +13729,31 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   flushVisualMapRetirements();
   const double frame_setup_end = omp_get_wtime();
 
+  if (patch_budget_mode == visual_patch_budget::Mode::Global)
+  {
+    const double prepare_start = omp_get_wtime();
+    patch_budget_camera_scores_.resize(cameras_.size());
+    for (size_t c = 0; c < cameras_.size(); ++c)
+    {
+      PerCameraData &ctx = cameras_[c];
+      prepareVirtualCandidates(ctx, ctx.new_frame->img_, pg, plane_map, points_per_camera_max);
+      auto &queue = patch_budget_camera_scores_[c];
+      queue.camera_id = ctx.camera_id;
+      queue.scores.clear();
+      queue.scores.reserve(ctx.virtual_candidates.size());
+      for (const auto &candidate : ctx.virtual_candidates) queue.scores.push_back(candidate.shi_tomasi_score);
+    }
+    budget_prepare_seconds = omp_get_wtime() - prepare_start;
+    const double allocate_start = omp_get_wtime();
+    const auto quotas = visual_patch_budget::allocate(patch_budget_camera_scores_, max_total_points,
+                                                     points_per_camera_min, points_per_camera_max);
+    for (size_t c = 0; c < cameras_.size(); ++c)
+    {
+      cameras_[c].virtual_candidates.resize(quotas[c]);
+      cameras_[c].budget_quota = quotas[c];
+    }
+    budget_allocate_seconds = omp_get_wtime() - allocate_start;
+  }
   int raw_score_remaining_total = max_total_points;
   for (PerCameraData &ctx : cameras_)
   {
@@ -13591,9 +13770,18 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
     }
     // printf("[ VIO Debug ] retrieve begin camera_id=%d frame=%d\n", ctx.camera_id, mf.frame_id);
     // fflush(stdout);
-    retrieveFromVisualSparseMap(ctx, ctx.new_frame->img_, pg, plane_map, raw_score_point_quota);
+    if (patch_budget_mode == visual_patch_budget::Mode::Global)
+      processVirtualCandidates(ctx, ctx.new_frame->img_);
+    else
+    {
+      retrieveFromVisualSparseMap(ctx, ctx.new_frame->img_, pg, plane_map, raw_score_point_quota);
+      // Sequential retrieval includes tracking; its preparation time is saved
+      // separately by prepareVirtualCandidates.
+      budget_prepare_seconds += ctx.budget_prepare_seconds;
+    }
     if (virtual_raw_score_select_en)
-      raw_score_remaining_total = std::max(0, raw_score_remaining_total - ctx.total_points);
+      raw_score_remaining_total = std::max(0, raw_score_remaining_total -
+          (patch_budget_mode == visual_patch_budget::Mode::Legacy ? ctx.total_points : ctx.budget_attempted));
     // printf("[ VIO Debug ] retrieve end camera_id=%d frame=%d total_points=%d\n",
     //        ctx.camera_id, mf.frame_id, ctx.total_points);
     // fflush(stdout);
@@ -13687,6 +13875,26 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   const double reference_end = omp_get_wtime();
   ++frame_count;
   const double elapsed = reference_end - frame_start;
+  if (patch_budget_log_en)
+  {
+    int scored = 0, attempted = 0, accepted = 0;
+    std::string camera_counts;
+    for (const auto &ctx : cameras_)
+    {
+      scored += ctx.budget_scored; attempted += ctx.budget_attempted; accepted += ctx.total_points;
+      if (!camera_counts.empty()) camera_counts += ",";
+      camera_counts += std::to_string(ctx.camera_id) + ":" + std::to_string(ctx.budget_quota) +
+                       "/" + std::to_string(ctx.budget_attempted) + "/" + std::to_string(ctx.total_points);
+    }
+    printf("[PATCH_BUDGET] frame=%d t=%.9f mode=%d score=%d limit=%d scored=%d attempted=%d accepted=%d "
+           "prepare_ms=%.6f sort_ms=%.6f allocate_ms=%.6f vio_ms=%.6f geometry_count=%d geometry_fresh=%d "
+           "geometry_aggregate_us=%.6f cameras_quota_attempted_accepted={%s}\n",
+           mf.frame_id, mf.timestamp, static_cast<int>(patch_budget_mode), static_cast<int>(patch_score),
+           max_total_points, scored, attempted, accepted, 1000.0 * budget_prepare_seconds,
+           1000.0 * patch_budget_sort_seconds_, 1000.0 * budget_allocate_seconds, 1000.0 * elapsed,
+           patch_budget_geometry.count, patch_budget_geometry_fresh_ ? 1 : 0,
+           1.0e6 * patch_budget_geometry.aggregate_seconds, camera_counts.c_str());
+  }
   ave_total = ave_total * (frame_count - 1) / frame_count + elapsed / frame_count;
   long long active_visual_point_count = 0;
   long long active_visual_point_reuse_sum = 0;
@@ -13749,3 +13957,6 @@ void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointW
   printOnlineCalibrationStatsTable(mf.frame_id);
   maybePrintUsageStatsTable(mf.frame_id);
 }
+
+// The disabled switch takes these original, unsplit VIO bodies.
+#include "vio_patch_budget_baseline.inc"

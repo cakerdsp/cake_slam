@@ -4,10 +4,21 @@
   <arg name="mid360_params_file" default="$(find cake_slam)/config/mid360_mei_multi_cam.yaml" />
   <arg name="camera_params_file" default="$(find cake_slam)/config/camera_mei_multi_cam.yaml" />
   <arg name="rviz_config_file" default="$(find cake_slam)/rviz_cfg/cake_slam_ros1.rviz" />
+  <!-- Empty overrides preserve values from the selected parameter file. -->
+  <arg name="patch_budget_en" default="" />
+  <arg name="patch_budget_mode" default="" />
+  <arg name="patch_score_mode" default="" />
+  <arg name="patch_budget_points" default="" />
+  <arg name="patch_budget_log_en" default="" />
 
   <node pkg="cake_slam" type="cake_slam_mapping_multi_cam" name="laserMapping" output="screen" launch-prefix="$(arg memory_profile_prefix)">
     <rosparam command="load" file="$(arg mid360_params_file)" />
     <rosparam command="load" file="$(arg camera_params_file)" />
+    <param if="$(eval arg('patch_budget_en') != '')" name="vio/patch_budget_en" type="bool" value="$(arg patch_budget_en)" />
+    <param if="$(eval arg('patch_budget_mode') != '')" name="vio/patch_budget_mode" type="str" value="$(arg patch_budget_mode)" />
+    <param if="$(eval arg('patch_score_mode') != '')" name="vio/patch_score_mode" type="str" value="$(arg patch_score_mode)" />
+    <param if="$(eval arg('patch_budget_points') != '')" name="vio/patch_budget_points" type="int" value="$(arg patch_budget_points)" />
+    <param if="$(eval arg('patch_budget_log_en') != '')" name="vio/patch_budget_log_en" type="bool" value="$(arg patch_budget_log_en)" />
   </node>
 
   <node if="$(arg use_rviz)" pkg="rviz" type="rviz" name="rviz" args="-d $(arg rviz_config_file)" />

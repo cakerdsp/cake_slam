@@ -426,6 +426,7 @@ void VoxelMapManager::RefreshWorldPoints()
 
 void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
+  if (visual_patch_geometry_en) visual_patch_geometry = visual_patch_score::GeometrySummary();
   PrepareScanCovariances();
 
   pv_list_.clear();
@@ -487,7 +488,10 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
     // double t1 = omp_get_wtime();
 
-    BuildResidualListOMP(pv_list_, ptpl_list_);
+    if (visual_patch_geometry_en && iterCount == 0)
+      BuildResidualListWithVisualPatchGeometry(pv_list_, ptpl_list_);
+    else
+      BuildResidualListOMP(pv_list_, ptpl_list_);
 
     // build_residual_time += omp_get_wtime() - t1;
 
@@ -1095,3 +1099,5 @@ void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const i
   std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" root voxels"<<RESET<<"\n";
   // std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" voxels using "<<delete_time<<" s"<<RESET<<"\n";
 }
+
+#include "voxel_patch_budget_geometry.inc"

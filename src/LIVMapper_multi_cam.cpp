@@ -414,6 +414,11 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<bool>("vio.virtual_sparse_patch_en", false);
   try_declare.template operator()<bool>("vio.virtual_s2_optimize_en", false);
   try_declare.template operator()<bool>("vio.virtual_raw_score_select_en", false);
+  try_declare.template operator()<bool>("vio.patch_budget_en", false);
+  try_declare.template operator()<int>("vio.patch_budget_points", 400);
+  try_declare.template operator()<std::string>("vio.patch_budget_mode", "global");
+  try_declare.template operator()<std::string>("vio.patch_score_mode", "lidar_directional");
+  try_declare.template operator()<bool>("vio.patch_budget_log_en", false);
   try_declare.template operator()<int>("vio.max_total_points", 150);
   try_declare.template operator()<int>("vio.points_per_camera_min", 50);
   try_declare.template operator()<int>("vio.points_per_camera_max", 150);
@@ -677,6 +682,11 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "vio.virtual_sparse_patch_en", virtual_sparse_patch_en);
   getRosParam(this->node, "vio.virtual_s2_optimize_en", virtual_s2_optimize_en);
   getRosParam(this->node, "vio.virtual_raw_score_select_en", virtual_raw_score_select_en);
+  getRosParam(this->node, "vio.patch_budget_en", patch_budget_en);
+  getRosParam(this->node, "vio.patch_budget_points", patch_budget_points);
+  getRosParam(this->node, "vio.patch_budget_mode", patch_budget_mode);
+  getRosParam(this->node, "vio.patch_score_mode", patch_score_mode);
+  getRosParam(this->node, "vio.patch_budget_log_en", patch_budget_log_en);
   getRosParam(this->node, "vio.max_total_points", max_total_points);
   getRosParam(this->node, "vio.points_per_camera_min", points_per_camera_min);
   getRosParam(this->node, "vio.points_per_camera_max", points_per_camera_max);
@@ -858,6 +868,20 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
     ROS_WARN("vio.zncc_residual_en makes affine exposure states unobservable; disabling vio.exposure_estimate_en");
     exposure_estimate_en = false;
   }
+  const auto budget_settings = visual_patch_budget::resolveSettings(
+      patch_budget_en, patch_budget_mode, patch_score_mode, max_total_points, patch_budget_points, patch_budget_log_en);
+  if (patch_budget_en)
+  {
+    if (frontend_mode != 0 || !virtual_fisheye_patch_en || !virtual_raw_score_select_en || virtual_sparse_patch_en ||
+        virtual_adaptive_sampling_en || visual_map_manage_en || zncc_residual_en || cross_camera_current_residual_en)
+      throw std::runtime_error("visual patch budget/score requires direct dense virtual raw-score selection, "
+                               "without adaptive sampling, managed reference fallback, current-camera pairs or ZNCC residuals");
+    if (budget_settings.points < 0 || points_per_camera_min < 0 || points_per_camera_max < points_per_camera_min ||
+        static_cast<int64_t>(budget_settings.points) < static_cast<int64_t>(num_cameras) * points_per_camera_min)
+      throw std::runtime_error("visual patch budget must satisfy all camera minimum quotas and valid upper bounds");
+    if (!std::isfinite(IMG_POINT_COV) || IMG_POINT_COV <= 0)
+      throw std::runtime_error("visual patch scoring requires positive finite vio.img_point_cov");
+  }
   if (usage_stats_window <= 0) throw std::runtime_error("vio.usage_stats_window must be positive");
 
   if (num_cameras > 1 && colmap_output_en)
@@ -1002,7 +1026,14 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->virtual_sparse_patch_en = virtual_sparse_patch_en;
   vio_manager->virtual_s2_optimize_en = virtual_s2_optimize_en;
   vio_manager->virtual_raw_score_select_en = virtual_raw_score_select_en;
-  vio_manager->max_total_points = max_total_points;
+  const auto budget_settings = visual_patch_budget::resolveSettings(
+      patch_budget_en, patch_budget_mode, patch_score_mode, max_total_points, patch_budget_points, patch_budget_log_en);
+  vio_manager->patch_budget_en = patch_budget_en;
+  vio_manager->patch_budget_mode = budget_settings.mode;
+  vio_manager->patch_score = budget_settings.score;
+  vio_manager->patch_budget_log_en = budget_settings.log_enabled;
+  voxelmap_manager->visual_patch_geometry_en = budget_settings.geometry_enabled;
+  vio_manager->max_total_points = budget_settings.points;
   vio_manager->points_per_camera_min = points_per_camera_min;
   vio_manager->points_per_camera_max = points_per_camera_max;
   vio_manager->visual_ref_post_ekf_build_en = visual_ref_post_ekf_build_en;
@@ -1641,6 +1672,12 @@ void LIVMapper::handleLIO()
   // The initialization scan defines the first map; it is not an independent
   // measurement of the map it just constructed.
   if (!initializing_map) voxelmap_manager->StateEstimation(state_propagat);
+  if (voxelmap_manager->visual_patch_geometry_en)
+  {
+    vio_manager->patch_budget_geometry = initializing_map ? visual_patch_score::GeometrySummary()
+                                                         : voxelmap_manager->visual_patch_geometry;
+    vio_manager->patch_budget_geometry.stamp = LidarMeasures.last_lio_update_time;
+  }
   _state = voxelmap_manager->state_;
   _pv_list = voxelmap_manager->pv_list_;
 

@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #define VOXEL_MAP_MULTI_CAM_H_
 
 #include "common_lib_multi_cam.h"
+#include "visual_patch_score.h"
 #include <Eigen/Dense>
 #include <fstream>
 #include <math.h>
@@ -193,6 +194,8 @@ class VoxelMapManager
 {
 public:
   VoxelMapManager() = default;
+  bool visual_patch_geometry_en = false;
+  visual_patch_score::GeometrySummary visual_patch_geometry;
   VoxelMapConfig config_setting_;
   int current_frame_id_ = 0;
   ros::Publisher voxel_map_pub_;
@@ -246,6 +249,11 @@ public:
 
   void build_single_residual(pointWithVar &pv, const VoxelOctoTree *current_octo, const int current_layer, bool &is_sucess, double &prob,
                              PointToPlane &single_ptpl);
+  void BuildResidualListWithVisualPatchGeometry(std::vector<pointWithVar> &pv_list,
+                                               std::vector<PointToPlane> &ptpl_list);
+  void build_single_residual_with_geometry(pointWithVar &pv, const VoxelOctoTree *current_octo,
+                                          int current_layer, bool &is_sucess, double &prob,
+                                          PointToPlane &single_ptpl, visual_patch_score::GeometrySample *geometry_sample);
 
   void pubVoxelMap();
 

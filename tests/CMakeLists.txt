@@ -3,9 +3,23 @@ project(cake_covariance_math_tests LANGUAGES CXX)
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 enable_testing()
 
+add_executable(visual_patch_budget_test visual_patch_budget_test.cpp)
+target_compile_features(visual_patch_budget_test PRIVATE cxx_std_17)
+target_include_directories(visual_patch_budget_test PRIVATE ../include)
+add_test(NAME visual_patch_budget_test COMMAND visual_patch_budget_test)
+
+add_executable(visual_patch_score_math_test visual_patch_score_math_test.cpp)
+target_compile_features(visual_patch_score_math_test PRIVATE cxx_std_17)
+target_include_directories(visual_patch_score_math_test PRIVATE ../include)
+target_link_libraries(visual_patch_score_math_test PRIVATE Eigen3::Eigen)
+add_test(NAME visual_patch_score_math_test COMMAND visual_patch_score_math_test)
+
 # Exercise the production lifecycle methods with small owning fixtures, without
 # requiring ROS/PCL. Keep the generated bodies synchronized with source edits.
 find_package(PythonInterp 3 REQUIRED)
+add_test(NAME visual_patch_budget_baseline_source_test
+  COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_visual_patch_budget_baseline.py
+          ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(retirement_impl ${CMAKE_CURRENT_BINARY_DIR}/visual_map_retirement_impl.inc)
 add_custom_command(
   OUTPUT ${retirement_impl}
