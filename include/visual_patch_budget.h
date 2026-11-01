@@ -55,12 +55,14 @@ inline RuntimeSettings resolveSettings(bool enabled, const std::string &mode, co
 struct CameraScores
 {
   int camera_id = -1; // Physical camera ID, independent of traversal order.
-  std::vector<double> scores; // Nonnegative, descending; at most the camera cap.
+  std::vector<double> scores; // One score per camera/map-point group, descending.
 };
 
-// Exact maximum of sum_c sum_{i<q_c} scores[c][i] with lower/upper camera
-// quotas and a cardinality budget. Unit cost means ATTEMPTS, not accepted tracks
-// or milliseconds. Scores are frozen; this is not posterior information gain.
+// Exact maximum of the STATIC unit-cost primary-score sum, with lower/upper
+// camera quotas. Execution charges both primary and fallback reference attempts
+// against each quota, so fallback may consume slots planned for later primaries.
+// With conditional fallback this allocation is a proxy, not an optimum of the
+// realized accepted-point score, posterior information gain, or runtime.
 inline std::vector<int> allocate(const std::vector<CameraScores> &cameras,
                                  int budget, int minimum, int maximum)
 {

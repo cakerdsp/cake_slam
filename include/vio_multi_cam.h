@@ -296,6 +296,15 @@ struct VirtualPatchCandidate
   int reference_rank = 0;
 };
 
+// One current-camera/map-point observation, with its ordered reference chain.
+// Indices refer to PerCameraData::virtual_candidates; a group is never split
+// by sorting or camera-quota truncation. The first valid reference is primary.
+struct VirtualPatchCandidateGroup
+{
+  int begin = 0;
+  int end = 0;
+};
+
 struct VirtualCandidatePreparationStats
 {
   int rejected_virtual_support_oob_ = 0;
@@ -409,6 +418,7 @@ struct PerCameraData
   std::vector<std::pair<cv::Point2f, int>> rejected_visual_points_for_draw;
   FixedTemplateGradientCache fixed_template_cache;
   std::vector<VirtualPatchCandidate> virtual_candidates;
+  std::vector<VirtualPatchCandidateGroup> virtual_candidate_groups;
   VirtualCandidatePreparationStats virtual_preparation_stats;
   bool virtual_retrieval_ready = false;
   int budget_scored = 0, budget_quota = 0, budget_attempted = 0;

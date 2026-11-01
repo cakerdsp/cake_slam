@@ -873,9 +873,9 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   if (patch_budget_en)
   {
     if (frontend_mode != 0 || !virtual_fisheye_patch_en || !virtual_raw_score_select_en || virtual_sparse_patch_en ||
-        virtual_adaptive_sampling_en || visual_map_manage_en || zncc_residual_en || cross_camera_current_residual_en)
+        virtual_adaptive_sampling_en || zncc_residual_en || cross_camera_current_residual_en)
       throw std::runtime_error("visual patch budget/score requires direct dense virtual raw-score selection, "
-                               "without adaptive sampling, managed reference fallback, current-camera pairs or ZNCC residuals");
+                               "without adaptive sampling, current-camera pairs or ZNCC residuals");
     if (budget_settings.points < 0 || points_per_camera_min < 0 || points_per_camera_max < points_per_camera_min ||
         static_cast<int64_t>(budget_settings.points) < static_cast<int64_t>(num_cameras) * points_per_camera_min)
       throw std::runtime_error("visual patch budget must satisfy all camera minimum quotas and valid upper bounds");

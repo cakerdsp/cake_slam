@@ -22,6 +22,7 @@ which is included as part of this source code package.
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <unordered_set>
 #include <vikit/atan_camera.h>
 #include <vikit/equidistant_camera.h>
 #include <vikit/mei_camera.h>
@@ -5653,6 +5654,7 @@ void VIOManager::prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
   const double preparation_start = omp_get_wtime();
   using VirtualCandidate = VirtualPatchCandidate;
   ctx.virtual_candidates.clear();
+  ctx.virtual_candidate_groups.clear();
   ctx.virtual_retrieval_ready = false;
   ctx.budget_scored = 0;
   ctx.budget_attempted = 0;
@@ -5858,6 +5860,8 @@ void VIOManager::prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
 
   vector<VirtualCandidate> candidates;
   candidates.reserve(ctx.length);
+  std::unordered_set<VisualPoint *> candidate_points;
+  candidate_points.reserve(ctx.length);
   for (int i = 0; i < ctx.length; ++i)
   {
     if (ctx.grid_num[i] != TYPE_MAP) continue;
@@ -5876,6 +5880,7 @@ void VIOManager::prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
       ++virtual_candidate_null_count_;
       continue;
     }
+    if (!candidate_points.insert(pt).second) continue;
     if (!pt->is_normal_initialized_)
     {
       ++virtual_candidate_normal_uninit_count_;
@@ -5939,6 +5944,10 @@ void VIOManager::prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
         recordRejectedPoint(raw_px, REJECT_DRAW_REF_MISSING);
         continue;
       }
+      // The current-image/geometry score belongs to this point, not to each
+      // historical reference. Read the 8x8 gradients only once for the group.
+      const double point_score = computeShiTomasiCandidateScore(raw_px, pt_c_seed);
+      int valid_reference_rank = 0;
       for (int rank = 0; rank < static_cast<int>(managed_refs.size()); ++rank)
       {
         Feature *managed_ref = managed_refs[rank];
@@ -5948,8 +5957,8 @@ void VIOManager::prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
         candidate.reference = managed_ref;
         candidate.point_c_seed = pt_c_seed;
         candidate.current_raw_center_px = raw_px;
-        candidate.shi_tomasi_score = computeShiTomasiCandidateScore(raw_px, pt_c_seed);
-        candidate.reference_rank = rank;
+        candidate.shi_tomasi_score = point_score;
+        candidate.reference_rank = valid_reference_rank++;
         candidates.push_back(candidate);
       }
       ++visual_map_manage_stats_.dynamic_selected;
@@ -6040,15 +6049,34 @@ void VIOManager::prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
   const double sort_start = omp_get_wtime();
   if (patch_budget_mode != visual_patch_budget::Mode::Legacy && raw_score_point_quota >= 0)
   {
-    // Strict modes have one primary candidate per camera/map-point. Managed
-    // reference fallback is rejected at configuration time.
-    const size_t keep = std::min(candidates.size(), static_cast<size_t>(raw_score_point_quota));
-    std::partial_sort(candidates.begin(), candidates.begin() + keep, candidates.end(),
-                      [](const VirtualCandidate &a, const VirtualCandidate &b) {
+    // Rank points, keeping every reference chain intact. Only actual reference
+    // attempts consume the later processing quota; spare references have no
+    // independent score and cannot compete against their own primary.
+    std::vector<VirtualPatchCandidateGroup> groups;
+    groups.reserve(candidates.size());
+    for (int begin = 0; begin < static_cast<int>(candidates.size());)
+    {
+      int end = begin + 1;
+      while (end < static_cast<int>(candidates.size()) && candidates[end].point == candidates[begin].point) ++end;
+      groups.push_back({begin, end});
+      begin = end;
+    }
+    const size_t keep = std::min(groups.size(), static_cast<size_t>(raw_score_point_quota));
+    std::partial_sort(groups.begin(), groups.begin() + keep, groups.end(),
+                      [&](const VirtualPatchCandidateGroup &lhs, const VirtualPatchCandidateGroup &rhs) {
+                        const auto &a = candidates[lhs.begin];
+                        const auto &b = candidates[rhs.begin];
                         if (a.shi_tomasi_score != b.shi_tomasi_score) return a.shi_tomasi_score > b.shi_tomasi_score;
                         return a.point->point_id_ < b.point->point_id_;
                       });
-    candidates.resize(keep);
+    size_t kept_references = 0;
+    for (size_t i = 0; i < keep; ++i) kept_references += groups[i].end - groups[i].begin;
+    vector<VirtualCandidate> selected_candidates;
+    selected_candidates.reserve(kept_references);
+    for (size_t i = 0; i < keep; ++i)
+      selected_candidates.insert(selected_candidates.end(), candidates.begin() + groups[i].begin,
+                                 candidates.begin() + groups[i].end);
+    candidates.swap(selected_candidates);
   }
   else if (virtual_raw_score_select_en && raw_score_point_quota >= 0)
   {
@@ -6077,13 +6105,23 @@ void VIOManager::prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
   virtual_candidate_select_time_ = omp_get_wtime() - candidate_select_start;
   virtual_candidate_count_ = static_cast<int>(candidates.size());
 
-  // Strict modes retain only the bounded prefix. Legacy transfers ownership
-  // without another allocation and releases it after tracking as before.
+  // Strict modes retain a bounded point prefix with complete reference chains.
+  // Legacy transfers ownership without another allocation and releases it
+  // after tracking as before.
   if (patch_budget_mode == visual_patch_budget::Mode::Legacy)
     ctx.virtual_candidates = std::move(candidates);
   else
     ctx.virtual_candidates.assign(candidates.begin(), candidates.end());
-  ctx.budget_quota = static_cast<int>(ctx.virtual_candidates.size());
+  for (int begin = 0; begin < static_cast<int>(ctx.virtual_candidates.size());)
+  {
+    int end = begin + 1;
+    while (end < static_cast<int>(ctx.virtual_candidates.size()) &&
+           ctx.virtual_candidates[end].point == ctx.virtual_candidates[begin].point) ++end;
+    ctx.virtual_candidate_groups.push_back({begin, end});
+    begin = end;
+  }
+  ctx.budget_quota = raw_score_point_quota >= 0 ? raw_score_point_quota
+                                               : static_cast<int>(ctx.virtual_candidates.size());
   ctx.virtual_preparation_stats.rejected_virtual_support_oob_ = rejected_virtual_support_oob_;
   ctx.virtual_preparation_stats.rejected_virtual_projection_invalid_ = rejected_virtual_projection_invalid_;
   ctx.virtual_preparation_stats.rejected_virtual_z_ = rejected_virtual_z_;
@@ -6157,8 +6195,9 @@ void VIOManager::processVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
 
   if (!ctx.virtual_retrieval_ready) return;
   const auto &candidates = ctx.virtual_candidates;
+  const auto &groups = ctx.virtual_candidate_groups;
   virtual_candidate_count_ = static_cast<int>(candidates.size());
-  ctx.budget_attempted = virtual_candidate_count_;
+  ctx.budget_attempted = 0;
   enum VirtualRejectReason
   {
     VIRTUAL_REJECT_NONE = 0,
@@ -6196,6 +6235,7 @@ void VIOManager::processVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
     int warp_fail_pyramid_level = -1;
     int rejection = 0;
     bool ref_materialized = false;
+    bool attempted = false;
     bool valid = false;
   };
   auto recordRejectedPoint = [&](const V2D &raw_px, int reason) {
@@ -6232,29 +6272,52 @@ void VIOManager::processVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
   };
   vector<VirtualCandidateResult> results(candidates.size());
   const double parallel_track_start = omp_get_wtime();
-  for (int fallback_pass = 0; fallback_pass < 2; ++fallback_pass)
-  {
+  const int attempt_limit = patch_budget_mode == visual_patch_budget::Mode::Legacy
+      ? static_cast<int>(candidates.size()) : ctx.budget_quota;
+  std::vector<int> admitted_references(groups.size(), 0);
+  int next_group = 0;
 #ifdef MP_EN
-    omp_set_num_threads(MP_PROC_NUM);
-#pragma omp parallel for
+  omp_set_num_threads(MP_PROC_NUM);
 #endif
-    for (int candidate_index = 0; candidate_index < static_cast<int>(candidates.size()); ++candidate_index)
+  while (next_group < static_cast<int>(groups.size()) && ctx.budget_attempted < attempt_limit)
+  {
+    // Reserve worst-case work for a score-ordered batch before starting workers.
+    // Each worker owns a complete point group and tries its references in order.
+    // Unused reservations are returned to the next batch; only attempted
+    // references are charged. This avoids per-pixel locks and racing for slots.
+    const int batch_begin = next_group;
+    int reservation_left = attempt_limit - ctx.budget_attempted;
+    while (next_group < static_cast<int>(groups.size()) && reservation_left > 0)
+    {
+      const auto &group = groups[next_group];
+      // Finish earlier complete chains before deciding whether to truncate the
+      // last one. Otherwise unused reservations could strand a pending backup
+      // in an already-advanced partial group, despite budget still being free.
+      if (group.end - group.begin > reservation_left && next_group != batch_begin) break;
+      const int count = std::min(group.end - group.begin, reservation_left);
+      admitted_references[next_group] = count;
+      reservation_left -= count;
+      ++next_group;
+    }
+    const int batch_end = next_group;
+#ifdef MP_EN
+#pragma omp parallel for if(batch_end - batch_begin >= MP_PROC_NUM)
+#endif
+    for (int group_index = batch_begin; group_index < batch_end; ++group_index)
+    {
+    const auto &group = groups[group_index];
+    const int reference_end = group.begin + admitted_references[group_index];
+    for (int candidate_index = group.begin; candidate_index < reference_end; ++candidate_index)
     {
     const VirtualCandidate &candidate = candidates[candidate_index];
-    const bool is_primary = candidate.reference_rank == 0;
-    if (is_primary != (fallback_pass == 0)) continue;
-    if (!is_primary)
+    if (candidate_index != group.begin)
     {
-      int primary_index = candidate_index - 1;
-      while (primary_index >= 0 && candidates[primary_index].point == candidate.point &&
-             candidates[primary_index].reference_rank != 0)
-        --primary_index;
-      if (primary_index < 0 || candidates[primary_index].point != candidate.point) continue;
-      const int primary_rejection = results[primary_index].rejection;
+      const int primary_rejection = results[group.begin].rejection;
       if (primary_rejection != VIRTUAL_REJECT_NCC && primary_rejection != VIRTUAL_REJECT_PHOTOMETRIC)
-        continue;
+        break;
     }
     VirtualCandidateResult &result = results[candidate_index];
+    result.attempted = true;
     VisualPoint *pt = candidate.point;
     Feature *ref_ftr = candidate.reference;
     if (ref_ftr == nullptr || !refreshReferenceCalibration(*ref_ftr))
@@ -6545,6 +6608,16 @@ void VIOManager::processVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
     result.inverse_reference_exposure = ref_ftr->inv_expo_time_;
     result.track.valid = true;
     result.valid = true;
+    break; // One accepted reference per camera/map-point; skip remaining backups.
+    }
+    }
+    // The OpenMP barrier above completes all reads/writes in this batch before
+    // returning unused reservations. The next batch starts at the next point.
+    for (int group_index = batch_begin; group_index < batch_end; ++group_index)
+    {
+      const auto &group = groups[group_index];
+      for (int i = group.begin; i < group.begin + admitted_references[group_index]; ++i)
+        if (results[i].attempted) ++ctx.budget_attempted;
     }
   }
   virtual_parallel_track_time_ = omp_get_wtime() - parallel_track_start;
@@ -6554,19 +6627,20 @@ void VIOManager::processVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
   vector<int> virtual_warp_fail_search_level_count(std::max(virtual_max_search_level + 1, 1), 0);
   vector<int> virtual_warp_fail_pyramid_level_count(std::max(patch_pyrimid_level, 1), 0);
   std::set<VisualPoint *> accepted_managed_points;
-  std::set<VisualPoint *> fallback_allowed_points;
   int adaptive_attempted = 0, adaptive_prepared = 0, adaptive_accepted = 0;
   double adaptive_time_sum = 0.0, adaptive_pitch_sum = 0.0;
   for (int candidate_index = 0; candidate_index < static_cast<int>(candidates.size()); ++candidate_index)
   {
     const VirtualCandidate &collect_candidate = candidates[candidate_index];
+    VirtualCandidateResult &result = results[candidate_index];
+    // Budget-skipped references are neither failed matches nor negative map
+    // evidence. In particular, do not age/retire them via rejection counters.
+    if (!result.attempted) continue;
+    if (accepted_managed_points.count(collect_candidate.point) != 0) continue;
     if (collect_candidate.reference_rank > 0)
     {
-      if (accepted_managed_points.count(collect_candidate.point) != 0) continue;
-      if (fallback_allowed_points.count(collect_candidate.point) == 0) continue;
       ++visual_map_manage_stats_.fallback_attempted;
     }
-    VirtualCandidateResult &result = results[candidate_index];
     if (result.adaptive_attempted)
     {
       ++adaptive_attempted;
@@ -6601,9 +6675,6 @@ void VIOManager::processVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
       ++virtual_search_level_count[result.search_level];
     if (!result.valid)
     {
-      if (collect_candidate.reference_rank == 0 &&
-          (result.rejection == VIRTUAL_REJECT_NCC || result.rejection == VIRTUAL_REJECT_PHOTOMETRIC))
-        fallback_allowed_points.insert(collect_candidate.point);
       if (result.rejection == VIRTUAL_REJECT_NCC || result.rejection == VIRTUAL_REJECT_PHOTOMETRIC)
         recordManagedReferenceRejection(*collect_candidate.point, *collect_candidate.reference,
                                         ctx.new_frame->id_, ctx.camera_id);
@@ -6745,6 +6816,7 @@ void VIOManager::processVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
     std::vector<VirtualPatchCandidate>().swap(ctx.virtual_candidates);
   else
     ctx.virtual_candidates.clear();
+  ctx.virtual_candidate_groups.clear();
   ctx.virtual_retrieval_ready = false;
 }
 
@@ -13740,8 +13812,9 @@ void VIOManager::processMultiCameraFrameWithPatchBudget(const MeasureGroup &meas
       auto &queue = patch_budget_camera_scores_[c];
       queue.camera_id = ctx.camera_id;
       queue.scores.clear();
-      queue.scores.reserve(ctx.virtual_candidates.size());
-      for (const auto &candidate : ctx.virtual_candidates) queue.scores.push_back(candidate.shi_tomasi_score);
+      queue.scores.reserve(ctx.virtual_candidate_groups.size());
+      for (const auto &group : ctx.virtual_candidate_groups)
+        queue.scores.push_back(ctx.virtual_candidates[group.begin].shi_tomasi_score);
     }
     budget_prepare_seconds = omp_get_wtime() - prepare_start;
     const double allocate_start = omp_get_wtime();
@@ -13749,8 +13822,11 @@ void VIOManager::processMultiCameraFrameWithPatchBudget(const MeasureGroup &meas
                                                      points_per_camera_min, points_per_camera_max);
     for (size_t c = 0; c < cameras_.size(); ++c)
     {
-      cameras_[c].virtual_candidates.resize(quotas[c]);
-      cameras_[c].budget_quota = quotas[c];
+      auto &ctx = cameras_[c];
+      ctx.virtual_candidate_groups.resize(quotas[c]);
+      const int kept_references = ctx.virtual_candidate_groups.empty() ? 0 : ctx.virtual_candidate_groups.back().end;
+      ctx.virtual_candidates.resize(kept_references);
+      ctx.budget_quota = quotas[c];
     }
     budget_allocate_seconds = omp_get_wtime() - allocate_start;
   }
