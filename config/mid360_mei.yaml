@@ -141,6 +141,10 @@ publish:
   pub_plane_en: false
   pub_scan_num: 1
   blind_rgb_points: 0.0
+  # RGB only: Euclidean distance from each camera in meters, inclusive bounds.
+  color_range_en: true
+  color_min_distance: 0.0
+  color_max_distance: 5.0
 
 evo:
   seq_name: "CBD_Building_01"

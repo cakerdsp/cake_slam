@@ -158,6 +158,8 @@ public:
   double b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
   std::string imu_noise_model = "discrete";
   double blind_rgb_points = 0.0;
+  bool color_range_en = false;
+  double color_min_distance = 0.0, color_max_distance = 5.0;
   double last_timestamp_lidar = -1.0, last_timestamp_imu = -1.0;
   std::vector<double> last_timestamp_img_by_camera;
   uint64_t multi_cam_downclock_counter = 0;

@@ -59,9 +59,14 @@ mapper = mapper_path.read_text(encoding="utf-8")
 publish_start = mapper.index("void LIVMapper::publish_frame_world(")
 color_start = mapper.index("    const int camera_count = vio_manager->numCameras();", publish_start)
 color_end = mapper.index("\n  }\n  else\n", color_start)
+validation_start = mapper.index("  if (color_range_en &&")
+validation_end = mapper.index("\n\n", validation_start)
 output += ["std::vector<PointTypeRGB> colorCloud(VIOManager *vio_manager,\n"
-           "    const std::shared_ptr<ColorInputFixture> &pcl_wait_pub, double blind_rgb_points = 0.0) {\n"
+           "    const std::shared_ptr<ColorInputFixture> &pcl_wait_pub, double blind_rgb_points = 0.0,\n"
+           "    bool color_range_en = false, double color_min_distance = 0.0, double color_max_distance = 5.0) {\n"
            "  auto laserCloudWorldRGB = std::make_shared<std::vector<PointTypeRGB>>();",
+           f'#line {mapper.count(chr(10), 0, validation_start) + 1} "{mapper_path.as_posix()}"',
+           mapper[validation_start:validation_end],
            f'#line {mapper.count(chr(10), 0, color_start) + 1} "{mapper_path.as_posix()}"',
            mapper[color_start:color_end], "  return *laserCloudWorldRGB;\n}"]
 args.output.write_text("\n".join(output), encoding="utf-8")

@@ -18,6 +18,8 @@
 - 视觉侧检查选点评分、插值、梯度、patch 和滤波的实际像素范围。参考帧使用对应参考相机的 mask，ROI 采样换回完整图像坐标。
 - 着色逐台相机遍历点云，仅接受变换到该相机坐标系后 `z > 0` 的点（前方 180° 半球，`z = 0` 也排除），并在读取颜色之前检查该镜头 mask 中双线性插值的四个像素。每个有效相机观测都输出一份；同一个三维点在多个镜头中有效时，会保留坐标相同、颜色分别来自对应镜头的多份点。所有相机均无有效颜色时，不加入彩色点云，LiDAR 几何仍保留。前半球限制只用于着色，不改变视觉跟踪的视场。
 - 日志 `colored` 是至少在一台相机中成功着色的输入点数，`output_points` 是实际输出的 RGB 条目数（包含重叠视野中的重复坐标）。原始 RGB 发布和保存保留这些条目；下采样导出仍按原来的体素过滤设置处理。
+- 着色距离开关为 `publish.color_range_en`，范围由 `publish.color_min_distance` / `publish.color_max_distance` 指定（米，包含上下限）。距离是点到当前相机的三维直线距离，每台相机独立判断；仍需满足 `z > 0`、mask 和原有 `blind_rgb_points` 下限。范围过滤只影响 RGB 输出，不改变定位和 LiDAR 几何。日志 `range_rejects` 记录通过投影、mask 和盲区检查后被距离范围排除的相机观测数。
+- 两份 `mid360_mei` 配置启用着色距离范围 `[0, 5]` 米；其他配置不填写时默认关闭。设 `color_range_en: false` 关闭新增距离范围限制；前半球、mask 和原有盲区过滤仍生效。启用时要求有限的 `0 <= color_min_distance <= color_max_distance`，不合法则初始化报错。
 - 设 `mask_path: ""` 可单独关闭某一路。第三路 bright 尚未提供 mask，仍可能从该路黑边取色；不能用 left/right 的 mask 代替。
 
 当前 ROS1 分支的单相机 `mapping_mid360_mei.launch` 也使用多相机节点，并将 left 配置为 camera0。
