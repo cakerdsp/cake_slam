@@ -11,7 +11,7 @@
   <arg name="patch_budget_points" default="" />
   <arg name="patch_budget_log_en" default="" />
 
-  <node pkg="cake_slam" type="cake_slam_mapping_multi_cam" name="laserMapping" output="screen" launch-prefix="$(arg memory_profile_prefix)">
+  <node pkg="cake_slam" type="cake_slam_mapping_multi_cam" name="laserMapping" clear_params="true" output="screen" launch-prefix="$(arg memory_profile_prefix)">
     <rosparam command="load" file="$(arg mid360_params_file)" />
     <rosparam command="load" file="$(arg camera_params_file)" />
     <param if="$(eval arg('patch_budget_en') != '')" name="vio/patch_budget_en" type="bool" value="$(arg patch_budget_en)" />
