@@ -522,6 +522,12 @@ public:
                ? ncc_thre_by_level[level]
                : ncc_thre;
   }
+  bool rawPatchPassesGate(double sse, double ncc, int level) const
+  {
+    return sse <= outlier_threshold * patch_size_total &&
+           (!ncc_en || (std::isfinite(ncc) && ncc >= nccThresholdForLevel(level)));
+  }
+  bool managedReferenceAffinePassesGate(const Matrix2d &affine) const;
   double photometricNoiseCovariance() const
   {
     return zncc_residual_en ? zncc_residual_cov : img_point_cov;
@@ -858,11 +864,29 @@ public:
     bool accepted = false;
   };
 
-  enum class PoseAffineMode { Skip, Legacy, Pose };
+  enum class PoseAffineMode { Skip, Legacy, Pose, Calibrated };
+  static bool usesPoseAffine(PoseAffineMode mode)
+  {
+    return mode == PoseAffineMode::Pose || mode == PoseAffineMode::Calibrated;
+  }
+  template <typename SamplesValid>
+  static PoseAffineMode selectNavigationMode(const SamplesValid &valid)
+  {
+    if (valid(PoseAffineMode::Pose)) return PoseAffineMode::Pose;
+    return valid(PoseAffineMode::Legacy) ? PoseAffineMode::Legacy : PoseAffineMode::Skip;
+  }
   struct PoseAffineLevelPlan
   {
     std::vector<std::vector<PoseAffineMode>> historical;
     std::vector<PoseAffineMode> pairs;
+    // Frame-entry camera transforms for both original navigation models.
+    // Calibration proposals cannot move their projections. No added states.
+    std::vector<SE3d, Eigen::aligned_allocator<SE3d>> fallback_camera_from_body;
+    const SE3d *fallbackCamera(int camera_id) const
+    {
+      return camera_id >= 0 && camera_id < static_cast<int>(fallback_camera_from_body.size())
+          ? &fallback_camera_from_body[camera_id] : nullptr;
+    }
   };
 
   long long usage_stats_frames_ = 0;
@@ -955,7 +979,7 @@ public:
     std::string covariance_error;
     int linearized = 0, dof = 0;
     bool has_error = false, evidence = false, accepted = false, invalid_covariance = false;
-    bool pose_affine_invalid = false;
+    bool pose_affine_invalid = false, calibration_fallback = false;
     double error = 0.0, nis = 0.0, nis_time = 0.0;
     V2D current_px = V2D::Zero();
     Matrix2d affine = Matrix2d::Zero();
@@ -972,7 +996,7 @@ public:
     {
       linearized = dof = 0;
       has_error = evidence = accepted = invalid_covariance = false;
-      pose_affine_invalid = false;
+      pose_affine_invalid = calibration_fallback = false;
       error = nis_time = 0.0;
       nis = std::numeric_limits<double>::quiet_NaN();
       failure = nullptr;
@@ -982,6 +1006,13 @@ public:
   std::vector<split_state_math::PatchWorkspace,
               Eigen::aligned_allocator<split_state_math::PatchWorkspace>> visual_patch_workspaces_;
   std::vector<std::vector<VisualPatchResult, Eigen::aligned_allocator<VisualPatchResult>>> visual_patch_results_;
+  // Allocated only for enabled affine calibration. Per-camera-pair workspaces
+  // reuse the existing state columns; no historical covariance is stored here.
+  std::vector<split_state_math::PatchWorkspace,
+              Eigen::aligned_allocator<split_state_math::PatchWorkspace>> calibration_patch_workspaces_;
+  std::vector<Eigen::MatrixXd> calibration_nis_roots_;
+  std::vector<pose_affine_warp::CalibrationEvaluation,
+              Eigen::aligned_allocator<pose_affine_warp::CalibrationEvaluation>> calibration_warp_workspaces_;
   long long vio_linearized_residual_count_ = 0;
   double ave_total = 0;
   // double ave_build_residual_time = 0;
@@ -1199,11 +1230,26 @@ public:
       const M3D &virtual_from_camera) const;
   bool evaluatePoseAffineTrack(const PoseAffineTrack &track, const StatesGroup &value,
                                pose_affine_warp::Evaluation &evaluation) const;
-  PoseAffineLevelPlan buildPoseAffineLevelPlan(int level, const StatesGroup &base);
+  bool calibratedAffineEnabled() const
+  {
+    return online_extrinsic_en && state != nullptr && state->hasExtrinsicStates() &&
+           virtual_pose_affine_en && !zncc_residual_en;
+  }
+  bool evaluateCalibrationWarp(const PerCameraData &ctx, const Feature *reference,
+      const VisualPoint &point, const PoseAffineTrack &track, const M3D &virtual_from_camera,
+      int reference_level, const StatesGroup &value, bool uncertainty,
+      pose_affine_warp::CalibrationEvaluation &evaluation) const;
+  bool evaluateFixedCameraProjection(const PerCameraData &ctx, const V3D &point_world,
+      const M3D &virtual_from_camera, const SE3d &camera_from_body,
+      pose_affine_warp::CalibrationEvaluation &evaluation) const;
+  PoseAffineLevelPlan buildPoseAffineLevelPlan(int level, const StatesGroup &base,
+      const StatesGroup *navigation_calibration = nullptr, bool allow_calibration = true);
   bool poseAffineHistoricalSamplesValid(int level, const PerCameraData &ctx, int point_index,
-                                        const StatesGroup &value, PoseAffineMode mode) const;
+                                        const StatesGroup &value, PoseAffineMode mode,
+                                        const SE3d *fixed_camera = nullptr, bool check_photometric = false) const;
   bool poseAffinePairSamplesValid(int level, const CurrentCrossCameraPair &pair,
-                                  const StatesGroup &value, PoseAffineMode mode) const;
+                                  const StatesGroup &value, PoseAffineMode mode,
+                                  const SE3d *fixed_source = nullptr, const SE3d *fixed_target = nullptr) const;
   bool poseAffineSamplesValid(int level, const StatesGroup &candidate, const PoseAffineLevelPlan &plan,
                               const std::vector<std::vector<uint8_t>> &accepted_history,
                               const std::vector<uint8_t> &accepted_pairs);
@@ -1337,7 +1383,7 @@ public:
   void printUsageStatsTable(int frame_id);
   void maybePrintUsageStatsTable(int frame_id);
   void printOnlineCalibrationStatsTable(int frame_id) const;
-  double calculateNCC(float *ref_patch, float *cur_patch, int patch_size);
+  double calculateNCC(const float *ref_patch, const float *cur_patch, int patch_size) const;
   int getBestSearchLevel(const Matrix2d &A_cur_ref, const int max_level);
   V3F getInterpolatedPixel(const cv::Mat &img, V2D pc) const;
   bool getColorFromCamera(int camera_id, const V3D &p_w, V3F &bgr, double *cam_range = nullptr) const;
