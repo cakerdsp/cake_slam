@@ -1,6 +1,6 @@
 common:
   # This launch defaults to the single raw MEI camera0 stream.
-  num_cameras: 3
+  num_cameras: 2
   require_all_cameras: true
   multi_cam_sync_queue_size: 5
   multi_cam_sync_tolerance_ms: 40.0
@@ -110,7 +110,7 @@ time_offset:
 preprocess:
   image_downclock_en: true
   image_downclock_factor: 2
-  point_filter_num: 15
+  point_filter_num: 1
   filter_size_surf: 0.1
   lidar_type: 7
   scan_line: 4
@@ -125,7 +125,7 @@ vio:
   # One-time fixed RGB-to-gray weights; false keeps the original grayscale path.
   color_gray_init_en: false
   cross_camera_reference_en: true
-  cross_camera_current_residual_en: false
+  cross_camera_current_residual_en: true
   max_iterations: 5
   outlier_threshold: 1000
   ncc_en: false
@@ -141,7 +141,7 @@ vio:
   zncc_huber_delta: 0.5
   # Omni-LIVO-style per-residual Tukey weighting; uses outlier_threshold as cutoff.
   # When enabled, this overrides the ZNCC patch-level Huber weighting above.
-  tukey_robust_en: false
+  tukey_robust_en: true
   usage_stats_en: false
   usage_stats_window: 100
   img_point_cov: 1000
@@ -158,7 +158,7 @@ vio:
   # virtual_adaptive_sampling_en: true
   virtual_adaptive_sampling_en: false
   # Pose-dependent affine warp and pose Jacobian; independent of adaptive sampling.
-  virtual_pose_affine_en: true
+  virtual_pose_affine_en: false
   raw_camera_model_jacobian_en: true
   virtual_s2_optimize_en: false
   virtual_sparse_patch_en: false
@@ -179,7 +179,7 @@ vio:
   # reference selection, or deleting map objects while the raw-path abort is traced.
   visual_ref_post_ekf_build_en: true
 
-  visual_map_manage_en: false
+  visual_map_manage_en: true
   visual_map_manage_log_en: false
   visual_map_manage_shadow_en: false
   visual_ref_current_select_en: true
@@ -220,7 +220,7 @@ vio:
   # Keep the strong insertion filter disabled during diagnosis. Its lookup
   # scale matches mid360 lio.voxel_size so footprint association stays coherent.
   
-  visual_geom_filter_en: false
+  visual_geom_filter_en: true
   visual_geom_filter_log_en: false
   visual_geom_filter_require_point_cov: true
   visual_geom_filter_voxel_size: 0.5
@@ -240,7 +240,7 @@ vio:
   inverse_composition_en: false
   exposure_estimate_en: true
 
-  online_extrinsic_en: false
+  online_extrinsic_en: true
   online_extrinsic_rot_en: true
   online_extrinsic_trans_en: true
   online_extrinsic_prior_factor_en: false
@@ -249,11 +249,11 @@ vio:
   # online_extrinsic_camera_mask: []
   online_extrinsic_start_frame: 100
   online_extrinsic_min_tracks: 20
-  online_extrinsic_prior_rot_std_deg: 0.5
-  online_extrinsic_prior_trans_std_m: 0.02
-  online_extrinsic_max_rot_update_deg: 0.1
-  online_extrinsic_max_trans_update_m: 0.1
-  online_time_offset_en: false
+  online_extrinsic_prior_rot_std_deg: 5.0
+  online_extrinsic_prior_trans_std_m: 0.1
+  online_extrinsic_max_rot_update_deg: 1.0
+  online_extrinsic_max_trans_update_m: 0.5
+  online_time_offset_en: true
   # online_time_offset_group_mask: []
   online_time_offset_start_frame: 100
   online_time_offset_min_tracks: 30
