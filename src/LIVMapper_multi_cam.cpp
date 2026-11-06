@@ -491,6 +491,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<bool>("vio.cross_camera_reference_en", false);
   try_declare.template operator()<bool>("vio.cross_camera_current_residual_en", false);
   try_declare.template operator()<bool>("vio.online_extrinsic_en", false);
+  try_declare.template operator()<bool>("vio.online_extrinsic_covis_only_en", false);
   try_declare.template operator()<bool>("vio.online_extrinsic_rot_en", true);
   try_declare.template operator()<bool>("vio.online_extrinsic_trans_en", true);
   try_declare.template operator()<bool>("vio.online_extrinsic_prior_factor_en", false);
@@ -759,6 +760,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "vio.cross_camera_reference_en", cross_camera_reference_en);
   getRosParam(this->node, "vio.cross_camera_current_residual_en", cross_camera_current_residual_en);
   getRosParam(this->node, "vio.online_extrinsic_en", online_extrinsic_en);
+  getRosParam(this->node, "vio.online_extrinsic_covis_only_en", online_extrinsic_covis_only_en);
   getRosParam(this->node, "vio.online_extrinsic_rot_en", online_extrinsic_rot_en);
   getRosParam(this->node, "vio.online_extrinsic_trans_en", online_extrinsic_trans_en);
   getRosParam(this->node, "vio.online_extrinsic_prior_factor_en", online_extrinsic_prior_factor_en);
@@ -1101,6 +1103,7 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->directional_drop_variance_reduction = directional_drop_variance_reduction;
   vio_manager->directional_full_variance_reduction = directional_full_variance_reduction;
   vio_manager->online_extrinsic_en = online_extrinsic_en;
+  vio_manager->online_extrinsic_covis_only_en = online_extrinsic_covis_only_en;
   vio_manager->online_extrinsic_rot_en = online_extrinsic_rot_en;
   vio_manager->online_extrinsic_trans_en = online_extrinsic_trans_en;
   vio_manager->online_extrinsic_prior_factor_en = online_extrinsic_prior_factor_en;

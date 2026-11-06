@@ -8435,7 +8435,7 @@ bool VIOManager::poseAffinePairSamplesValid(int level, const CurrentCrossCameraP
 }
 
 VIOManager::PoseAffineLevelPlan VIOManager::buildPoseAffineLevelPlan(int level, const StatesGroup &base,
-    const StatesGroup *navigation_calibration, bool allow_calibration)
+    const StatesGroup *navigation_calibration, bool allow_calibration, bool current_pairs_only)
 {
   PoseAffineLevelPlan plan;
   plan.historical.resize(cameras_.size());
@@ -8456,6 +8456,7 @@ VIOManager::PoseAffineLevelPlan VIOManager::buildPoseAffineLevelPlan(int level, 
     const PerCameraData &ctx = cameras_[camera_index];
     auto &modes = plan.historical[camera_index];
     modes.assign(std::max(0, ctx.total_points), PoseAffineMode::Skip);
+    if (current_pairs_only) continue;
     if (level < 0 || ctx.visual_submap == nullptr) continue;
     const auto &map = *ctx.visual_submap;
     for (int i = 0; i < ctx.total_points; ++i)
@@ -8561,13 +8562,41 @@ bool VIOManager::referenceUncertaintyJacobian(
 
 void VIOManager::computeJacobianAndUpdateEKF()
 {
+  if (!online_extrinsic_covis_only_en || !online_extrinsic_en || !state->hasExtrinsicStates())
+  {
+    computeJacobianAndUpdateEKFImpl(VisualUpdatePass::Joint);
+    return;
+  }
+
+  // Reuse the same linearization/solver twice, with disjoint observations and
+  // active gain rows. Only successfully fused pairs claim their observations.
+  std::vector<std::vector<uint8_t>> covis_used(cameras_.size());
+  for (const PerCameraData &camera : cameras_)
+    covis_used[camera.camera_id].assign(std::max(0, camera.total_points), 0);
+  online_calib_last_active_extrinsic_rot_.assign(state->num_cameras, 0);
+  online_calib_last_active_extrinsic_trans_.assign(state->num_cameras, 0);
+  online_calib_last_extrinsic_rot_update_deg_.assign(state->num_cameras, 0.0);
+  online_calib_last_extrinsic_trans_update_cm_.assign(state->num_cameras, 0.0);
+  online_calib_last_max_rot_update_deg_ = online_calib_last_max_trans_update_cm_ = 0.0;
+  computeJacobianAndUpdateEKFImpl(VisualUpdatePass::CovisibleExtrinsics, &covis_used);
+  computeJacobianAndUpdateEKFImpl(VisualUpdatePass::Navigation, &covis_used);
+}
+
+void VIOManager::computeJacobianAndUpdateEKFImpl(VisualUpdatePass pass,
+    std::vector<std::vector<uint8_t>> *covis_used)
+{
+  const bool calibration_only = pass == VisualUpdatePass::CovisibleExtrinsics;
+  const bool navigation_only = pass == VisualUpdatePass::Navigation;
   pose_affine_evidence_valid_.clear();
-  compute_jacobian_time = update_ekf_time = 0.0;
-  vio_linearized_residual_count_ = 0;
+  if (!navigation_only)
+  {
+    compute_jacobian_time = update_ekf_time = 0.0;
+    vio_linearized_residual_count_ = 0;
+    visual_parallel_time_ = visual_reduce_time_ = visual_nis_worker_time_ = visual_directional_time_ = 0.0;
+  }
   int invalid_patch_covariances = 0;
   int total_observations = 0;
   for (const PerCameraData &ctx : cameras_) total_observations += ctx.total_points;
-  visual_parallel_time_ = visual_reduce_time_ = visual_nis_worker_time_ = visual_directional_time_ = 0.0;
   visual_linearization_threads_ = 1;
   if (total_observations == 0) return;
 #if defined(MP_EN) && defined(_OPENMP)
@@ -8604,7 +8633,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
   const double measurement_cov = photometricNoiseCovariance();
   if (!std::isfinite(measurement_cov) || measurement_cov <= 0.0)
     throw std::runtime_error("photometric residual covariance must be finite and positive");
-  ++online_calib_visual_update_count_;
+  if (!navigation_only) ++online_calib_visual_update_count_;
   online_calib_last_total_observations_ = total_observations;
   const int calib_camera_count = std::max(0, state->num_cameras);
   const int calib_group_count = std::max(0, state->num_time_offset_groups);
@@ -8630,7 +8659,20 @@ void VIOManager::computeJacobianAndUpdateEKF()
   double rollback_last_max_time_update_ms = last_max_time_update_ms;
   bool attempted_extrinsic_this_frame = false;
   bool attempted_time_this_frame = false;
-  if (cross_camera_current_residual_en) buildCurrentCrossCameraPairs();
+  if (!navigation_only && cross_camera_current_residual_en) buildCurrentCrossCameraPairs();
+  std::vector<uint8_t> fused_pairs, rollback_fused_pairs, iteration_fused_pairs;
+  // Retain only the nonzero upper triangle already computed for each pair.
+  // Flat buffers are reused across iterations; no extra state or dense solve.
+  struct PairInformationRange { size_t columns = 0, values = 0; int size = 0; };
+  std::vector<PairInformationRange> pair_information_ranges;
+  std::vector<int> pair_information_columns;
+  std::vector<double> pair_information_values;
+  if (calibration_only)
+  {
+    fused_pairs.assign(current_cross_camera_pairs_.size(), 0);
+    iteration_fused_pairs = rollback_fused_pairs = fused_pairs;
+    pair_information_ranges.resize(current_cross_camera_pairs_.size());
+  }
   if (virtual_pose_affine_en)
   {
     int prepared_tracks = 0, prepared_pairs = 0;
@@ -8644,11 +8686,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
            prepared_tracks, total_observations, prepared_pairs);
   }
   G = Eigen::MatrixXd::Zero(state->stateDim(), state->stateDim());
-  const bool online_extrinsic_active = online_extrinsic_en &&
+  const bool online_extrinsic_active = !navigation_only && online_extrinsic_en &&
       frame_count >= online_extrinsic_start_frame &&
       total_observations >= online_extrinsic_min_tracks;
   const bool allow_extrinsic_rotation = online_extrinsic_active && online_extrinsic_rot_en;
   const bool allow_extrinsic_translation = online_extrinsic_active && online_extrinsic_trans_en;
+  if (calibration_only && (!(allow_extrinsic_rotation || allow_extrinsic_translation) ||
+      std::none_of(current_cross_camera_pairs_.begin(), current_cross_camera_pairs_.end(),
+                   [](const CurrentCrossCameraPair &pair) { return pair.accepted; }))) return;
   const StatesGroup state_before_visual_update = *state;
   const Eigen::MatrixXd cov_before_visual_update = state->cov;
   std::vector<uint8_t> final_active_extrinsic_rot(state->num_cameras, 0);
@@ -8703,6 +8748,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
   // diagnostics. Rejecting a proposal must not erase earlier visual updates.
   auto restore_update_checkpoint = [&](const StatesGroup &accepted_state) {
     *state = accepted_state;
+    if (calibration_only) fused_pairs = rollback_fused_pairs;
     G = rollback_G;
     final_active_extrinsic_rot = rollback_active_extrinsic_rot;
     final_active_extrinsic_trans = rollback_active_extrinsic_trans;
@@ -8744,10 +8790,21 @@ void VIOManager::computeJacobianAndUpdateEKF()
       for (const auto mode : modes) count_mode(mode, count);
     for (const auto mode : plan.pairs) count_mode(mode, count);
   };
+  auto publish_patch_errors = [&]() {
+    for (PerCameraData &camera : cameras_)
+    {
+      if (camera.visual_submap == nullptr) continue;
+      const auto &results = visual_patch_results_[camera.camera_id];
+      const size_t count = std::min(results.size(), camera.visual_submap->errors.size());
+      for (size_t i = 0; i < count; ++i)
+        if (results[i].has_error && !results[i].pose_affine_invalid)
+          camera.visual_submap->errors[i] = results[i].error;
+    }
+  };
   for (int level = patch_pyrimid_level - 1; level >= 0; --level)
   {
     StatesGroup old_state = *state;
-    if (inverse_composition_en) buildFixedTemplateGradientCache(level);
+    if (inverse_composition_en && !calibration_only) buildFixedTemplateGradientCache(level);
     PoseAffineLevelPlan pose_affine_plan;
     std::vector<std::vector<uint8_t>> accepted_history, previous_accepted_history;
     std::vector<uint8_t> accepted_pairs, previous_accepted_pairs;
@@ -8755,7 +8812,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
     if (virtual_pose_affine_en)
     {
       pose_affine_plan = buildPoseAffineLevelPlan(level, *state,
-          calibrated_affine ? &state_before_visual_update : nullptr);
+          calibrated_affine ? &state_before_visual_update : nullptr, true, calibration_only);
       accepted_history.resize(pose_affine_plan.historical.size());
       for (size_t camera_id = 0; camera_id < pose_affine_plan.historical.size(); ++camera_id)
       {
@@ -8765,10 +8822,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
       accepted_pairs.assign(pose_affine_plan.pairs.size(), 0);
       count_plan(pose_affine_plan, 1);
     }
+    else if (calibration_only) accepted_pairs.assign(current_cross_camera_pairs_.size(), 0);
     double last_error = std::numeric_limits<double>::max();
     bool navigation_only_retry = false;
     auto retry_navigation = [&]() {
-      if (!calibrated_affine || navigation_only_retry) return false;
+      if (calibration_only || !calibrated_affine || navigation_only_retry) return false;
       bool has_calibration = std::find(pose_affine_plan.pairs.begin(), pose_affine_plan.pairs.end(),
                                       PoseAffineMode::Calibrated) != pose_affine_plan.pairs.end();
       for (const auto &modes : pose_affine_plan.historical)
@@ -8796,6 +8854,13 @@ void VIOManager::computeJacobianAndUpdateEKF()
         accepted_time_pixel_velocity = last_time_avg_pixel_velocity;
         for (auto &mask : accepted_history) std::fill(mask.begin(), mask.end(), 0);
         std::fill(accepted_pairs.begin(), accepted_pairs.end(), 0);
+      }
+      else if (calibration_only) std::fill(accepted_pairs.begin(), accepted_pairs.end(), 0);
+      if (calibration_only)
+      {
+        std::fill(iteration_fused_pairs.begin(), iteration_fused_pairs.end(), 0);
+        pair_information_columns.clear();
+        pair_information_values.clear();
       }
       const double linearize_start = omp_get_wtime();
       const int full_state_dim = state->stateDim();
@@ -8831,7 +8896,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
       int measurement_count = 0;
       for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
       std::vector<uint8_t> active_time_groups(state->num_time_offset_groups, 0);
-      if (online_time_offset_en && frame_count >= online_time_offset_start_frame &&
+      if (!calibration_only && online_time_offset_en && frame_count >= online_time_offset_start_frame &&
           (online_time_offset_min_update_interval <= 0 ||
            frame_count % std::max(1, online_time_offset_min_update_interval) == 0))
       {
@@ -8883,7 +8948,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
       std::vector<uint8_t> active_extrinsic_trans(state->num_cameras, 0);
       for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
       {
-        const bool camera_active = camera_id < static_cast<int>(cameras_.size()) &&
+        const bool camera_active = !calibration_only && camera_id < static_cast<int>(cameras_.size()) &&
                                    isOnlineExtrinsicEnabledForCamera(camera_id) &&
                                    cameras_[camera_id].total_points >= online_extrinsic_min_tracks;
         if (camera_active && allow_extrinsic_rotation) active_extrinsic_rot[camera_id] = 1;
@@ -8982,10 +9047,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
       }
 
       const bool compute_reference_nis = visual_map_manage_en && visual_ref_nis_en;
-      std::vector<int> calibration_tracks(calibrated_affine ? state->num_cameras : 0, 0);
+      std::vector<int> calibration_tracks((calibrated_affine || calibration_only) ? state->num_cameras : 0, 0);
 
       for (PerCameraData &ctx : cameras_)
       {
+        if (calibration_only) continue;
         if (ctx.total_points == 0 || ctx.visual_submap == nullptr || ctx.new_frame == nullptr) continue;
         const cv::Mat &img = ctx.new_frame->img_;
         const M3D Rwi = ctx.Rwi;
@@ -9832,6 +9898,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
             ctx.visual_submap->observation_dof[point_index] = result.dof;
             ctx.visual_submap->observation_nis[point_index] = result.nis;
           }
+          // Keep normal reference evidence/map maintenance, but do not fuse a
+          // current observation already consumed by the extrinsic-only pass.
+          if (navigation_only && (*covis_used)[ctx.camera_id][point_index]) continue;
           if (!result.accepted) continue;
           if (calibrated_affine && pose_affine_plan.historical[ctx.camera_id][point_index] == PoseAffineMode::Calibrated)
           {
@@ -9893,6 +9962,8 @@ void VIOManager::computeJacobianAndUpdateEKF()
             (pair_index >= pose_affine_plan.pairs.size() ||
              pose_affine_plan.pairs[pair_index] == PoseAffineMode::Skip))
           continue;
+        if (calibration_only && calibrated_affine &&
+            pose_affine_plan.pairs[pair_index] != PoseAffineMode::Calibrated) continue;
         if (!pair.accepted || pair.point == nullptr || pair.point->pending_delete_ ||
             !pair.point->pos_.array().isFinite().all())
           continue;
@@ -10356,6 +10427,20 @@ void VIOManager::computeJacobianAndUpdateEKF()
           vio_linearized_residual_count_ += pair_residuals;
           accepted_pairs[pair_index] = 1;
         }
+        else if (calibration_only) accepted_pairs[pair_index] = 1;
+        if (calibration_only)
+        {
+          auto &range = pair_information_ranges[pair_index];
+          range.columns = pair_information_columns.size();
+          range.values = pair_information_values.size();
+          for (int i = 0; i < solve_dim; ++i)
+            if (pair_hessian(i, i) > 0.0) pair_information_columns.push_back(i);
+          range.size = static_cast<int>(pair_information_columns.size() - range.columns);
+          for (int r = 0; r < range.size; ++r)
+            for (int c = r; c < range.size; ++c)
+              pair_information_values.push_back(pair_hessian(
+                  pair_information_columns[range.columns + r], pair_information_columns[range.columns + c]));
+        }
         error += pair_error;
         if (usage_stats_en)
         {
@@ -10368,7 +10453,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           if (iteration == 0) recordCurrentCrossCameraUsage(pair, kUsageEkfStage, level, pair_residuals);
         }
           } while (false);
-          if (!calibrated_affine || accepted_pairs[pair_index] ||
+          if (calibration_only || !calibrated_affine || accepted_pairs[pair_index] ||
               pose_affine_plan.pairs[pair_index] != PoseAffineMode::Calibrated) break;
           const auto &pair = current_cross_camera_pairs_[pair_index];
           count_mode(PoseAffineMode::Calibrated, -1);
@@ -10385,19 +10470,21 @@ void VIOManager::computeJacobianAndUpdateEKF()
         linearize_current_cross_camera();
       }
 
-      if (calibrated_affine)
+      if (calibrated_affine || calibration_only)
       {
         if (cross_camera_current_residual_en)
         {
           // Count a current observation once even if it also appears in a
           // historical residual or in several current-camera pairs.
-          auto supported = accepted_history;
+          auto supported = calibration_only ? *covis_used : accepted_history;
           for (size_t camera = 0; camera < supported.size(); ++camera)
             for (size_t i = 0; i < supported[camera].size(); ++i)
-              if (pose_affine_plan.historical[camera][i] != PoseAffineMode::Calibrated) supported[camera][i] = 0;
+              if (calibration_only || pose_affine_plan.historical[camera][i] != PoseAffineMode::Calibrated)
+                supported[camera][i] = 0;
           for (size_t i = 0; i < accepted_pairs.size(); ++i)
           {
-            if (!accepted_pairs[i] || pose_affine_plan.pairs[i] != PoseAffineMode::Calibrated) continue;
+            if (!accepted_pairs[i] ||
+                (calibrated_affine && pose_affine_plan.pairs[i] != PoseAffineMode::Calibrated)) continue;
             const auto &pair = current_cross_camera_pairs_[i];
             const auto count = [&](int camera, int index) {
               if (camera >= 0 && camera < static_cast<int>(supported.size()) && index >= 0 &&
@@ -10549,6 +10636,9 @@ void VIOManager::computeJacobianAndUpdateEKF()
       compute_jacobian_time += omp_get_wtime() - linearize_start;
       if (measurement_count == 0)
       {
+        // All usable observations may have gone to calibration. Their normal
+        // map-quality evidence still belongs to the current, unchanged mean.
+        if (navigation_only && virtual_pose_affine_en) publish_patch_errors();
         if (virtual_pose_affine_en)
         {
           last_time_tracks = accepted_time_tracks;
@@ -10556,7 +10646,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
         }
         break;
       }
-      if (virtual_pose_affine_en &&
+      if ((virtual_pose_affine_en || calibration_only) &&
           (!has_previous_observation_set || accepted_history != previous_accepted_history ||
            accepted_pairs != previous_accepted_pairs))
       {
@@ -10580,15 +10670,10 @@ void VIOManager::computeJacobianAndUpdateEKF()
       {
         // Publish per-patch errors only after this state passes the cost test.
         // A rejected trial must not leave errors from a discarded mean in MM.
-        for (PerCameraData &camera : cameras_)
-        {
-          if (camera.visual_submap == nullptr) continue;
-          const auto &results = visual_patch_results_[camera.camera_id];
-          const size_t count = std::min(results.size(), camera.visual_submap->errors.size());
-          for (size_t i = 0; i < count; ++i)
-            if (results[i].has_error && !results[i].pose_affine_invalid)
-              camera.visual_submap->errors[i] = results[i].error;
-        }
+        publish_patch_errors();
+      }
+      if (virtual_pose_affine_en || calibration_only)
+      {
         previous_accepted_history = accepted_history;
         previous_accepted_pairs = accepted_pairs;
         has_previous_observation_set = true;
@@ -10642,11 +10727,12 @@ void VIOManager::computeJacobianAndUpdateEKF()
       rollback_last_max_time_update_ms = last_max_time_update_ms;
       rollback_directional_result = final_directional_result;
       rollback_posterior_covariance = final_posterior_covariance;
+      if (calibration_only) rollback_fused_pairs = fused_pairs;
       estimator_covariance::Update covariance_update;
       std::vector<int> active_update_indices;
       for (int index : solve_to_full)
       {
-        bool active = true;
+        bool active = !calibration_only;
         for (int camera_id = 0; camera_id < state->num_cameras; ++camera_id)
         {
           const int rotation = state->extrinsicRotIndex(camera_id);
@@ -10658,6 +10744,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
           if (index == state->timeOffsetIndex(group_id)) active = active_time_groups[group_id] != 0;
         if (active) active_update_indices.push_back(index);
       }
+      if (calibration_only && active_update_indices.empty()) break;
       std::string solve_error;
       auto factorSolveSystem = [&]() {
         try
@@ -10687,6 +10774,12 @@ void VIOManager::computeJacobianAndUpdateEKF()
       if (!calibrationUpdateWithinTrustRegion(solution, allow_extrinsic_rotation,
                                               allow_extrinsic_translation, active_time_groups))
       {
+        if (calibration_only)
+        {
+          restore_update_checkpoint(old_state);
+          update_ekf_time += omp_get_wtime() - update_start;
+          break;
+        }
         // Freeze gain rows, not covariance rows. Keep uncertainty and the
         // measurement Jacobians of these nuisance parameters in the solve.
         active_update_indices.erase(std::remove_if(active_update_indices.begin(), active_update_indices.end(),
@@ -10773,9 +10866,66 @@ void VIOManager::computeJacobianAndUpdateEKF()
         // then let the next, finer level build its own modes and valid set.
         break;
       }
+      if (calibration_only)
+      {
+        auto pair_has_information = [&](size_t pair_index, const Eigen::VectorXd &probe, double variance) {
+          const auto &range = pair_information_ranges[pair_index];
+          size_t value_index = range.values;
+          double information = 0.0, absolute_sum = 0.0;
+          for (int r = 0; r < range.size; ++r)
+            for (int c = r; c < range.size; ++c)
+            {
+              const double term = pair_information_values[value_index++] *
+                  probe[pair_information_columns[range.columns + r]] *
+                  probe[pair_information_columns[range.columns + c]] * (r == c ? 1.0 : 2.0);
+              information += term;
+              absolute_sum += std::fabs(term);
+            }
+          return std::isfinite(information) && information > 64.0 * std::numeric_limits<double>::epsilon() *
+              std::max(absolute_sum, measurement_cov * variance);
+        };
+        Eigen::VectorXd full_column(full_state_dim), probe(solve_dim), covariance_probe(solve_dim), mean_probe(solve_dim);
+        for (int index : active_update_indices)
+        {
+          // Recover the already solved B row: B_e = P_e - (K H)_e P.
+          // Check only photometric pair information, never calibration priors.
+          full_column.noalias() = iteration_prior_cov.col(index) -
+              iteration_prior_cov * covariance_update.gain_times_jacobian.row(index).transpose();
+          for (int i = 0; i < solve_dim; ++i) probe[i] = full_column[solve_to_full[i]];
+          covariance_probe = mean_probe = probe;
+          if (iteration_directional_result.valid)
+          {
+            const auto &filter = iteration_directional_result;
+            const Eigen::VectorXd modal = filter.normalized_eigenvectors.transpose() *
+                filter.prior_sqrt_lower.triangularView<Eigen::Lower>().solve(probe);
+            // The existing filter uses sqrt(W) for information components and
+            // W for the information vector. Both must have zero influence
+            // before an unused pair can be returned to navigation.
+            covariance_probe.noalias() = filter.prior_sqrt_lower * (filter.normalized_eigenvectors *
+                (filter.weights.cwiseSqrt().array() * modal.array()).matrix());
+            mean_probe.noalias() = filter.prior_sqrt_lower * (filter.normalized_eigenvectors *
+                (filter.weights.array() * modal.array()).matrix());
+          }
+          for (size_t i = 0; i < accepted_pairs.size(); ++i)
+            if (accepted_pairs[i] && !iteration_fused_pairs[i])
+              iteration_fused_pairs[i] = pair_has_information(i, covariance_probe, iteration_prior_cov(index, index)) ||
+                  pair_has_information(i, mean_probe, iteration_prior_cov(index, index));
+        }
+        if (std::none_of(iteration_fused_pairs.begin(), iteration_fused_pairs.end(), [](uint8_t used) { return used != 0; }))
+        {
+          restore_update_checkpoint(old_state);
+          update_ekf_time += omp_get_wtime() - update_start;
+          break;
+        }
+      }
       final_directional_result = iteration_directional_result;
       final_posterior_covariance = state->resetCovariance(covariance_update.covariance, solution);
       *state += solution;
+      if (calibration_only)
+        // Earlier accepted levels may have updated cameras frozen at this
+        // level. Keep their ownership until that update itself is rolled back.
+        for (size_t i = 0; i < accepted_pairs.size(); ++i)
+          fused_pairs[i] = fused_pairs[i] || iteration_fused_pairs[i];
       syncCameraExtrinsicsFromState(*state);
       update_ekf_time += omp_get_wtime() - update_start;
       double max_extrinsic_update = 0.0;
@@ -10825,22 +10975,25 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 << " dim=" << state->stateDim() << std::endl;
     }
   }
-  recordUsagePoseFrameInfo(usage_prior_cov, state->cov, usage_final_h_base,
+  if (!calibration_only) recordUsagePoseFrameInfo(usage_prior_cov, state->cov, usage_final_h_base,
                            usage_final_h_same, usage_final_h_cross, usage_final_h_current_cross,
                            usage_final_patches_all, usage_final_residuals_all,
                            usage_final_patches_same, usage_final_residuals_same,
                            usage_final_patches_cross, usage_final_residuals_cross,
                            usage_final_patches_current_cross, usage_final_residuals_current_cross);
-  online_calib_last_active_extrinsic_rot_ = final_active_extrinsic_rot;
-  online_calib_last_active_extrinsic_trans_ = final_active_extrinsic_trans;
+  if (!navigation_only)
+  {
+    online_calib_last_active_extrinsic_rot_ = final_active_extrinsic_rot;
+    online_calib_last_active_extrinsic_trans_ = final_active_extrinsic_trans;
+    online_calib_last_extrinsic_rot_update_deg_ = last_extrinsic_rot_update_deg;
+    online_calib_last_extrinsic_trans_update_cm_ = last_extrinsic_trans_update_cm;
+    online_calib_last_max_rot_update_deg_ = last_max_rot_update_deg;
+    online_calib_last_max_trans_update_cm_ = last_max_trans_update_cm;
+  }
   online_calib_last_active_time_groups_ = final_active_time_groups;
   online_calib_last_time_tracks_ = last_time_tracks;
   online_calib_last_time_avg_pixel_velocity_ = last_time_avg_pixel_velocity;
   online_calib_last_time_update_ms_ = last_time_update_ms;
-  online_calib_last_extrinsic_rot_update_deg_ = last_extrinsic_rot_update_deg;
-  online_calib_last_extrinsic_trans_update_cm_ = last_extrinsic_trans_update_cm;
-  online_calib_last_max_rot_update_deg_ = last_max_rot_update_deg;
-  online_calib_last_max_trans_update_cm_ = last_max_trans_update_cm;
   online_calib_last_max_time_update_ms_ = last_max_time_update_ms;
 
   constexpr double kAcceptedUpdateEps = 1.0e-12;
@@ -10877,6 +11030,17 @@ void VIOManager::computeJacobianAndUpdateEKF()
   if (accepted_extrinsic_this_frame) ++online_extrinsic_accept_count_;
   if (attempted_time_this_frame) ++online_time_offset_attempt_count_;
   if (accepted_time_this_frame) ++online_time_offset_accept_count_;
+  if (calibration_only)
+    for (size_t i = 0; i < fused_pairs.size(); ++i)
+    {
+      if (!fused_pairs[i]) continue;
+      auto &pair = current_cross_camera_pairs_[i];
+      (*covis_used)[pair.source_camera_id][pair.source_submap_index] = 1;
+      (*covis_used)[pair.target_camera_id][pair.target_submap_index] = 1;
+      // Exclude this fused residual, not every pair sharing either endpoint.
+      // Unused pairs retain their original navigation/fallback path.
+      pair.accepted = false;
+    }
   for (PerCameraData &ctx : cameras_) updateFrameState(ctx, *state);
 }
 

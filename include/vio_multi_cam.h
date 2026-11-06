@@ -470,6 +470,7 @@ public:
   double directional_drop_variance_reduction = 0.05;
   double directional_full_variance_reduction = 0.50;
   bool online_extrinsic_en = false;
+  bool online_extrinsic_covis_only_en = false;
   bool online_extrinsic_rot_en = true;
   bool online_extrinsic_trans_en = true;
   bool online_extrinsic_prior_factor_en = false;
@@ -1127,6 +1128,9 @@ public:
   void computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J);
   void computeVirtualProjectionJacobian(const V3D &p_v, MD(2, 3) &J) const;
   void computeJacobianAndUpdateEKF();
+  enum class VisualUpdatePass { Joint, CovisibleExtrinsics, Navigation };
+  void computeJacobianAndUpdateEKFImpl(VisualUpdatePass pass,
+      std::vector<std::vector<uint8_t>> *covis_used = nullptr);
   bool referenceUncertaintyJacobian(const Feature &reference, const VisualPoint &point,
                                     const std::vector<float> &warped_patch, const Matrix2d &affine,
                                     int level, double scale, Eigen::MatrixXd &jacobian) const;
@@ -1243,7 +1247,8 @@ public:
       const M3D &virtual_from_camera, const SE3d &camera_from_body,
       pose_affine_warp::CalibrationEvaluation &evaluation) const;
   PoseAffineLevelPlan buildPoseAffineLevelPlan(int level, const StatesGroup &base,
-      const StatesGroup *navigation_calibration = nullptr, bool allow_calibration = true);
+      const StatesGroup *navigation_calibration = nullptr, bool allow_calibration = true,
+      bool current_pairs_only = false);
   bool poseAffineHistoricalSamplesValid(int level, const PerCameraData &ctx, int point_index,
                                         const StatesGroup &value, PoseAffineMode mode,
                                         const SE3d *fixed_camera = nullptr, bool check_photometric = false) const;
