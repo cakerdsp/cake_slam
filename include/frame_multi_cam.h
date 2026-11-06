@@ -37,7 +37,7 @@ public:
   double capture_timestamp_; //!< raw_timestamp_ + current nominal time offset + exposure offset.
   double td_used_;           //!< Time offset used when the frame entered the synchronized queue.
   double exposure_time_offset_;
-  double time_offset_delta_; //!< Current nominal td minus td_used_.
+  double time_offset_delta_; //!< Capture time relative to the common state time, including the td correction.
   int time_offset_group_;
   vk::AbstractCamera *cam_;  //!< Camera model.
   SE3d T_f_w_;                //!< Transform (f)rame from (w)orld.

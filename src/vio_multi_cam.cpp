@@ -12966,7 +12966,8 @@ void VIOManager::updateFrameState(PerCameraData &ctx, const StatesGroup &state_v
     double td_state = ctx.new_frame->td_used_;
     if (group_id >= 0 && group_id < state_value.num_time_offset_groups)
       td_state = state_value.time_offset[group_id];
-    time_offset_delta = td_state - ctx.new_frame->td_used_;
+    time_offset_delta = (frame_time - current_state_timestamp_) +
+                        (td_state - ctx.new_frame->td_used_);
     if (!std::isfinite(time_offset_delta)) time_offset_delta = 0.0;
     ctx.new_frame->time_offset_delta_ = time_offset_delta;
   }
@@ -13380,6 +13381,7 @@ void VIOManager::drawOpticalFlowDebugImage(const std::vector<cv::Point2f> &rejec
 void VIOManager::processFrameOpticalFlow(cv::Mat &img, double img_time)
 {
   if (cameras_.empty()) return;
+  current_state_timestamp_ = img_time;
   PerCameraData &ctx = cameras_.front();
   if (ctx.width != img.cols || ctx.height != img.rows)
   {
@@ -13552,6 +13554,7 @@ void VIOManager::processFrameFake(cv::Mat &img, vector<pointWithVar> &pg, const 
   (void)pg;
   (void)feat_map;
   if (cameras_.empty()) return;
+  current_state_timestamp_ = img_time;
   PerCameraData &ctx = cameras_.front();
   if (ctx.width != img.cols || ctx.height != img.rows)
   {
@@ -13573,6 +13576,7 @@ void VIOManager::processMultiCameraFrameFake(const MeasureGroup &meas)
     throw std::runtime_error("color-only multi-camera mode requires MeasureGroup::multi_cam_frame");
 
   const MultiCameraFrame &mf = meas.multi_cam_frame;
+  current_state_timestamp_ = mf.timestamp;
   if (static_cast<int>(mf.images.size()) != numCameras())
     throw std::runtime_error("MultiCameraFrame image count does not match VIOManager camera count");
 
@@ -13671,7 +13675,7 @@ bool VIOManager::buildColorGraySnapshot(
                           ? mf.time_offset_group[camera_id] : ctx.time_offset_group;
     const double td_state = group >= 0 && group < state->num_time_offset_groups
                                 ? state->time_offset[group] : td_used;
-    const double td_delta = td_state - td_used;
+    const double td_delta = (mf.capture_timestamps[camera_id] - mf.timestamp) + (td_state - td_used);
     if (!std::isfinite(td_delta) || !state->rot_end.allFinite() || !state->pos_end.allFinite() ||
         !state->vel_end.allFinite() || !state->Rcl[camera_id].allFinite() ||
         !state->Pcl[camera_id].allFinite())
@@ -13821,6 +13825,7 @@ bool VIOManager::installFixedGrayWeights(const std::vector<Eigen::Vector3d> &wei
 void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointWithVar> &pg,
                                          const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
+  current_state_timestamp_ = meas.multi_cam_frame.timestamp;
   // The baseline and budget paths use the same resize rule. Validate masked
   // inputs here without changing the unmasked baseline dispatch.
   if (meas.has_multi_cam_frame)

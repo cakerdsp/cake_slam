@@ -684,6 +684,7 @@ public:
   uint64_t next_visual_ref_id_ = 1;
   uint64_t extrinsic_version_ = 1;
   V3D current_unbiased_gyr_ = V3D::Zero();
+  double current_state_timestamp_ = 0.0;  // Common LIO state time for the current camera group.
   std::vector<VisualPoint *> retired_visual_points_;
   std::vector<std::pair<VisualPoint *, Feature *>> retired_visual_refs_;
   std::set<uint64_t> shadow_retired_point_suggestions_;
