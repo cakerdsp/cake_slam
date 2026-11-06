@@ -13112,6 +13112,8 @@ bool VIOManager::getColorFromCamera(int camera_id, const V3D &p_w, V3F &bgr, dou
   if (!ctx.image_mask.empty() && ctx.img_rgb.size() != ctx.image_mask.size()) return false;
   const V3D point_c = ctx.new_frame->w2f(p_w);
   if (!point_c.array().isFinite().all()) return false;
+  // Color only the front hemisphere of this camera; visual tracking keeps its full FoV.
+  if (point_c.z() <= 0.0) return false;
   if (cam_range != nullptr) *cam_range = point_c.norm();
   const V2D pixel = ctx.cam->world2cam(point_c);
   if (!pixel.array().isFinite().all() || !ctx.cam->isInFrame(pixel.cast<int>(), 1)) return false;

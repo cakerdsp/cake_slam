@@ -2785,6 +2785,7 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
     int active_color_workers = 1;
 
     std::vector<uint8_t> colored(pcl_wait_pub->size(), 0);
+    std::vector<uint8_t> camera_colored(pcl_wait_pub->size(), 0);
     std::vector<PointTypeRGB> rgb_points(pcl_wait_pub->size());
     std::vector<size_t> projection_rejects(camera_count, 0);
     std::vector<size_t> blind_rejects(camera_count, 0);
@@ -2806,29 +2807,31 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
     std::vector<std::vector<double>> thread_b_sum(
         color_worker_count, std::vector<double>(camera_count, 0.0));
 
-    // Each point is independent; camera order stays serial per point to preserve first-hit priority.
+    // Emit every valid camera observation, including repeated XYZ in overlapping views.
+    // Reuse one camera's buffers; compact in input order after its workers finish.
     const double color_start = omp_get_wtime();
-#pragma omp parallel num_threads(color_worker_count) if(point_count >= 1024)
+    laserCloudWorldRGB->reserve(pcl_wait_pub->size());
+    for (int camera_id = 0; camera_id < camera_count; ++camera_id)
     {
+#pragma omp parallel num_threads(color_worker_count) if(point_count >= 1024)
+      {
 #pragma omp single
-      active_color_workers = omp_get_num_threads();
+        active_color_workers = omp_get_num_threads();
 
-      const int thread_id = omp_get_thread_num();
-      std::vector<size_t> &local_projection_rejects = thread_projection_rejects[thread_id];
-      std::vector<size_t> &local_blind_rejects = thread_blind_rejects[thread_id];
-      std::vector<size_t> &local_color_hits = thread_color_hits[thread_id];
-      std::vector<double> &local_r_sum = thread_r_sum[thread_id];
-      std::vector<double> &local_g_sum = thread_g_sum[thread_id];
-      std::vector<double> &local_b_sum = thread_b_sum[thread_id];
+        const int thread_id = omp_get_thread_num();
+        std::vector<size_t> &local_projection_rejects = thread_projection_rejects[thread_id];
+        std::vector<size_t> &local_blind_rejects = thread_blind_rejects[thread_id];
+        std::vector<size_t> &local_color_hits = thread_color_hits[thread_id];
+        std::vector<double> &local_r_sum = thread_r_sum[thread_id];
+        std::vector<double> &local_g_sum = thread_g_sum[thread_id];
+        std::vector<double> &local_b_sum = thread_b_sum[thread_id];
 
 #pragma omp for schedule(static)
-      for (long long point_index = 0; point_index < point_count; ++point_index)
-      {
-        const size_t i = static_cast<size_t>(point_index);
-        const PointType &point = pcl_wait_pub->points[i];
-
-        for (int camera_id = 0; camera_id < camera_count; ++camera_id)
+        for (long long point_index = 0; point_index < point_count; ++point_index)
         {
+          const size_t i = static_cast<size_t>(point_index);
+          const PointType &point = pcl_wait_pub->points[i];
+          camera_colored[i] = 0;
           V3F bgr;
           double camera_range = 0.0;
           if (!vio_manager->getColorFromCamera(
@@ -2851,14 +2854,16 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
           output.g = static_cast<uint8_t>(std::clamp(bgr[1], 0.0f, 255.0f));
           output.b = static_cast<uint8_t>(std::clamp(bgr[0], 0.0f, 255.0f));
           rgb_points[i] = output;
+          camera_colored[i] = 1;
           colored[i] = 1;
           ++local_color_hits[camera_id];
           local_r_sum[camera_id] += output.r;
           local_g_sum[camera_id] += output.g;
           local_b_sum[camera_id] += output.b;
-          break;
         }
       }
+      for (size_t i = 0; i < rgb_points.size(); ++i)
+        if (camera_colored[i]) laserCloudWorldRGB->push_back(rgb_points[i]);
     }
 
     for (int thread_id = 0; thread_id < color_worker_count; ++thread_id)
@@ -2874,14 +2879,12 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
       }
     }
     const double color_elapsed = omp_get_wtime() - color_start;
-    laserCloudWorldRGB->reserve(pcl_wait_pub->size());
-    for (size_t i = 0; i < rgb_points.size(); ++i)
-      if (colored[i]) laserCloudWorldRGB->push_back(rgb_points[i]);
     const bool has_camera_color = !laserCloudWorldRGB->empty();
-    printf("[ VIO Color ] input=%zu colored=%zu retained=%zu output_schema=rgb mode=%s\n",
+    printf("[ VIO Color ] input=%zu colored=%zu retained=%zu output_points=%zu output_schema=rgb mode=%s\n",
            pcl_wait_pub->size(),
            static_cast<size_t>(std::count(colored.begin(), colored.end(), static_cast<uint8_t>(1))),
            has_camera_color ? 0UL : pcl_wait_pub->size(),
+           laserCloudWorldRGB->size(),
            has_camera_color ? "camera_color" : "empty_rgb_retry");
     printf("[ VIO Color Timing ] elapsed=%.6f s workers=%d points=%lld cameras=%d\n",
            color_elapsed, active_color_workers, point_count, camera_count);

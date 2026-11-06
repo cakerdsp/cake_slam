@@ -3,6 +3,7 @@
 #include <Eigen/LU>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <omp.h>
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -28,7 +29,20 @@ struct CameraFixture
   bool isInFrame(const Eigen::Vector2i &p, int border) const
   { return p.x() >= border && p.y() >= border && p.x() < 256-border && p.y() < 256-border; }
 };
-struct FrameFixture { V3D w2f(const V3D &p) const { return p; } };
+struct FrameFixture
+{
+  Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
+  V3D translation = V3D::Zero();
+  V3D w2f(const V3D &p) const { return rotation * p + translation; }
+};
+struct PointType { float x, y, z; };
+struct PointTypeRGB { float x, y, z; uint8_t r, g, b; };
+struct ColorInputFixture
+{
+  std::vector<PointType> points;
+  size_t size() const { return points.size(); }
+};
+constexpr int MP_PROC_NUM = 4;
 
 #include "camera_mask_impl.inc"
 
@@ -59,10 +73,8 @@ void testColorRejectsEveryTapAndUsesOtherCamera()
       V3F color = V3F::Constant(-1);
       require(!manager.getColorFromCamera(0, point, color), "any invalid bilinear tap rejects color");
       require((color.array() == -1).all(), "reject occurs before changing the color output");
-      int selected = -1;
-      for (int i = 0; i < manager.numCameras(); ++i)
-        if (manager.getColorFromCamera(i, point, color)) { selected = i; break; }
-      require(selected == 1 && (color-V3F(30,60,90)).norm() < 1e-5, "other camera supplies valid color");
+      require(manager.getColorFromCamera(1, point, color) && (color-V3F(30,60,90)).norm() < 1e-5,
+              "other camera supplies valid color");
       manager.cameras_[1].setImageMask(mask);
       require(!manager.getColorFromCamera(1, point, color), "all masked cameras yield no color");
       manager.cameras_[1].setImageMask(cv::Mat());
@@ -77,6 +89,94 @@ void testColorRejectsEveryTapAndUsesOtherCamera()
   manager.cameras_[0].setImageMask(cv::Mat(256,256,CV_8UC1,cv::Scalar(255)));
   manager.cameras_[0].img_rgb.setTo(cv::Scalar(0,0,0));
   require(manager.getColorFromCamera(0, point, color) && color.norm() == 0, "valid black scene is not masked");
+}
+
+void testColorFrontHemispherePerCamera()
+{
+  CameraFixture camera;
+  VIOManager manager;
+  manager.cameras_.resize(2);
+  for (auto &ctx : manager.cameras_)
+  {
+    ctx.cam = &camera;
+    ctx.new_frame = std::make_shared<FrameFixture>();
+    ctx.img_rgb = cv::Mat(256,256,CV_8UC3,cv::Scalar(30,60,90));
+  }
+  // Opposite-facing camera: a world point behind camera 0 is in front of camera 1.
+  auto &opposite = *manager.cameras_[1].new_frame;
+  opposite.rotation(0,0) = -1;
+  opposite.rotation(2,2) = -1;
+  opposite.translation.x() = 200;
+  V3F color = V3F::Constant(-1);
+  for (double z : {-1.0, 0.0})
+  {
+    require(!manager.getColorFromCamera(0,V3D(100,110,z),color), "camera z <= 0 is excluded");
+    require((color.array() == -1).all(), "hemisphere rejection happens before sampling");
+  }
+  require(manager.getColorFromCamera(0,V3D(100,110,1e-6),color), "strictly positive camera z is allowed");
+  require(!manager.getColorFromCamera(1,V3D(100,110,1),color), "each camera applies its own orientation");
+  require(manager.getColorFromCamera(1,V3D(100,110,-1),color), "world negative z may be camera positive z");
+  require(!manager.getColorFromCamera(1,V3D(100,110,0),color), "opposite camera also excludes z = 0");
+}
+
+void testEveryValidCameraObservationIsEmitted()
+{
+  CameraFixture camera;
+  VIOManager manager;
+  manager.cameras_.resize(3);
+  for (int id = 0; id < manager.numCameras(); ++id)
+  {
+    auto &ctx = manager.cameras_[id];
+    ctx.cam = &camera;
+    ctx.new_frame = std::make_shared<FrameFixture>();
+    ctx.img_rgb = cv::Mat(256,256,CV_8UC3,cv::Scalar(10+id,20+id,30+id));
+  }
+  auto input = std::make_shared<ColorInputFixture>();
+  input->points = {{100.25f,110.5f,1.0f},{130.25f,135.5f,1.0f}};
+  auto output = colorCloud(&manager,input);
+  require(output.size() == 6, "two points visible in three cameras emit six observations");
+  for (size_t i = 0; i < output.size(); ++i)
+  {
+    const auto &point = input->points[i%2];
+    require(output[i].x == point.x && output[i].y == point.y && output[i].z == point.z,
+            "camera-major output retains each observation's original XYZ");
+    require(output[i].r == 30+i/2 && output[i].g == 20+i/2 && output[i].b == 10+i/2,
+            "each copy retains its own camera's RGB");
+  }
+  cv::Mat mask(256,256,CV_8UC1,cv::Scalar(255));
+  mask.at<uchar>(110,100) = 0;
+  manager.cameras_[1].setImageMask(mask);
+  output = colorCloud(&manager,input);
+  require(output.size() == 5 && output[2].x == input->points[1].x && output[2].r == 31,
+          "one camera's mask removes only its invalid observation, without stale output");
+  manager.cameras_[2].new_frame->translation.z() = -2;
+  output = colorCloud(&manager,input);
+  require(output.size() == 3, "rear-facing observations are excluded per camera in the actual output loop");
+  require(colorCloud(&manager,input,1000).empty(), "distance rejection cannot reuse previous camera output");
+  for (auto &ctx : manager.cameras_) ctx.setImageMask(cv::Mat::zeros(256,256,CV_8UC1));
+  require(colorCloud(&manager,input).empty(), "all masked observations emit nothing");
+
+  for (auto &ctx : manager.cameras_)
+  {
+    ctx.setImageMask(cv::Mat());
+    ctx.new_frame->translation.setZero();
+  }
+  input->points.clear();
+  for (int i = 0; i < 2048; ++i) input->points.push_back({100.25f+i%31,110.5f,1.0f});
+  const int old_threads = omp_get_max_threads();
+  omp_set_num_threads(1);
+  const auto serial = colorCloud(&manager,input);
+  omp_set_num_threads(4);
+  const auto parallel = colorCloud(&manager,input);
+  omp_set_num_threads(old_threads);
+  require(serial.size() == 6144 && parallel.size() == serial.size(), "parallel path preserves all camera observations");
+  for (size_t i = 0; i < serial.size(); ++i)
+  {
+    const auto &a = serial[i];
+    const auto &b = parallel[i];
+    require(a.x==b.x && a.y==b.y && a.z==b.z && a.r==b.r && a.g==b.g && a.b==b.b,
+            "parallel emission has deterministic camera and point order");
+  }
 }
 
 void testRawSamplingAndRoi()
@@ -177,10 +277,12 @@ int main()
   try
   {
     testColorRejectsEveryTapAndUsesOtherCamera();
+    testColorFrontHemispherePerCamera();
+    testEveryValidCameraObservationIsEmitted();
     testRawSamplingAndRoi();
     testPatchesAndReferenceCamera();
     testFilteredSupportAndOpticalFlow();
-    std::cout << "camera_mask_test passed: production color, sampling, ROI, patch and filter checks\n";
+    std::cout << "camera_mask_test passed: production multi-camera emission, front hemisphere, mask and sampling checks\n";
     return 0;
   }
   catch (const std::exception &error)

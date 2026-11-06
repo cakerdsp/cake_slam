@@ -51,4 +51,17 @@ output.append("};")
 for signature in methods:
     result, name = signature.split(" ", 1)
     output.append(definition(source, result + " VIOManager::" + name + "("))
+
+# Exercise the actual multi-camera emission loop, including its OpenMP region,
+# with simple point containers instead of requiring ROS publishers and PCL.
+mapper_path = root / "src/LIVMapper_multi_cam.cpp"
+mapper = mapper_path.read_text(encoding="utf-8")
+publish_start = mapper.index("void LIVMapper::publish_frame_world(")
+color_start = mapper.index("    const int camera_count = vio_manager->numCameras();", publish_start)
+color_end = mapper.index("\n  }\n  else\n", color_start)
+output += ["std::vector<PointTypeRGB> colorCloud(VIOManager *vio_manager,\n"
+           "    const std::shared_ptr<ColorInputFixture> &pcl_wait_pub, double blind_rgb_points = 0.0) {\n"
+           "  auto laserCloudWorldRGB = std::make_shared<std::vector<PointTypeRGB>>();",
+           f'#line {mapper.count(chr(10), 0, color_start) + 1} "{mapper_path.as_posix()}"',
+           mapper[color_start:color_end], "  return *laserCloudWorldRGB;\n}"]
 args.output.write_text("\n".join(output), encoding="utf-8")
