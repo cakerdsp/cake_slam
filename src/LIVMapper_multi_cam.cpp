@@ -567,6 +567,9 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<std::string>("debug.runtime_support_dump_folder", "runtime_support");
 
   try_declare.template operator()<double>("publish.blind_rgb_points", 0.01);
+  try_declare.template operator()<bool>("publish.color_range_en", false);
+  try_declare.template operator()<double>("publish.color_min_distance", 0.0);
+  try_declare.template operator()<double>("publish.color_max_distance", 5.0);
   try_declare.template operator()<int>("publish.pub_scan_num", 1);
   try_declare.template operator()<bool>("publish.pub_effect_point_en", false);
   try_declare.template operator()<bool>("publish.dense_map_en", false);
@@ -840,9 +843,21 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "debug.runtime_support_dump_folder", runtime_support_dump_folder);
 
   getRosParam(this->node, "publish.blind_rgb_points", blind_rgb_points);
+  getRosParam(this->node, "publish.color_range_en", color_range_en);
+  getRosParam(this->node, "publish.color_min_distance", color_min_distance);
+  getRosParam(this->node, "publish.color_max_distance", color_max_distance);
   getRosParam(this->node, "publish.pub_scan_num", pub_scan_num);
   getRosParam(this->node, "publish.pub_effect_point_en", pub_effect_point_en);
   getRosParam(this->node, "publish.dense_map_en", dense_map_en);
+
+  if (color_range_en &&
+      (!std::isfinite(color_min_distance) || !std::isfinite(color_max_distance) ||
+       color_min_distance < 0.0 || color_max_distance < color_min_distance))
+    throw std::runtime_error("publish color range requires finite 0 <= color_min_distance <= color_max_distance (meters)");
+
+  if (color_range_en)
+    printf("[ VIO Color ] distance range enabled: [%.3f, %.3f] m from each camera; blind_rgb_points=%.3f m\n",
+           color_min_distance, color_max_distance, blind_rgb_points);
 
   if (!std::isfinite(ncc_thre) || ncc_thre < -1.0 || ncc_thre > 1.0)
     throw std::runtime_error("vio.ncc_thre must be finite and in [-1, 1]");
@@ -2789,6 +2804,7 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
     std::vector<PointTypeRGB> rgb_points(pcl_wait_pub->size());
     std::vector<size_t> projection_rejects(camera_count, 0);
     std::vector<size_t> blind_rejects(camera_count, 0);
+    std::vector<size_t> range_rejects(camera_count, 0);
     std::vector<size_t> color_hits(camera_count, 0);
     std::vector<double> sampled_r_sum(camera_count, 0.0);
     std::vector<double> sampled_g_sum(camera_count, 0.0);
@@ -2797,6 +2813,8 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
     std::vector<std::vector<size_t>> thread_projection_rejects(
         color_worker_count, std::vector<size_t>(camera_count, 0));
     std::vector<std::vector<size_t>> thread_blind_rejects(
+        color_worker_count, std::vector<size_t>(camera_count, 0));
+    std::vector<std::vector<size_t>> thread_range_rejects(
         color_worker_count, std::vector<size_t>(camera_count, 0));
     std::vector<std::vector<size_t>> thread_color_hits(
         color_worker_count, std::vector<size_t>(camera_count, 0));
@@ -2821,6 +2839,7 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
         const int thread_id = omp_get_thread_num();
         std::vector<size_t> &local_projection_rejects = thread_projection_rejects[thread_id];
         std::vector<size_t> &local_blind_rejects = thread_blind_rejects[thread_id];
+        std::vector<size_t> &local_range_rejects = thread_range_rejects[thread_id];
         std::vector<size_t> &local_color_hits = thread_color_hits[thread_id];
         std::vector<double> &local_r_sum = thread_r_sum[thread_id];
         std::vector<double> &local_g_sum = thread_g_sum[thread_id];
@@ -2843,6 +2862,13 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
           if (camera_range < blind_rgb_points)
           {
             ++local_blind_rejects[camera_id];
+            continue;
+          }
+          // Euclidean distance from this camera, independent of world origin or optical-axis depth.
+          if (color_range_en && (!std::isfinite(camera_range) ||
+                                 camera_range < color_min_distance || camera_range > color_max_distance))
+          {
+            ++local_range_rejects[camera_id];
             continue;
           }
 
@@ -2872,6 +2898,7 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
       {
         projection_rejects[camera_id] += thread_projection_rejects[thread_id][camera_id];
         blind_rejects[camera_id] += thread_blind_rejects[thread_id][camera_id];
+        range_rejects[camera_id] += thread_range_rejects[thread_id][camera_id];
         color_hits[camera_id] += thread_color_hits[thread_id][camera_id];
         sampled_r_sum[camera_id] += thread_r_sum[thread_id][camera_id];
         sampled_g_sum[camera_id] += thread_g_sum[thread_id][camera_id];
@@ -2894,8 +2921,9 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
       const double mean_r = hit_count > 0.0 ? sampled_r_sum[camera_id] / hit_count : 0.0;
       const double mean_g = hit_count > 0.0 ? sampled_g_sum[camera_id] / hit_count : 0.0;
       const double mean_b = hit_count > 0.0 ? sampled_b_sum[camera_id] / hit_count : 0.0;
-      printf("[ VIO Color ] camera_id=%d hits=%zu projection_rejects=%zu blind_rejects=%zu sampled_rgb_mean=(%.1f,%.1f,%.1f)\n",
+      printf("[ VIO Color ] camera_id=%d hits=%zu projection_rejects=%zu blind_rejects=%zu range_rejects=%zu sampled_rgb_mean=(%.1f,%.1f,%.1f)\n",
              camera_id, color_hits[camera_id], projection_rejects[camera_id], blind_rejects[camera_id],
+             range_rejects[camera_id],
              mean_r, mean_g, mean_b);
     }
   }

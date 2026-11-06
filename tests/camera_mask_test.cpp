@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -179,6 +180,67 @@ void testEveryValidCameraObservationIsEmitted()
   }
 }
 
+void testColorDistanceRange()
+{
+  CameraFixture camera;
+  VIOManager manager;
+  manager.cameras_.resize(2);
+  for (int id = 0; id < manager.numCameras(); ++id)
+  {
+    auto &ctx = manager.cameras_[id];
+    ctx.cam = &camera;
+    ctx.new_frame = std::make_shared<FrameFixture>();
+    ctx.img_rgb = cv::Mat(256,256,CV_8UC3,cv::Scalar(10,20,30+id));
+  }
+  auto input = std::make_shared<ColorInputFixture>();
+  const std::vector<PointType> points = {{1,2,2},{2,3,6},{3,4,12},{1,2,1}};
+  input->points = points; // Distances: 3, 7, 13, sqrt(6).
+  require(colorCloud(&manager,input,0,false,6,5).size() == 8,
+          "disabled range ignores its bounds and preserves every valid camera observation");
+  auto output = colorCloud(&manager,input,0,true,3,7);
+  require(output.size() == 4 && output[0].z == 2 && output[1].z == 6 && output[2].r == 31,
+          "inclusive minimum and maximum accept exact boundaries in every camera");
+  output = colorCloud(&manager,input,4,true,3,7);
+  require(output.size() == 2 && output[0].z == 6 && output[1].z == 6,
+          "legacy blind distance remains active alongside the new range");
+  output = colorCloud(&manager,input,0,true,0,5);
+  require(output.size() == 4 && output[0].z == 2 && output[1].z == 1,
+          "five-meter maximum excludes more distant observations");
+  input->points = {{4,4,1}};
+  require(colorCloud(&manager,input,0,true,0,5).empty(),
+          "range uses three-dimensional distance, not just optical-axis depth");
+
+  input->points = points;
+  manager.cameras_[1].new_frame->translation = V3D(-2,-2,-11);
+  output = colorCloud(&manager,input,0,true,0,5);
+  require(output.size() == 3 && output[2].x == 3 && output[2].y == 4 && output[2].z == 12 && output[2].r == 31,
+          "a distant world point is colored only by the nearby camera, using that camera's distance");
+  cv::Mat mask(256,256,CV_8UC1,cv::Scalar(255));
+  mask.at<uchar>(2,1) = 0;
+  manager.cameras_[1].setImageMask(mask);
+  require(colorCloud(&manager,input,0,true,0,5).size() == 2,
+          "being inside the distance range does not bypass camera masks");
+  manager.cameras_[1].setImageMask(cv::Mat());
+
+  input->points.clear();
+  for (int i = 0; i < 2048; ++i) input->points.push_back(points[i%4]);
+  const int old_threads = omp_get_max_threads();
+  omp_set_num_threads(4);
+  require(colorCloud(&manager,input,0,true,0,5).size() == 1536,
+          "parallel range filtering preserves the correct count for cameras with different positions");
+  omp_set_num_threads(old_threads);
+
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  for (const auto &bounds : std::vector<V2D>{V2D(-1,5),V2D(6,5),V2D(nan,5),V2D(0,inf)})
+  {
+    bool rejected = false;
+    try { colorCloud(&manager,input,0,true,bounds.x(),bounds.y()); }
+    catch (const std::runtime_error &) { rejected = true; }
+    require(rejected, "enabled range rejects negative, reversed or non-finite configuration");
+  }
+}
+
 void testRawSamplingAndRoi()
 {
   PerCameraData ctx;
@@ -279,10 +341,11 @@ int main()
     testColorRejectsEveryTapAndUsesOtherCamera();
     testColorFrontHemispherePerCamera();
     testEveryValidCameraObservationIsEmitted();
+    testColorDistanceRange();
     testRawSamplingAndRoi();
     testPatchesAndReferenceCamera();
     testFilteredSupportAndOpticalFlow();
-    std::cout << "camera_mask_test passed: production multi-camera emission, front hemisphere, mask and sampling checks\n";
+    std::cout << "camera_mask_test passed: production multi-camera emission, distance range, front hemisphere, mask and sampling checks\n";
     return 0;
   }
   catch (const std::exception &error)
