@@ -18,6 +18,7 @@ which is included as part of this source code package.
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <opencv2/imgcodecs.hpp>
 #include <cstdio>
 #include <iomanip>
 #include <limits>
@@ -605,6 +606,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
     const std::string camera_cfg_ns = "cameras.camera" + std::to_string(camera_id);
     const std::string topic_key = camera_cfg_ns + ".img_topic";
     const std::string namespace_key = camera_cfg_ns + ".camera_ns";
+    const std::string mask_key = camera_cfg_ns + ".mask_path";
     const std::string image_undistort_key = camera_cfg_ns + ".image_undistort_en";
     const std::string raw_namespace_key = camera_cfg_ns + ".raw_camera_ns";
     const std::string rotation_key = camera_cfg_ns + ".Rcl";
@@ -614,6 +616,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
     const std::string online_time_offset_key = camera_cfg_ns + ".online_time_offset_en";
     try_declare.template operator()<std::string>(topic_key, "");
     try_declare.template operator()<std::string>(namespace_key, "");
+    try_declare.template operator()<std::string>(mask_key, "");
     try_declare.template operator()<bool>(image_undistort_key, false);
     try_declare.template operator()<std::string>(raw_namespace_key, "");
     try_declare.template operator()<vector<double>>(rotation_key, vector<double>{});
@@ -623,6 +626,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
     try_declare.template operator()<bool>(online_time_offset_key, true);
     getRosParam(nh, topic_key, camera_configs[camera_id].img_topic);
     getRosParam(nh, namespace_key, camera_configs[camera_id].camera_namespace);
+    getRosParam(nh, mask_key, camera_configs[camera_id].mask_path);
     getRosParam(nh, image_undistort_key, camera_configs[camera_id].image_undistort_en);
     getRosParam(nh, raw_namespace_key, camera_configs[camera_id].raw_camera_namespace);
     getRosParam(nh, rotation_key, camera_configs[camera_id].Rcl);
@@ -1018,6 +1022,24 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
              config.undistort_map_x.cols, config.undistort_map_x.rows);
     }
     vio_manager->setCameraCalibration(camera_id, config.img_topic, config.camera_namespace, config.Rcl, config.Pcl);
+    if (!config.mask_path.empty())
+    {
+      // Paths in dataset YAMLs are relative to the project, never to the process cwd.
+      const std::filesystem::path configured_path(config.mask_path);
+      const std::filesystem::path mask_path = configured_path.is_absolute()
+          ? configured_path : std::filesystem::path(ROOT_DIR) / configured_path;
+      const cv::Mat mask = cv::imread(mask_path.string(), cv::IMREAD_GRAYSCALE);
+      if (mask.empty())
+        throw std::runtime_error("failed to read camera mask: camera_id=" + std::to_string(camera_id) +
+                                 " path=" + mask_path.string());
+      if (mask.cols != ctx.cam->width() || mask.rows != ctx.cam->height())
+        throw std::runtime_error("camera mask dimensions must match the VIO image: camera_id=" +
+                                 std::to_string(camera_id) + " path=" + mask_path.string());
+      ctx.setImageMask(mask);
+      printf("[ Camera Mask ] camera_id=%d topic=%s path=%s size=%dx%d valid=%d/%d\n",
+             camera_id, config.img_topic.c_str(), mask_path.string().c_str(), mask.cols, mask.rows,
+             cv::countNonZero(ctx.image_mask), mask.rows * mask.cols);
+    }
     vio_manager->setCameraModelJacobianParameters(camera_id, config.camera_model_type,
                                                   config.k1, config.k2, config.k3, config.k4,
                                                   config.xi, config.p1, config.p2);

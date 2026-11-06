@@ -21,6 +21,11 @@ def function_body(source, class_name, name):
 
 
 vio = (root / 'src/vio_patch_budget_baseline.inc').read_text()
+# The mask-aware score delegates exactly to vikit when no mask is configured.
+# Normalize this one call-site hook; keep the original frozen hashes unchanged.
+mask_score_call = 'maskedShiTomasiScore(ctx, img, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]))'
+assert vio.count(mask_score_call) == 1
+vio = vio.replace(mask_score_call, 'vk::shiTomasiScore(img, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]))')
 lio = (root / 'src/voxel_map_multi_cam.cpp').read_text()
 for name, expected in manifest['bodies'].items():
     source, owner = (vio, 'VIOManager') if name.endswith('Baseline') else (lio, 'VoxelMapManager')

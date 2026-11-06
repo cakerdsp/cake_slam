@@ -18,6 +18,7 @@ common:
 cameras:
   camera0:
     img_topic: "/fisheye/left/image_raw"
+    mask_path: "mask/left.png"  # Mocap only; VIO image coordinates, white=valid.
     camera_ns: "camera0"
     image_undistort_en: false
     raw_camera_ns: "camera0"
@@ -50,6 +51,7 @@ cameras:
     online_time_offset_en: true
   camera1:
     img_topic: "/fisheye/right/image_raw"
+    mask_path: "mask/right.png"
     camera_ns: "camera1"
     image_undistort_en: false
     raw_camera_ns: "camera1"
@@ -72,6 +74,7 @@ cameras:
 
   camera2:
     img_topic: "/fisheye/bright/image_raw"
+    mask_path: ""  # No bright mask supplied yet; do not reuse left/right.
     camera_ns: "camera2"
     image_undistort_en: false
     raw_camera_ns: "camera2"

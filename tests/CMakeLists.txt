@@ -54,6 +54,20 @@ endforeach()
 find_package(OpenCV QUIET COMPONENTS core imgproc)
 if(OpenCV_FOUND)
   find_package(Threads REQUIRED)
+  set(mask_impl ${CMAKE_CURRENT_BINARY_DIR}/camera_mask_impl.inc)
+  add_custom_command(
+    OUTPUT ${mask_impl}
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/extract_camera_mask.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/.. ${mask_impl}
+    DEPENDS extract_camera_mask.py ../src/vio_multi_cam.cpp ../include/vio_multi_cam.h
+            ../third_party/rpg_vikit/vikit_common/include/vikit/vision.h
+            ../third_party/rpg_vikit/vikit_common/src/vision.cpp
+    VERBATIM)
+  add_executable(camera_mask_test camera_mask_test.cpp ${mask_impl})
+  target_compile_features(camera_mask_test PRIVATE cxx_std_17)
+  target_include_directories(camera_mask_test PRIVATE ../include ${CMAKE_CURRENT_BINARY_DIR} ${OpenCV_INCLUDE_DIRS})
+  target_link_libraries(camera_mask_test PRIVATE Eigen3::Eigen ${OpenCV_LIBS} Threads::Threads)
+  add_test(NAME camera_mask_test COMMAND camera_mask_test)
   add_executable(adaptive_image_pyramid_test adaptive_image_pyramid_test.cpp)
   target_compile_features(adaptive_image_pyramid_test PRIVATE cxx_std_17)
   target_include_directories(adaptive_image_pyramid_test PRIVATE ../include ${OpenCV_INCLUDE_DIRS})

@@ -1,6 +1,6 @@
 // Baseline from commit 23e710b89eea774c401c609f0e6f7cf6d4c140ac.
 // Included only by vio_multi_cam.cpp. Bodies are checked against frozen hashes
-// by check_visual_patch_budget_baseline.py; do not replace this with the split
+// by check_visual_patch_budget_baseline.py (allowing the optional mask score hook); do not replace this with the split
 // preparation/tracking path when patch_budget_en is false.
 
 void VIOManager::retrieveFromVisualSparseMapVirtualBaseline(PerCameraData &ctx, const cv::Mat &img, vector<pointWithVar> &pg,
@@ -259,7 +259,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtualBaseline(PerCameraData &ctx, 
     }
   };
   auto computeShiTomasiCandidateScore = [&](const V2D &raw_px) {
-    const float score = vk::shiTomasiScore(img, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]));
+    const float score = maskedShiTomasiScore(ctx, img, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]));
     return std::isfinite(score) ? static_cast<double>(score) : 0.0;
   };
 

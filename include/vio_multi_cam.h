@@ -385,6 +385,72 @@ struct PerCameraData
   double cx = 0.0;
   double cy = 0.0;
   double image_resize_factor = 1.0;
+  // Optional static mask in the VIO image coordinates; empty preserves legacy behavior.
+  cv::Mat image_mask;
+  cv::Mat invalid_mask_integral;
+  cv::Mat optical_flow_valid_mask;
+
+  void setImageMask(const cv::Mat &mask)
+  {
+    image_mask.release();
+    invalid_mask_integral.release();
+    optical_flow_valid_mask.release();
+    if (mask.empty()) return;
+    if (mask.type() != CV_8UC1) throw std::runtime_error("camera mask must be CV_8UC1");
+    cv::compare(mask, 0, image_mask, cv::CMP_GT);
+    cv::Mat invalid;
+    cv::compare(image_mask, 0, invalid, cv::CMP_EQ);
+    invalid /= 255;
+    cv::integral(invalid, invalid_mask_integral, CV_32S);
+  }
+
+  // Inclusive source-pixel rectangle. Constant-time check, including interior holes.
+  bool maskAllowsRect(int x0, int y0, int x1, int y1) const
+  {
+    if (image_mask.empty()) return true;
+    if (x0 < 0 || y0 < 0 || x1 < x0 || y1 < y0 ||
+        x1 >= image_mask.cols || y1 >= image_mask.rows) return false;
+    const int *top = invalid_mask_integral.ptr<int>(y0);
+    const int *bottom = invalid_mask_integral.ptr<int>(y1 + 1);
+    return bottom[x1 + 1] - bottom[x0] - top[x1 + 1] + top[x0] == 0;
+  }
+
+  bool maskAllowsWindow(double u, double v, int before, int after) const
+  {
+    if (image_mask.empty()) return true;
+    if (!std::isfinite(u) || !std::isfinite(v) || u < 0.0 || v < 0.0 ||
+        u >= image_mask.cols || v >= image_mask.rows || before < 0 || after < 0) return false;
+    const int x = static_cast<int>(std::floor(u));
+    const int y = static_cast<int>(std::floor(v));
+    return maskAllowsRect(x - before, y - before, x + after, y + after);
+  }
+
+  bool maskAllowsSample(double u, double v, int kernel_radius = 1) const
+  {
+    return maskAllowsWindow(u, v, kernel_radius - 1, kernel_radius);
+  }
+
+  bool maskAllowsPatch(const V2D &px, int half_size, int scale, bool gradient = false) const
+  {
+    if (image_mask.empty()) return true;
+    if (!px.allFinite() || px.x() < 0.0 || px.y() < 0.0 ||
+        px.x() >= image_mask.cols || px.y() >= image_mask.rows || scale <= 0) return false;
+    const int x = static_cast<int>(std::floor(px.x() / scale)) * scale;
+    const int y = static_cast<int>(std::floor(px.y() / scale)) * scale;
+    const int extent = (half_size + (gradient ? 1 : 0)) * scale;
+    return maskAllowsRect(x - extent, y - extent, x + extent, y + extent);
+  }
+
+  bool maskAllowsFilteredSample(const virtual_sampling::FilteredImage &image,
+                                double u, double v, const cv::Point &origin) const
+  {
+    if (image_mask.empty()) return true;
+    cv::Rect footprint;
+    if (!image.sourceFootprint(u, v, footprint)) return false;
+    return maskAllowsRect(footprint.x + origin.x, footprint.y + origin.y,
+                          footprint.x + footprint.width - 1 + origin.x,
+                          footprint.y + footprint.height - 1 + origin.y);
+  }
   int grid_size = 0;
   int grid_n_width = 0;
   int grid_n_height = 0;
@@ -1062,7 +1128,7 @@ public:
   void processMultiCameraFrameFake(const MeasureGroup &meas);
   bool inOpticalFlowBorder(const PerCameraData &ctx, const cv::Point2f &pt) const;
   V3D getOpticalFlowBearing(const PerCameraData &ctx, const cv::Point2f &px) const;
-  void setOpticalFlowMask(const PerCameraData &ctx, cv::Mat &mask);
+  void setOpticalFlowMask(PerCameraData &ctx, cv::Mat &mask);
   void addOpticalFlowObservation(OpticalFlowTrack &track, const cv::Point2f &px, double img_time);
   bool triangulateOpticalFlowTrack(OpticalFlowTrack &track);
   void updateOpticalFlowPointClouds();
@@ -1092,7 +1158,8 @@ public:
                                            const std::vector<uint8_t> &active_extrinsic_trans,
                                            const std::vector<uint8_t> &active_time_groups) const;
   void initializeVIO();
-  void getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D pc, float *patch_tmp, int level);
+  float maskedShiTomasiScore(const PerCameraData &ctx, const cv::Mat &img, int u, int v) const;
+  bool getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D pc, float *patch_tmp, int level);
   void computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2, 3) & J);
   void computeVirtualProjectionJacobian(const V3D &p_v, MD(2, 3) &J) const;
   void computeJacobianAndUpdateEKF();
@@ -1112,7 +1179,7 @@ public:
                            const int pyramid_level, const int halfpatch_size, Matrix2d &A_cur_ref);
   void getWarpMatrixAffineHomography(const PerCameraData &ref_ctx, const PerCameraData &cur_ctx, const V2D &px_ref,
                                      const V3D &xyz_ref, const V3D &normal_ref, const SE3d &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
-  bool warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
+  bool warpAffine(const PerCameraData &ref_ctx, const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
   bool buildVirtualFrameRotation(const PerCameraData &ctx, const V3D &point_in_raw_camera, const V2D &raw_center_px,
                                  M3D &R_v_from_c, M3D &R_c_from_v) const;
@@ -1123,7 +1190,7 @@ public:
                                              V2D &raw_px, MD(2, 3) &J_raw_pc) const;
   bool projectRawCameraWithJacobian(const PerCameraData &ctx, const V3D &p_c, int required_border,
                                     V2D &raw_px, MD(2, 3) &J_raw_pc) const;
-  bool sampleRawImageValueAndGradient(const cv::Mat &raw_img, const V2D &raw_px, int scale,
+  bool sampleRawImageValueAndGradient(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px, int scale,
                                       float &value, V2D &gradient) const;
   bool linearizeVirtualS2Sample(const PerCameraData &ctx, const cv::Mat &raw_img, const V3D &point_c,
                                 const VirtualTrackPatch &track, const V2D &offset, int scale,
@@ -1145,7 +1212,8 @@ public:
   bool captureVirtualReferenceSource(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_center_px,
                                      const M3D &R_c_from_v, cv::Mat &raw_roi, cv::Point &raw_origin) const;
   bool materializeVirtualReferenceSupport(Feature &feature, bool &materialized_now);
-  bool interpolateRawVirtualImage(const cv::Mat &img, double u, double v, float &value) const;
+  bool interpolateRawVirtualImage(const PerCameraData &ctx, const cv::Mat &img, double u, double v, float &value,
+                                  const cv::Point &raw_origin = cv::Point()) const;
   // Optional analytic gradient is supported only for bilinear interpolation.
   bool interpolateFloatVirtualImage(const cv::Mat &img, const cv::Mat *valid_mask, double u, double v, float &value,
                                     V2D *bilinear_gradient = nullptr) const;

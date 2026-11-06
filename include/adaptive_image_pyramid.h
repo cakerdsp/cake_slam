@@ -20,6 +20,31 @@ class ImagePyramid;
 // image (or raw ROI) pixels, and intensities retain the original 0..255 scale.
 struct FilteredImage
 {
+  // Exact source support of the active pyramid layers, in this image/ROI's coordinates.
+  // The caller can check a camera mask before any filtered intensity is consumed.
+  bool sourceFootprint(double u, double v, cv::Rect &footprint) const
+  {
+    if (!std::isfinite(u) || !std::isfinite(v) || u < 0.0 || v < 0.0 ||
+        u >= source_width_ || v >= source_height_) return false;
+    bool first = true;
+    for (int level : {lower_level_, upper_weight_ == 0.0 ? lower_level_ : upper_level_})
+    {
+      const int scale = 1 << level;
+      const int x = static_cast<int>(std::floor(u / scale));
+      const int y = static_cast<int>(std::floor(v / scale));
+      const int halo = 2 * (scale - 1);
+      const int x0 = x * scale - halo;
+      const int y0 = y * scale - halo;
+      const int x1 = (x + 1) * scale + halo;
+      const int y1 = (y + 1) * scale + halo;
+      if (x0 < 0 || y0 < 0 || x1 >= source_width_ || y1 >= source_height_) return false;
+      const cv::Rect layer(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+      footprint = first ? layer : footprint | layer;
+      first = false;
+    }
+    return !first;
+  }
+
   bool sample(double u, double v, float &value) const
   {
     if (!std::isfinite(u) || !std::isfinite(v)) return false;

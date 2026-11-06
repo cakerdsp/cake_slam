@@ -38,6 +38,7 @@ struct CameraInputConfig
 {
   std::string img_topic;
   std::string camera_namespace;
+  std::string mask_path;
   bool image_undistort_en = false;
   std::string raw_camera_namespace;
   cv::Mat undistort_map_x;

@@ -1131,7 +1131,8 @@ void VIOManager::initializeVIO()
         for (int raw_x = 0; raw_x < ctx.width; ++raw_x)
         {
           const int raw_idx = raw_y * ctx.width + raw_x;
-          if (!ctx.cam->isInFrame(V2D(raw_x, raw_y).cast<int>(), 0)) continue;
+          if (!ctx.cam->isInFrame(V2D(raw_x, raw_y).cast<int>(), 0) ||
+              !ctx.maskAllowsRect(raw_x, raw_y, raw_x, raw_y)) continue;
           V3D ray_c = ctx.cam->cam2world(raw_x, raw_y);
           const double ray_norm = ray_c.norm();
           if (!ray_c.array().isFinite().all() || !std::isfinite(ray_norm) || ray_norm <= virtual_min_z) continue;
@@ -1641,13 +1642,22 @@ void VIOManager::computeProjectionJacobian(const PerCameraData &ctx, V3D p, MD(2
   }
   computePinholeProjectionJacobianForContext(ctx, p, J);
 }
-void VIOManager::getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D pc, float *patch_tmp, int level)
+float VIOManager::maskedShiTomasiScore(const PerCameraData &ctx, const cv::Mat &img, int u, int v) const
+{
+  // vikit's 8x8 score reads central differences one pixel beyond the window.
+  if (!ctx.maskAllowsWindow(u, v, 5, 4)) return 0.0f;
+  return vk::shiTomasiScore(img, u, v);
+}
+
+bool VIOManager::getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D pc, float *patch_tmp, int level)
 {
   const float u_ref = pc[0];
   const float v_ref = pc[1];
   const int scale = (1 << level);
   const int u_ref_i = floorf(pc[0] / scale) * scale;
   const int v_ref_i = floorf(pc[1] / scale) * scale;
+  if (!ctx.maskAllowsRect(u_ref_i - patch_size_half * scale, v_ref_i - patch_size_half * scale,
+                          u_ref_i + patch_size_half * scale, v_ref_i + patch_size_half * scale)) return false;
   const float subpix_u_ref = (u_ref - u_ref_i) / scale;
   const float subpix_v_ref = (v_ref - v_ref_i) / scale;
   const float w_ref_tl = (1.0 - subpix_u_ref) * (1.0 - subpix_v_ref);
@@ -1663,6 +1673,7 @@ void VIOManager::getImagePatch(const PerCameraData &ctx, const cv::Mat &img, V2D
           w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * ctx.width] + w_ref_br * img_ptr[scale * ctx.width + scale];
     }
   }
+  return true;
 }
 
 bool VIOManager::sampleRawCorePatchForDump(const PerCameraData &ctx, const cv::Mat &img, const V2D &pc,
@@ -1675,6 +1686,7 @@ bool VIOManager::sampleRawCorePatchForDump(const PerCameraData &ctx, const cv::M
 
   const int required_border = (patch_size_half + 1) * scale + 1;
   if (ctx.cam != nullptr && !ctx.cam->isInFrame(pc.cast<int>(), required_border)) return false;
+  if (!ctx.maskAllowsPatch(pc, patch_size_half, scale)) return false;
 
   const int u_i = static_cast<int>(std::floor(pc[0] / scale)) * scale;
   const int v_i = static_cast<int>(std::floor(pc[1] / scale)) * scale;
@@ -1816,7 +1828,8 @@ bool VIOManager::projectRawFisheyeIfValid(const PerCameraData &ctx, const V3D &r
   if (raw_px[0] < border_req || raw_px[1] < border_req || raw_px[0] >= ctx.width - border_req - 1 ||
       raw_px[1] >= ctx.height - border_req - 1)
     return false;
-  return ctx.cam->isInFrame(raw_px.cast<int>(), border_req);
+  return ctx.cam->isInFrame(raw_px.cast<int>(), border_req) &&
+         ctx.maskAllowsWindow(raw_px.x(), raw_px.y(), 0, 0);
 }
 
 bool VIOManager::computeS2SamplePointAndJacobian(const V3D &point_c, const M3D &R_v_from_c,
@@ -1958,9 +1971,10 @@ bool VIOManager::projectRawCameraWithJacobian(const PerCameraData &ctx, const V3
       raw_px[0] >= ctx.width - border_req || raw_px[1] >= ctx.height - border_req)
     return false;
   if (!ctx.cam->isInFrame(raw_px.cast<int>(), border_req)) return false;
+  if (!ctx.maskAllowsWindow(raw_px.x(), raw_px.y(), 0, 0)) return false;
   return computeCameraModelProjectionJacobianForContext(ctx, p_c, J_raw_pc);
 }
-bool VIOManager::sampleRawImageValueAndGradient(const cv::Mat &raw_img, const V2D &raw_px,
+bool VIOManager::sampleRawImageValueAndGradient(const PerCameraData &ctx, const cv::Mat &raw_img, const V2D &raw_px,
                                                 int scale, float &value, V2D &gradient) const
 {
   value = 0.0f;
@@ -1971,7 +1985,7 @@ bool VIOManager::sampleRawImageValueAndGradient(const cv::Mat &raw_img, const V2
     if (!std::isfinite(u) || !std::isfinite(v) || u < 0.0 || v < 0.0 ||
         u >= raw_img.cols - 1 || v >= raw_img.rows - 1)
       return false;
-    return interpolateRawVirtualImage(raw_img, u, v, sampled);
+    return interpolateRawVirtualImage(ctx, raw_img, u, v, sampled);
   };
 
   if (raw_px[0] - scale < 0.0 || raw_px[1] - scale < 0.0 ||
@@ -2015,7 +2029,7 @@ bool VIOManager::linearizeVirtualS2Sample(const PerCameraData &ctx, const cv::Ma
   if (!projectRawCameraWithJacobian(ctx, p_sample_c, required_border, raw_px, J_raw_sample)) return false;
 
   V2D raw_gradient;
-  if (!sampleRawImageValueAndGradient(raw_img, raw_px, scale, current_value, raw_gradient)) return false;
+  if (!sampleRawImageValueAndGradient(ctx, raw_img, raw_px, scale, current_value, raw_gradient)) return false;
 
   MD(1, 2) Jimg;
   Jimg << raw_gradient[0], raw_gradient[1];
@@ -2074,7 +2088,7 @@ bool VIOManager::buildVirtualSupportPatchPullExact(const PerCameraData &ctx, con
       const double local_u = raw_px[0] - raw_origin.x;
       const double local_v = raw_px[1] - raw_origin.y;
       float sampled = 0.0f;
-      if (!interpolateRawVirtualImage(raw_img, local_u, local_v, sampled)) continue;
+      if (!interpolateRawVirtualImage(ctx, raw_img, local_u, local_v, sampled, raw_origin)) continue;
       values[x] = sampled;
       mask[x] = 255;
     }
@@ -2358,6 +2372,7 @@ bool VIOManager::buildAdaptiveVirtualSupport(const PerCameraData &ctx,
       V2D raw;
       float value;
       if (!projectRawFisheyeIfValid(ctx, R_c_from_v * ray, 1, raw) ||
+          !ctx.maskAllowsFilteredSample(image, raw.x() - origin.x, raw.y() - origin.y, origin) ||
           !image.sample(raw.x() - origin.x, raw.y() - origin.y, value)) continue;
       output.values.at<float>(y, x) = value;
       output.valid_mask.at<uchar>(y, x) = 255;
@@ -2425,6 +2440,9 @@ bool VIOManager::prepareAdaptiveTrack(PerCameraData &ctx, Feature &reference,
       float current;
       V2D gradient;
       if (!projectRawFisheyeIfValid(ref_ctx, reference.R_c_from_v_ * virtualCam2World(ref_px), 1, raw) ||
+          !ref_ctx.maskAllowsFilteredSample(ref_image, raw.x() - reference.virtual_source_origin_.x,
+                                            raw.y() - reference.virtual_source_origin_.y,
+                                            reference.virtual_source_origin_) ||
           !ref_image.sample(raw.x() - reference.virtual_source_origin_.x,
                             raw.y() - reference.virtual_source_origin_.y, samples[level * patch_size_total + k]) ||
           !sampleAdaptiveVirtualValueAndGradient(supports[level], center + offset, pitch, current, gradient)) return false;
@@ -2599,10 +2617,17 @@ bool VIOManager::materializeVirtualReferenceSupport(Feature &feature, bool &mate
   return true;
 }
 
-bool VIOManager::interpolateRawVirtualImage(const cv::Mat &img, double u, double v, float &value) const
+bool VIOManager::interpolateRawVirtualImage(const PerCameraData &ctx, const cv::Mat &img,
+                                            double u, double v, float &value, const cv::Point &raw_origin) const
 {
   value = 0.0f;
   if (!std::isfinite(u) || !std::isfinite(v) || img.empty() || img.type() != CV_8UC1) return false;
+  // vikit's bilinear sampler accepts float coordinates; match its rounding
+  // before checking taps (a double just below an integer can round up).
+  const double sample_u = virtual_interp_mode_enum == VirtualInterpMode::BILINEAR ? static_cast<float>(u) : u;
+  const double sample_v = virtual_interp_mode_enum == VirtualInterpMode::BILINEAR ? static_cast<float>(v) : v;
+  if (!ctx.maskAllowsSample(sample_u + raw_origin.x, sample_v + raw_origin.y,
+                            interpolationKernelRadius(virtual_interp_mode_enum))) return false;
 
   const int x = static_cast<int>(std::floor(u));
   const int y = static_cast<int>(std::floor(v));
@@ -2785,7 +2810,7 @@ bool VIOManager::sampleSparseVirtualValue(const PerCameraData &ctx, const cv::Ma
   const V3D ray_c = R_c_from_v * virtualCam2World(px);
   V2D raw_px;
   if (!projectRawFisheyeIfValid(ctx, ray_c, interpolationBorderMargin(virtual_interp_mode_enum), raw_px)) return false;
-  return interpolateRawVirtualImage(raw_img, raw_px[0], raw_px[1], value);
+  return interpolateRawVirtualImage(ctx, raw_img, raw_px[0], raw_px[1], value);
 }
 
 bool VIOManager::sampleSparseVirtualCorePatch(const PerCameraData &ctx, const cv::Mat &raw_img,
@@ -3299,7 +3324,7 @@ bool VIOManager::buildRefPatchDumpWarpPatches(const PerCameraData &ctx, const cv
     if (raw_affine_valid && A_anchor_source.array().isFinite().all() && std::fabs(A_anchor_source.determinant()) > 1.0e-9)
     {
       std::vector<float> raw_patch(patch_size_total, 0.0f);
-      if (warpAffine(A_anchor_source, raw_img, raw_px, 0, 0, 0, patch_size_half, raw_patch.data()))
+      if (warpAffine(ctx, A_anchor_source, raw_img, raw_px, 0, 0, 0, patch_size_half, raw_patch.data()))
       {
         collect_sample_pixels(A_anchor_source, raw_px, raw_sample_pixels);
         raw_valid = make_display(raw_patch, raw_patch_display);
@@ -3815,7 +3840,7 @@ void VIOManager::getWarpMatrixAffine(const PerCameraData &ref_ctx, const PerCame
   A_cur_ref.col(1) = (px_dv - px_cur) / halfpatch_size;
 }
 
-bool VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
+bool VIOManager::warpAffine(const PerCameraData &ref_ctx, const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                             const int pyramid_level, const int halfpatch_size, float *patch)
 {
   const int patch_size = halfpatch_size * 2;
@@ -3851,6 +3876,7 @@ bool VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, c
       px_patch *= (1 << pyramid_level);
       const Vector2f px(A_ref_cur * px_patch + px_ref.cast<float>());
       if (!px.array().isFinite().all()) return false;
+      if (!ref_ctx.maskAllowsSample(px.x(), px.y())) return false;
       if (px[0] < 0 || px[1] < 0 || px[0] >= img_ref.cols - 1 || px[1] >= img_ref.rows - 1)
         patch_ptr[patch_size_total * pyramid_level + y * patch_size + x] = 0;
       else
@@ -5846,7 +5872,7 @@ void VIOManager::prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
     ++ctx.budget_scored;
     if (patch_score == visual_patch_budget::Score::ShiTomasi)
     {
-      const float score = vk::shiTomasiScore(img, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]));
+      const float score = maskedShiTomasiScore(ctx, img, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]));
       return std::isfinite(score) ? (patch_budget_mode == visual_patch_budget::Mode::Legacy
           ? static_cast<double>(score) : std::max(0.0, static_cast<double>(score))) : 0.0;
     }
@@ -7329,7 +7355,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       bool warp_ok = true;
       for (int pyramid_level = 0; pyramid_level <= patch_pyrimid_level - 1; pyramid_level++)
       {
-        if (!warpAffine(A_cur_ref_zero, ref_ftr->img_, ref_ftr->px_, ref_ftr->level_, search_level, pyramid_level,
+        if (!warpAffine(ref_ctx, A_cur_ref_zero, ref_ftr->img_, ref_ftr->px_, ref_ftr->level_, search_level, pyramid_level,
                         patch_size_half, patch_wrap.data()))
         {
           warp_ok = false;
@@ -7342,7 +7368,7 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
       std::vector<double> usage_ncc_levels(std::max(1, patch_pyrimid_level), std::numeric_limits<double>::quiet_NaN());
       std::vector<uint8_t> usage_level_valid(std::max(1, patch_pyrimid_level), 0);
       std::vector<uint8_t> level_active(std::max(1, patch_pyrimid_level), 0);
-      getImagePatch(ctx, img, pc, patch_buffer.data(), 0);
+      if (!getImagePatch(ctx, img, pc, patch_buffer.data(), 0)) break;
       usage_level_valid[0] = 1;
 
       float error = 0.0;
@@ -7354,11 +7380,16 @@ void VIOManager::retrieveFromVisualSparseMap(PerCameraData &ctx, const cv::Mat &
         std::copy(patch_buffer.begin(), patch_buffer.begin() + patch_size_total, current_patch_all.begin());
         for (int pyramid_level = 1; pyramid_level < patch_pyrimid_level; ++pyramid_level)
         {
-          getImagePatch(ctx, img, pc, current_patch_all.data(), pyramid_level);
+          if (!getImagePatch(ctx, img, pc, current_patch_all.data(), pyramid_level))
+          {
+            warp_ok = false;
+            break;
+          }
           usage_level_valid[pyramid_level] = 1;
         }
       }
 
+      if (!warp_ok) break;
       double usage_ncc = std::numeric_limits<double>::quiet_NaN();
       if (zncc_residual_en)
       {
@@ -7576,6 +7607,8 @@ bool VIOManager::interpolateReferenceFeature(const Feature &reference, const V2D
   if (reference.img_.type() != CV_8UC1 || px[0] < 0.0 || px[1] < 0.0 ||
       px[0] >= reference.img_.cols - 1 || px[1] >= reference.img_.rows - 1)
     return false;
+  if (reference.camera_id_ < 0 || reference.camera_id_ >= numCameras() ||
+      !cameras_[reference.camera_id_].maskAllowsSample(px.x(), px.y())) return false;
 
   value = static_cast<float>(vk::interpolateMat_8u(reference.img_, px[0], px[1]));
   return std::isfinite(value);
@@ -7925,8 +7958,8 @@ void VIOManager::buildCurrentCrossCameraPairs()
                            target_sample[1] < target.new_frame->img_.rows - sample_border - 1 &&
                            source.cam->isInFrame(source_sample.cast<int>(), sample_border) &&
                            target.cam->isInFrame(target_sample.cast<int>(), sample_border) &&
-                           interpolateRawVirtualImage(source.new_frame->img_, source_sample[0], source_sample[1], source_value) &&
-                           interpolateRawVirtualImage(target.new_frame->img_, target_sample[0], target_sample[1], target_value);
+                           interpolateRawVirtualImage(source, source.new_frame->img_, source_sample[0], source_sample[1], source_value) &&
+                           interpolateRawVirtualImage(target, target.new_frame->img_, target_sample[0], target_sample[1], target_value);
               }
               if (!level_ok) break;
               source_patch[patch_index] = source_value;
@@ -9184,6 +9217,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
               result.current_px = pixel;
               const int required_border = (patch_size_half + 1) * scale + 1;
               if (!pixel.array().isFinite().all() || !ctx.cam->isInFrame(pixel.cast<int>(), required_border)) continue;
+              if (!ctx.maskAllowsPatch(pixel, patch_size_half, scale, !inverse_composition_en)) continue;
               MD(2, 3) Jdpi;
               computeProjectionJacobian(ctx, point_c, Jdpi);
               M3D point_hat;
@@ -9616,7 +9650,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 !ctx.cam->isInFrame(sample_px.cast<int>(), sample_border))
               return false;
             V2D gradient;
-            if (!sampleRawImageValueAndGradient(ctx.new_frame->img_, sample_px, scale, value, gradient))
+            if (!sampleRawImageValueAndGradient(ctx, ctx.new_frame->img_, sample_px, scale, value, gradient))
               return false;
             MD(1, 2) Jimg;
             Jimg << gradient[0], gradient[1];
@@ -10336,7 +10370,7 @@ void VIOManager::generateVisualMapPointsVirtual(PerCameraData &ctx, const cv::Ma
     const int index = grid_row * ctx.grid_n_width + grid_col;
     if (ctx.grid_num[index] == TYPE_MAP) return;
 
-    const float score = vk::shiTomasiScore(img, raw_px[0], raw_px[1]);
+    const float score = maskedShiTomasiScore(ctx, img, raw_px[0], raw_px[1]);
     if (!std::isfinite(score)) return;
     if (score > ctx.scan_value[index])
     {
@@ -10465,7 +10499,7 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
 
       if (ctx.grid_num[index] != TYPE_MAP)
       {
-        float cur_value = vk::shiTomasiScore(img, pc[0], pc[1]);
+        float cur_value = maskedShiTomasiScore(ctx, img, pc[0], pc[1]);
         // if (cur_value < 5) continue;
         if (cur_value > ctx.scan_value[index])
         {
@@ -10492,7 +10526,7 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
 
       if (ctx.grid_num[index] != TYPE_MAP)
       {
-        float cur_value = vk::shiTomasiScore(img, pc[0], pc[1]);
+        float cur_value = maskedShiTomasiScore(ctx, img, pc[0], pc[1]);
         if (cur_value > ctx.scan_value[index])
         {
           ctx.scan_value[index] = cur_value;
@@ -10548,7 +10582,7 @@ void VIOManager::generateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img,
       pending.px = pc;
       pending.bearing = ctx.cam->cam2world(pc);
       pending.patch.resize(patch_size_total);
-      getImagePatch(ctx, img, pc, pending.patch.data(), 0);
+      if (!getImagePatch(ctx, img, pc, pending.patch.data(), 0)) continue;
       pending.img = img;
       pending.T_f_w = ctx.new_frame->T_f_w_;
       fillPendingObservationTiming(pending, ctx);
@@ -11312,7 +11346,11 @@ void VIOManager::materializePendingNewPointObservations(
 
       pending.px = pc;
       pending.bearing = ctx.cam->cam2world(pc);
-      getImagePatch(ctx, img, pc, pending.patch.data(), 0);
+      if (!getImagePatch(ctx, img, pc, pending.patch.data(), 0))
+      {
+        ++support_reject;
+        continue;
+      }
       pending.img = img;
     }
 
@@ -11708,7 +11746,11 @@ void VIOManager::updateVisualMapPoints(PerCameraData &ctx, const cv::Mat &img)
     if (add_flag)
     {
       patch_temp = new float[patch_size_total];
-      getImagePatch(ctx, img, pc, patch_temp, 0);
+      if (!getImagePatch(ctx, img, pc, patch_temp, 0))
+      {
+        delete[] patch_temp;
+        continue;
+      }
       update_num += 1;
       ctx.update_flag[i] = 1;
       Vector3d f = ctx.cam->cam2world(pc);
@@ -13067,11 +13109,14 @@ bool VIOManager::getColorFromCamera(int camera_id, const V3D &p_w, V3F &bgr, dou
   if (camera_id < 0 || camera_id >= numCameras()) return false;
   const PerCameraData &ctx = cameras_[camera_id];
   if (ctx.cam == nullptr || ctx.new_frame == nullptr || ctx.img_rgb.empty() || ctx.img_rgb.channels() != 3) return false;
+  if (!ctx.image_mask.empty() && ctx.img_rgb.size() != ctx.image_mask.size()) return false;
   const V3D point_c = ctx.new_frame->w2f(p_w);
   if (!point_c.array().isFinite().all()) return false;
   if (cam_range != nullptr) *cam_range = point_c.norm();
   const V2D pixel = ctx.cam->world2cam(point_c);
   if (!pixel.array().isFinite().all() || !ctx.cam->isInFrame(pixel.cast<int>(), 1)) return false;
+  // Reject before reading any color: all four bilinear taps must be valid.
+  if (!ctx.maskAllowsSample(static_cast<float>(pixel.x()), static_cast<float>(pixel.y()))) return false;
   bgr = getInterpolatedPixel(ctx.img_rgb, pixel);
   return bgr.array().isFinite().all();
 }
@@ -13110,9 +13155,24 @@ void VIOManager::dumpDataForColmap()
 
 bool VIOManager::inOpticalFlowBorder(const PerCameraData &ctx, const cv::Point2f &pt) const
 {
+  if (!std::isfinite(pt.x) || !std::isfinite(pt.y)) return false;
   const int img_x = cvRound(pt.x);
   const int img_y = cvRound(pt.y);
   const int border_size = 1;
+  if (!ctx.image_mask.empty())
+  {
+    // PyrLK uses a 21x21 window and maxLevel=3 below. Include interpolation,
+    // Scharr derivatives and each level's pyrDown footprint in raw pixels.
+    for (int level = 0; level <= 3; ++level)
+    {
+      const int scale = 1 << level;
+      const int x = static_cast<int>(std::floor(pt.x / scale));
+      const int y = static_cast<int>(std::floor(pt.y / scale));
+      const int halo = 2 * (scale - 1);
+      if (!ctx.maskAllowsRect((x - 11) * scale - halo, (y - 11) * scale - halo,
+                              (x + 12) * scale + halo, (y + 12) * scale + halo)) return false;
+    }
+  }
   return border_size <= img_x && img_x < ctx.width - border_size && border_size <= img_y && img_y < ctx.height - border_size;
 }
 
@@ -13123,9 +13183,22 @@ V3D VIOManager::getOpticalFlowBearing(const PerCameraData &ctx, const cv::Point2
   return bearing;
 }
 
-void VIOManager::setOpticalFlowMask(const PerCameraData &ctx, cv::Mat &mask)
+void VIOManager::setOpticalFlowMask(PerCameraData &ctx, cv::Mat &mask)
 {
-  mask = cv::Mat(ctx.height, ctx.width, CV_8UC1, cv::Scalar(255));
+  if (ctx.image_mask.empty())
+    mask = cv::Mat(ctx.height, ctx.width, CV_8UC1, cv::Scalar(255));
+  else
+  {
+    if (ctx.optical_flow_valid_mask.empty())
+    {
+      ctx.optical_flow_valid_mask = ctx.image_mask.clone();
+      for (int y = 0; y < ctx.height; ++y)
+        for (int x = 0; x < ctx.width; ++x)
+          if (ctx.optical_flow_valid_mask.at<uchar>(y, x) && !inOpticalFlowBorder(ctx, cv::Point2f(x, y)))
+            ctx.optical_flow_valid_mask.at<uchar>(y, x) = 0;
+    }
+    mask = ctx.optical_flow_valid_mask.clone();
+  }
 
   std::vector<std::tuple<int, cv::Point2f, int>> cnt_pts_id;
   cnt_pts_id.reserve(optical_flow_cur_pts.size());
@@ -13746,6 +13819,20 @@ bool VIOManager::installFixedGrayWeights(const std::vector<Eigen::Vector3d> &wei
 void VIOManager::processMultiCameraFrame(const MeasureGroup &meas, vector<pointWithVar> &pg,
                                          const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
+  // The baseline and budget paths use the same resize rule. Validate masked
+  // inputs here without changing the unmasked baseline dispatch.
+  if (meas.has_multi_cam_frame)
+    for (size_t i = 0; i < cameras_.size() && i < meas.multi_cam_frame.images.size(); ++i)
+    {
+      const PerCameraData &ctx = cameras_[i];
+      if (ctx.image_mask.empty()) continue;
+      const cv::Mat &img = meas.multi_cam_frame.images[i];
+      const bool resize = img.cols != ctx.width || img.rows != ctx.height;
+      const int cols = resize ? static_cast<int>(img.cols * ctx.image_resize_factor) : img.cols;
+      const int rows = resize ? static_cast<int>(img.rows * ctx.image_resize_factor) : img.rows;
+      if (cols != ctx.image_mask.cols || rows != ctx.image_mask.rows)
+        throw std::runtime_error("input image and camera mask dimensions disagree for camera_id=" + std::to_string(i));
+    }
   if (!patch_budget_en)
   {
     processMultiCameraFrameBaseline(meas, pg, plane_map);

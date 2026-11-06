@@ -252,7 +252,7 @@ install(DIRECTORY include/
   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
 )
 
-install(DIRECTORY config launch rviz_cfg
+install(DIRECTORY config launch rviz_cfg mask
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
 install(PROGRAMS scripts/view_memory_stats.py

@@ -212,6 +212,9 @@ public:
     frame(key + ".frame", value.new_frame.get());
     snapshot_.mat(key + ".images.gray", value.img_cp);
     snapshot_.mat(key + ".images.rgb", value.img_rgb);
+    snapshot_.mat(key + ".mask.valid", value.image_mask);
+    snapshot_.mat(key + ".mask.integral", value.invalid_mask_integral);
+    snapshot_.mat(key + ".mask.optical_flow", value.optical_flow_valid_mask);
     snapshot_.mat(key + ".images.test", value.img_test);
     pyramid(key + ".adaptive_pyramid", value.adaptive_image_pyramid.get());
     snapshot_.vector(key + ".rejected_draw_points", value.rejected_visual_points_for_draw);
