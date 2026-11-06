@@ -263,9 +263,6 @@ vio:
 
   exposure_estimate_en: true
   online_extrinsic_en: false
-  # Requires online_extrinsic_en and cross_camera_current_residual_en.
-  # Fused current-camera pairs update extrinsics only; remaining observations update VIO only.
-  online_extrinsic_covis_only_en: false
   online_extrinsic_rot_en: true
   online_extrinsic_trans_en: true
   online_extrinsic_prior_factor_en: false

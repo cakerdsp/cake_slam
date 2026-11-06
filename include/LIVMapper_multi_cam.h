@@ -264,7 +264,6 @@ public:
   int visual_point_suspect_reject_count = 8;
   int visual_point_stale_frames = 200;
   bool online_extrinsic_en = false;
-  bool online_extrinsic_covis_only_en = false;
   bool online_extrinsic_rot_en = true;
   bool online_extrinsic_trans_en = true;
   bool online_extrinsic_prior_factor_en = false;

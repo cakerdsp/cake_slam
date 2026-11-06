@@ -37,40 +37,6 @@ struct Evaluation
       PoseJacobian::Zero(), PoseJacobian::Zero()};
 };
 
-// Derivatives of the same three-anchor affine warp. These are temporary
-// Jacobians into existing state columns, never additional estimator states.
-template <int Columns> struct WarpDerivative
-{
-  using Matrix = Eigen::Matrix<double, 2, Columns>;
-  Matrix center, du, dv;
-
-  Matrix shape(const Eigen::Vector2d &coordinate) const
-  {
-    return coordinate.x() * du + coordinate.y() * dv;
-  }
-  Matrix at(const Eigen::Vector2d &coordinate) const { return center + shape(coordinate); }
-  void set(const std::array<Matrix, 3> &anchors, double span)
-  {
-    center = anchors[0];
-    du = (anchors[1] - anchors[0]) / span;
-    dv = (anchors[2] - anchors[0]) / span;
-  }
-};
-
-struct CalibrationEvaluation
-{
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-  Eigen::Vector2d center;
-  Eigen::Vector3d camera_center;
-  Eigen::Matrix2d affine;
-  WarpDerivative<9> motion;
-  WarpDerivative<6> reference_extrinsic, current_extrinsic;
-  WarpDerivative<1> time;
-  // Used only by the existing optional reference/landmark NIS check.
-  WarpDerivative<6> reference_pose;
-  WarpDerivative<3> plane_point;
-};
-
 inline Eigen::Matrix3d skew(const Eigen::Vector3d &value)
 {
   Eigen::Matrix3d result;

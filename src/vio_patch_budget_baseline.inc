@@ -531,10 +531,16 @@ void VIOManager::retrieveFromVisualSparseMapVirtualBaseline(PerCameraData &ctx, 
       result.rejection = VIRTUAL_REJECT_AFFINE_MATRIX;
       continue;
     }
-    if (!managedReferenceAffinePassesGate(result.track.A_cur_ref))
+    if (visual_map_manage_en && visual_ref_current_select_en)
     {
-      result.rejection = VIRTUAL_REJECT_AFFINE_MATRIX;
-      continue;
+      const Eigen::JacobiSVD<Matrix2d> affine_svd(result.track.A_cur_ref);
+      const V2D singular = affine_svd.singularValues();
+      if (!singular.array().isFinite().all() || singular[1] <= 1.0e-9 ||
+          singular[0] / singular[1] > visual_ref_max_anisotropy)
+      {
+        result.rejection = VIRTUAL_REJECT_AFFINE_MATRIX;
+        continue;
+      }
     }
     result.track.search_level = getBestSearchLevel(result.track.A_cur_ref, virtual_max_search_level);
     result.search_level = result.track.search_level;
@@ -741,7 +747,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtualBaseline(PerCameraData &ctx, 
             !std::isfinite(result.level_sse[level]))
           continue;
         if (result.level_ncc[level] < nccThresholdForLevel(level)) continue;
-        if (!rawPatchPassesGate(result.level_sse[level], result.level_ncc[level], level))
+        if (result.level_sse[level] > outlier_threshold * patch_size_total)
         {
           any_photometric_reject = true;
           continue;
@@ -750,7 +756,7 @@ void VIOManager::retrieveFromVisualSparseMapVirtualBaseline(PerCameraData &ctx, 
         any_level_active = true;
       }
     }
-    else if (rawPatchPassesGate(result.error, result.ncc, 0))
+    else if (result.error <= outlier_threshold * patch_size_total)
     {
       std::fill(result.level_active.begin(), result.level_active.end(), 1);
       any_level_active = true;
