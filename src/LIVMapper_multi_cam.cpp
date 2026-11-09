@@ -393,8 +393,8 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<int>("common.multi_cam_sync_queue_size", 5);
   try_declare.template operator()<double>("common.multi_cam_sync_tolerance_ms", 0.0);
   try_declare.template operator()<bool>("common.directional_update_en", false);
-  try_declare.template operator()<double>("common.directional_drop_variance_reduction", 0.05);
-  try_declare.template operator()<double>("common.directional_full_variance_reduction", 0.50);
+  try_declare.template operator()<double>("common.directional_boost_strength", 1.0);
+  try_declare.template operator()<double>("common.directional_weak_variance_reduction", 0.50);
 
   try_declare.template operator()<bool>("vio.normal_en", true);
   try_declare.template operator()<bool>("vio.inverse_composition_en", false);
@@ -585,22 +585,22 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "common.multi_cam_sync_queue_size", multi_cam_sync_queue_size);
   getRosParam(this->node, "common.multi_cam_sync_tolerance_ms", multi_cam_sync_tolerance_ms);
   getRosParam(this->node, "common.directional_update_en", directional_update_en);
-  getRosParam(this->node, "common.directional_drop_variance_reduction", directional_drop_variance_reduction);
-  getRosParam(this->node, "common.directional_full_variance_reduction", directional_full_variance_reduction);
+  getRosParam(this->node, "common.directional_boost_strength", directional_boost_strength);
+  getRosParam(this->node, "common.directional_weak_variance_reduction", directional_weak_variance_reduction);
   if (num_cameras < 1) throw std::runtime_error("common.num_cameras must be at least 1");
   if (!require_all_cameras) throw std::runtime_error("partial camera frames are not supported; common.require_all_cameras must be true");
   if (multi_cam_sync_queue_size < 1) throw std::runtime_error("common.multi_cam_sync_queue_size must be at least 1");
   if (!std::isfinite(multi_cam_sync_tolerance_ms) || multi_cam_sync_tolerance_ms < 0.0)
     throw std::runtime_error("common.multi_cam_sync_tolerance_ms must be finite and non-negative");
   if (directional_update_en &&
-      (!std::isfinite(directional_drop_variance_reduction) ||
-       !std::isfinite(directional_full_variance_reduction) ||
-       directional_drop_variance_reduction < 0.0 ||
-       directional_full_variance_reduction > 1.0 ||
-       directional_full_variance_reduction <= directional_drop_variance_reduction))
+      (!std::isfinite(directional_boost_strength) ||
+       !std::isfinite(directional_weak_variance_reduction) ||
+       directional_boost_strength < 0.0 ||
+       directional_weak_variance_reduction > 1.0 ||
+       directional_weak_variance_reduction <= 0.0))
     throw std::runtime_error(
-        "directional thresholds must satisfy 0 <= common.directional_drop_variance_reduction "
-        "< common.directional_full_variance_reduction <= 1");
+        "directional enhancement requires common.directional_boost_strength >= 0 "
+        "and 0 < common.directional_weak_variance_reduction <= 1");
 
   camera_configs.resize(num_cameras);
   last_timestamp_img_by_camera.assign(num_cameras, -1.0);
@@ -1135,8 +1135,8 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->cross_camera_reference_en = cross_camera_reference_en;
   vio_manager->cross_camera_current_residual_en = cross_camera_current_residual_en;
   vio_manager->directional_update_en = directional_update_en;
-  vio_manager->directional_drop_variance_reduction = directional_drop_variance_reduction;
-  vio_manager->directional_full_variance_reduction = directional_full_variance_reduction;
+  vio_manager->directional_boost_strength = directional_boost_strength;
+  vio_manager->directional_weak_variance_reduction = directional_weak_variance_reduction;
   vio_manager->online_extrinsic_en = online_extrinsic_en;
   vio_manager->online_extrinsic_rot_en = online_extrinsic_rot_en;
   vio_manager->online_extrinsic_trans_en = online_extrinsic_trans_en;
@@ -1413,8 +1413,9 @@ void LIVMapper::savePoseEvaluation(const char *stage)
         << "# Stage VIO: after visual frontend returns; may include frames with no visual correction.\n"
         << "# Select one stage before trajectory/NEES evaluation; do not mix duplicate timestamps.\n"
         << "# directional_update_en=" << (directional_update_en ? 1 : 0)
-        << " drop=" << std::setprecision(17) << directional_drop_variance_reduction
-        << " full=" << directional_full_variance_reduction
+        << " boost=" << std::setprecision(17) << directional_boost_strength
+        << " weak=" << directional_weak_variance_reduction
+        << " directional_covariance=original_noise_joseph"
         << " frontend_mode=" << frontend_mode << '\n'
         << "# timestamp px py pz qx qy qz qw";
     for (int row = 0; row < 6; ++row)

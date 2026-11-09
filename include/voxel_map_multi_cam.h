@@ -46,8 +46,8 @@ typedef struct VoxelMapConfig
   double sigma_num_;
   bool is_pub_plane_map_;
   bool directional_update_en = false;
-  double directional_drop_variance_reduction = 0.05;
-  double directional_full_variance_reduction = 0.50;
+  double directional_boost_strength = 1.0;
+  double directional_weak_variance_reduction = 0.50;
 
   // config of local map sliding
   double sliding_thresh;

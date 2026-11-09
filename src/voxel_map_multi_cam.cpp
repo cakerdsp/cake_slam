@@ -52,8 +52,8 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   try_declare.template operator()<double>("lio.beam_err", 0.02);
   try_declare.template operator()<double>("lio.dept_err", 0.05);
   try_declare.template operator()<bool>("common.directional_update_en", false);
-  try_declare.template operator()<double>("common.directional_drop_variance_reduction", 0.05);
-  try_declare.template operator()<double>("common.directional_full_variance_reduction", 0.50);
+  try_declare.template operator()<double>("common.directional_boost_strength", 1.0);
+  try_declare.template operator()<double>("common.directional_weak_variance_reduction", 0.50);
 
   try_declare.template operator()<std::vector<int>>("lio.layer_init_num", std::vector<int>{5,5,5,5,5});
   try_declare.template operator()<int>("lio.max_points_num", 50);
@@ -71,8 +71,8 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   getRosParam(nh, "lio.beam_err", voxel_config.beam_err_);
   getRosParam(nh, "lio.dept_err", voxel_config.dept_err_);
   getRosParam(nh, "common.directional_update_en", voxel_config.directional_update_en);
-  getRosParam(nh, "common.directional_drop_variance_reduction", voxel_config.directional_drop_variance_reduction);
-  getRosParam(nh, "common.directional_full_variance_reduction", voxel_config.directional_full_variance_reduction);
+  getRosParam(nh, "common.directional_boost_strength", voxel_config.directional_boost_strength);
+  getRosParam(nh, "common.directional_weak_variance_reduction", voxel_config.directional_weak_variance_reduction);
   getRosParam(nh, "lio.layer_init_num", voxel_config.layer_init_num_);
   getRosParam(nh, "lio.max_points_num", voxel_config.max_points_num_);
   getRosParam(nh, "lio.min_iterations", voxel_config.max_iterations_);
@@ -465,6 +465,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   Eigen::VectorXd meas_vec;
   Eigen::Matrix<double, BASE_STATE_DIM, 1> information_vector;
   Eigen::MatrixXd full_information(full_state_dim, full_state_dim);
+  Eigen::MatrixXd full_noise_information;
   Eigen::VectorXd full_information_vector(full_state_dim);
 
   bool flg_EKF_inited, flg_EKF_converged, EKF_stop_flg = 0;
@@ -564,8 +565,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       directional_update::Result filtered;
       if (!directional_update::filterInformation(
               lio_cov, H_T_H, information_vector,
-              config_setting_.directional_drop_variance_reduction,
-              config_setting_.directional_full_variance_reduction, filtered))
+              config_setting_.directional_boost_strength,
+              config_setting_.directional_weak_variance_reduction, filtered))
       {
         std::cerr << "[ Directional LIO ] update rejected: " << filtered.error << std::endl;
         state_ = state_propagat;
@@ -576,18 +577,25 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       final_directional_result = filtered;
     }
     full_information.setZero();
+    if (config_setting_.directional_update_en)
+      full_noise_information = Eigen::MatrixXd::Zero(full_state_dim, full_state_dim);
     full_information_vector.setZero();
     for (int r = 0; r < lio_state_dim; ++r)
     {
       full_information_vector[lio_to_full[r]] = information_vector[r];
       for (int c = 0; c < lio_state_dim; ++c)
+      {
         full_information(lio_to_full[r], lio_to_full[c]) = H_T_H(r, c);
+        if (config_setting_.directional_update_en)
+          full_noise_information(lio_to_full[r], lio_to_full[c]) = final_directional_result.noise_information(r, c);
+      }
     }
     estimator_covariance::Update update;
     try
     {
       update = estimator_covariance::update(iteration_prior_cov, full_information,
-                                             full_information_vector, state_propagat - state_, lio_to_full);
+          full_information_vector, state_propagat - state_, lio_to_full,
+          config_setting_.directional_update_en ? full_noise_information : full_information);
     }
     catch (const std::exception &error)
     {
@@ -619,7 +627,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
                   << final_directional_result.variance_reductions.maxCoeff()
                   << " rho_mean=" << final_directional_result.variance_reductions.mean()
                   << " active=" << final_directional_result.active_rank
-                  << " full=" << final_directional_result.full_rank
+                  << " enhanced=" << final_directional_result.enhanced_rank
                   << " dim=" << lio_state_dim << std::endl;
       }
       state_.cov = final_posterior_covariance;

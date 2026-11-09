@@ -5202,9 +5202,10 @@ void VIOManager::printUsageStatsTable(int frame_id)
 
       printDivider();
       printLine("POSE_SOURCE_ATTRIBUTION_SHAPLEY");
+      printLine("pose_scope: total gain uses actual Joseph P_before/P_after; source attribution uses original observation information before directional enhancement");
       printLine(cross_camera_current_residual_en
-                    ? "pose_scope: realized gain uses actual P_before/P_after; exact 3-source Shapley uses same-camera, historical cross-camera, and current-current cross-camera Hessians from the final covariance linearization, conditioned on base factors"
-                    : "pose_scope: realized gain uses actual P_before/P_after; exact 2-source Shapley uses same-camera and historical cross-camera Hessians from the final covariance linearization, conditioned on base factors");
+                    ? "source_scope: 3-source Shapley uses original same-camera, historical cross-camera, and current-current cross-camera Hessians at the final accepted linearization, conditioned on base factors"
+                    : "source_scope: 2-source Shapley uses original same-camera and historical cross-camera Hessians at the final accepted linearization, conditioned on base factors");
       printDivider();
       printLine("Source                    RunFrames  Active  Active%  FinalLvlPatch  FinalRes  IG/frame  IG/active  MedianAct  P10Act  P90Act  Share%");
       printDivider();
@@ -8563,7 +8564,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
         for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
         return;
       }
-      Eigen::MatrixXd usage_iter_h_all;
       Eigen::MatrixXd usage_iter_h_same;
       Eigen::MatrixXd usage_iter_h_cross;
       Eigen::MatrixXd usage_iter_h_current_cross;
@@ -8575,10 +8575,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
       long long usage_iter_residuals_same = 0;
       long long usage_iter_residuals_cross = 0;
       long long usage_iter_residuals_current_cross = 0;
-      Eigen::MatrixXd usage_effective_h_all;
-      Eigen::MatrixXd usage_effective_h_same;
-      Eigen::MatrixXd usage_effective_h_cross;
-      Eigen::MatrixXd usage_effective_h_current_cross;
+      Eigen::MatrixXd usage_visual_hessian;
       directional_update::Result iteration_directional_result;
       double error = 0.0;
       int measurement_count = 0;
@@ -8727,7 +8724,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
       };
       if (usage_stats_en)
       {
-        usage_iter_h_all = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
         usage_iter_h_same = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
         usage_iter_h_cross = Eigen::MatrixXd::Zero(solve_dim, solve_dim);
         if (cross_camera_current_residual_en)
@@ -9451,7 +9447,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
             Feature *reference = ctx.visual_submap->reference_features[point_index];
             VisualPoint *point = ctx.visual_submap->voxel_points[point_index];
             const bool cross_camera = reference->camera_id_ != ctx.camera_id;
-            result.information.addHessianTo(usage_iter_h_all);
             ++usage_iter_patches_all;
             usage_iter_residuals_all += result.dof;
             if (cross_camera)
@@ -9868,7 +9863,6 @@ void VIOManager::computeJacobianAndUpdateEKF()
         error += pair_error;
         if (usage_stats_en)
         {
-          usage_iter_h_all.noalias() += pair_hessian;
           usage_iter_h_current_cross.noalias() += pair_hessian;
           ++usage_iter_patches_all;
           ++usage_iter_patches_current_cross;
@@ -9881,23 +9875,14 @@ void VIOManager::computeJacobianAndUpdateEKF()
         linearize_current_cross_camera();
       }
 
-      if (usage_stats_en)
-      {
-        usage_effective_h_all = usage_iter_h_all;
-        usage_effective_h_same = usage_iter_h_same;
-        usage_effective_h_cross = usage_iter_h_cross;
-        if (cross_camera_current_residual_en)
-          usage_effective_h_current_cross = usage_iter_h_current_cross;
-      }
-
       if (measurement_count > 0 && directional_update_en)
       {
         const double directional_start = omp_get_wtime();
         if (!directional_update::filterInformation(
                 fullCovToSolve(iteration_prior_cov), hessian / measurement_cov, gradient / measurement_cov,
-                directional_drop_variance_reduction,
-                directional_full_variance_reduction,
-                iteration_directional_result, usage_stats_en))
+                directional_boost_strength,
+                directional_weak_variance_reduction,
+                iteration_directional_result))
         {
           *state = state_before_visual_update;
           G.setZero();
@@ -9912,39 +9897,15 @@ void VIOManager::computeJacobianAndUpdateEKF()
         hessian = iteration_directional_result.information * measurement_cov;
         gradient = iteration_directional_result.information_vector * measurement_cov;
 
-        if (usage_stats_en)
-        {
-          std::string component_error;
-          const bool components_valid =
-              directional_update::filterInformationComponent(
-                  usage_iter_h_all, iteration_directional_result,
-                  usage_effective_h_all, component_error) &&
-              directional_update::filterInformationComponent(
-                  usage_iter_h_same, iteration_directional_result,
-                  usage_effective_h_same, component_error) &&
-              directional_update::filterInformationComponent(
-                  usage_iter_h_cross, iteration_directional_result,
-                  usage_effective_h_cross, component_error) &&
-              (!cross_camera_current_residual_en ||
-               directional_update::filterInformationComponent(
-                   usage_iter_h_current_cross, iteration_directional_result,
-                   usage_effective_h_current_cross, component_error));
-          if (!components_valid)
-          {
-            *state = state_before_visual_update;
-            G.setZero();
-            syncCameraExtrinsicsFromState(*state);
-            for (PerCameraData &camera : cameras_) updateFrameState(camera, *state);
-            std::cerr << "[ Directional VIO ] usage-information filtering rejected: "
-                      << component_error << std::endl;
-            return;
-          }
-        }
         visual_directional_time_ += omp_get_wtime() - directional_start;
       }
 
+      // Source attribution keeps the original per-group Hessians. Subtract
+      // this enhanced visual block later to isolate only calibration factors.
+      if (usage_stats_en) usage_visual_hessian = hessian;
+
       // Calibration regularizers are intentionally excluded from observability
-      // classification and added only after filtering the visual measurements.
+      // classification and added only after enhancing the visual measurements.
       if (online_extrinsic_active && online_extrinsic_prior_factor_en)
       {
         constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
@@ -10065,11 +10026,11 @@ void VIOManager::computeJacobianAndUpdateEKF()
       rollback_usage_final_residuals_current_cross = usage_final_residuals_current_cross;
       if (usage_stats_en)
       {
-        usage_final_h_base = solveMatrixToFull(hessian - usage_effective_h_all);
-        usage_final_h_same = solveMatrixToFull(usage_effective_h_same);
-        usage_final_h_cross = solveMatrixToFull(usage_effective_h_cross);
+        usage_final_h_base = solveMatrixToFull(hessian - usage_visual_hessian);
+        usage_final_h_same = solveMatrixToFull(usage_iter_h_same);
+        usage_final_h_cross = solveMatrixToFull(usage_iter_h_cross);
         if (cross_camera_current_residual_en)
-          usage_final_h_current_cross = solveMatrixToFull(usage_effective_h_current_cross);
+          usage_final_h_current_cross = solveMatrixToFull(usage_iter_h_current_cross);
         usage_final_patches_all = usage_iter_patches_all;
         usage_final_patches_same = usage_iter_patches_same;
         usage_final_patches_cross = usage_iter_patches_cross;
@@ -10114,12 +10075,23 @@ void VIOManager::computeJacobianAndUpdateEKF()
         if (active) active_update_indices.push_back(index);
       }
       std::string solve_error;
+      const Eigen::MatrixXd full_solve_information = solveMatrixToFull(solve_hessian / measurement_cov);
+      Eigen::MatrixXd full_solve_noise_information;
+      if (directional_update_en)
+      {
+        // Calibration factors keep their original noise model and weight.
+        // Replace only the visual J1 block by J2 for Joseph propagation.
+        const Eigen::MatrixXd solve_noise_information = solve_hessian / measurement_cov +
+            iteration_directional_result.noise_information - iteration_directional_result.information;
+        full_solve_noise_information = solveMatrixToFull(solve_noise_information);
+      }
       auto factorSolveSystem = [&]() {
         try
         {
           covariance_update = estimator_covariance::update(
-              iteration_prior_cov, solveMatrixToFull(solve_hessian / measurement_cov),
-              solveVectorToFull(-solve_gradient / measurement_cov), prior_delta_full, active_update_indices);
+              iteration_prior_cov, full_solve_information,
+              solveVectorToFull(-solve_gradient / measurement_cov), prior_delta_full, active_update_indices,
+              directional_update_en ? full_solve_noise_information : full_solve_information);
           return true;
         }
         catch (const std::exception &error)
@@ -10271,7 +10243,7 @@ void VIOManager::computeJacobianAndUpdateEKF()
                 << final_directional_result.variance_reductions.maxCoeff()
                 << " rho_mean=" << final_directional_result.variance_reductions.mean()
                 << " active=" << final_directional_result.active_rank
-                << " full=" << final_directional_result.full_rank
+                << " enhanced=" << final_directional_result.enhanced_rank
                 << " dim=" << state->stateDim() << std::endl;
     }
   }

@@ -16,16 +16,16 @@ struct Result
 {
   bool valid = false;
   std::string error;
-  Eigen::MatrixXd information;
+  Eigen::MatrixXd information;       // J1: gain-design information
+  Eigen::MatrixXd noise_information; // J2: covariance of the weighted noise score
   Eigen::VectorXd information_vector;
   Eigen::VectorXd eigenvalues;
   Eigen::VectorXd variance_reductions;
   Eigen::VectorXd weights;
   Eigen::MatrixXd prior_sqrt_lower;
   Eigen::MatrixXd normalized_eigenvectors;
-  Eigen::MatrixXd component_transform;
   int active_rank = 0;
-  int full_rank = 0;
+  int enhanced_rank = 0;
 };
 
 inline Eigen::MatrixXd symmetrize(const Eigen::MatrixXd &matrix)
@@ -39,9 +39,9 @@ template <int Dimension>
 inline bool filterInformationImpl(const Eigen::MatrixXd &prior_covariance,
                                   const Eigen::MatrixXd &measurement_information,
                                   const Eigen::VectorXd &measurement_information_vector,
-                                  double drop_variance_reduction,
-                                  double full_variance_reduction,
-                                  Result &result, bool prepare_components)
+                                  double boost_strength,
+                                  double weak_variance_reduction,
+                                  Result &result)
 {
   using Matrix = Eigen::Matrix<double, Dimension, Dimension>;
   using Vector = Eigen::Matrix<double, Dimension, 1>;
@@ -81,40 +81,34 @@ inline bool filterInformationImpl(const Eigen::MatrixXd &prior_covariance,
     const double lambda = result.eigenvalues[i];
     const double reduction = lambda > 1.0e12 ? 1.0 : lambda / (1.0 + lambda);
     result.variance_reductions[i] = reduction;
-    double weight = 0.0;
-    if (reduction >= full_variance_reduction)
-      weight = 1.0;
-    else if (reduction > drop_variance_reduction)
-      weight = (reduction - drop_variance_reduction) /
-               (full_variance_reduction - drop_variance_reduction);
-    result.weights[i] = std::clamp(weight, 0.0, 1.0);
-    if (result.weights[i] > 0.0) ++result.active_rank;
-    if (result.weights[i] >= 1.0) ++result.full_rank;
+    const double weak_fraction = std::max(0.0, 1.0 - reduction / weak_variance_reduction);
+    result.weights[i] = 1.0 + boost_strength * weak_fraction * weak_fraction;
+    if (lambda > 0.0)
+    {
+      ++result.active_rank;
+      if (result.weights[i] > 1.0) ++result.enhanced_rank;
+    }
   }
 
   const Matrix eigenvectors = solver.eigenvectors();
   result.prior_sqrt_lower = lower;
   result.normalized_eigenvectors = eigenvectors;
-  // B = L^-T U. Reuse this basis for both likelihood terms rather than
-  // reconstructing in normalized coordinates and solving each term again.
+  // B = L^-T U. J1 uses w*lambda to design the gain; J2 uses w^2*lambda
+  // to propagate the original observation noise with that same gain.
   const Matrix basis = lower.transpose().template triangularView<Eigen::Upper>().solve(eigenvectors);
   const Vector weighted_eigenvalues = result.weights.array() * result.eigenvalues.array();
   const Matrix weighted_basis = basis * weighted_eigenvalues.asDiagonal();
   result.information.noalias() = weighted_basis * basis.transpose();
   result.information = symmetrize(result.information);
+  const Vector noise_eigenvalues = result.weights.array() * weighted_eigenvalues.array();
+  const Matrix noise_basis = basis * noise_eigenvalues.asDiagonal();
+  result.noise_information.noalias() = noise_basis * basis.transpose();
+  result.noise_information = symmetrize(result.noise_information);
   const Vector normalized_vector = lower.transpose() * measurement_information_vector;
   Vector modal_vector = eigenvectors.transpose() * normalized_vector;
   modal_vector.array() *= result.weights.array();
   result.information_vector.noalias() = basis * modal_vector;
 
-  if (prepare_components)
-  {
-    // T = L^-T U sqrt(W) U^T L^T applies the identical gate to any additive
-    // information component. Build once; all usage categories share it.
-    const Matrix weighted_component_basis = basis * result.weights.cwiseSqrt().asDiagonal();
-    const Matrix component_gate = weighted_component_basis * eigenvectors.transpose();
-    result.component_transform.noalias() = component_gate * lower.transpose();
-  }
   if (!result.information.array().isFinite().all() || !result.information_vector.array().isFinite().all())
   {
     result.error = "filtered information reconstruction produced non-finite values";
@@ -129,10 +123,9 @@ inline bool filterInformationImpl(const Eigen::MatrixXd &prior_covariance,
 inline bool filterInformation(const Eigen::MatrixXd &prior_covariance,
                               const Eigen::MatrixXd &measurement_information,
                               const Eigen::VectorXd &measurement_information_vector,
-                              double drop_variance_reduction,
-                              double full_variance_reduction,
-                              Result &result,
-                              bool prepare_components = false)
+                              double boost_strength,
+                              double weak_variance_reduction,
+                              Result &result)
 {
   result = Result();
   const Eigen::Index dimension = prior_covariance.rows();
@@ -150,11 +143,10 @@ inline bool filterInformation(const Eigen::MatrixXd &prior_covariance,
     result.error = "non-finite covariance or measurement information";
     return false;
   }
-  if (!std::isfinite(drop_variance_reduction) || !std::isfinite(full_variance_reduction) ||
-      drop_variance_reduction < 0.0 || full_variance_reduction > 1.0 ||
-      full_variance_reduction <= drop_variance_reduction)
+  if (!std::isfinite(boost_strength) || !std::isfinite(weak_variance_reduction) ||
+      boost_strength < 0.0 || weak_variance_reduction > 1.0 || weak_variance_reduction <= 0.0)
   {
-    result.error = "variance-reduction thresholds must satisfy 0 <= drop < full <= 1";
+    result.error = "directional enhancement requires boost >= 0 and 0 < weak <= 1";
     return false;
   }
 
@@ -163,64 +155,21 @@ inline bool filterInformation(const Eigen::MatrixXd &prior_covariance,
   switch (dimension)
   {
     case 18: return detail::filterInformationImpl<18>(prior_covariance, measurement_information,
-        measurement_information_vector, drop_variance_reduction, full_variance_reduction, result, prepare_components);
+        measurement_information_vector, boost_strength, weak_variance_reduction, result);
     case 19: return detail::filterInformationImpl<19>(prior_covariance, measurement_information,
-        measurement_information_vector, drop_variance_reduction, full_variance_reduction, result, prepare_components);
+        measurement_information_vector, boost_strength, weak_variance_reduction, result);
     case 20: return detail::filterInformationImpl<20>(prior_covariance, measurement_information,
-        measurement_information_vector, drop_variance_reduction, full_variance_reduction, result, prepare_components);
+        measurement_information_vector, boost_strength, weak_variance_reduction, result);
     case 21: return detail::filterInformationImpl<21>(prior_covariance, measurement_information,
-        measurement_information_vector, drop_variance_reduction, full_variance_reduction, result, prepare_components);
+        measurement_information_vector, boost_strength, weak_variance_reduction, result);
     default: return detail::filterInformationImpl<Eigen::Dynamic>(prior_covariance, measurement_information,
-        measurement_information_vector, drop_variance_reduction, full_variance_reduction, result, prepare_components);
+        measurement_information_vector, boost_strength, weak_variance_reduction, result);
   }
-}
-
-// Applies the same symmetric directional gate to one additive information
-// component.  Components filtered this way remain positive semidefinite and
-// sum exactly to the filtered total information matrix.
-inline bool filterInformationComponent(const Eigen::MatrixXd &component_information,
-                                       const Result &filter,
-                                       Eigen::MatrixXd &filtered_component,
-                                       std::string &error)
-{
-  const Eigen::Index dimension = component_information.rows();
-  if (!filter.valid || dimension <= 0 || component_information.cols() != dimension ||
-      filter.prior_sqrt_lower.rows() != dimension || filter.prior_sqrt_lower.cols() != dimension ||
-      filter.normalized_eigenvectors.rows() != dimension ||
-      filter.normalized_eigenvectors.cols() != dimension || filter.weights.size() != dimension)
-  {
-    error = "invalid directional filter or component dimensions";
-    return false;
-  }
-  if (!component_information.array().isFinite().all())
-  {
-    error = "non-finite information component";
-    return false;
-  }
-
-  Eigen::MatrixXd uncached_transform;
-  const Eigen::MatrixXd *transform = &filter.component_transform;
-  if (transform->rows() != dimension || transform->cols() != dimension)
-  {
-    const Eigen::MatrixXd basis = filter.prior_sqrt_lower.transpose()
-        .triangularView<Eigen::Upper>().solve(filter.normalized_eigenvectors);
-    uncached_transform = basis * filter.weights.cwiseSqrt().asDiagonal() *
-        filter.normalized_eigenvectors.transpose() * filter.prior_sqrt_lower.transpose();
-    transform = &uncached_transform;
-  }
-  const Eigen::MatrixXd left = (*transform) * symmetrize(component_information);
-  filtered_component.noalias() = left * transform->transpose();
-  filtered_component = symmetrize(filtered_component);
-  if (!filtered_component.array().isFinite().all())
-  {
-    error = "filtered information component contains non-finite values";
-    return false;
-  }
-  return true;
 }
 
 inline bool posteriorCovariance(const Eigen::MatrixXd &prior_covariance,
                                 const Eigen::MatrixXd &total_measurement_information,
+                                const Eigen::MatrixXd &measurement_noise_information,
                                 Eigen::MatrixXd &posterior_covariance,
                                 std::string &error)
 {
@@ -256,7 +205,10 @@ inline bool posteriorCovariance(const Eigen::MatrixXd &prior_covariance,
     error = "posterior information is not positive definite";
     return false;
   }
-  posterior_covariance = symmetrize(posterior_llt.solve(identity));
+  const Eigen::MatrixXd solve_matrix = posterior_llt.solve(identity);
+  const Eigen::MatrixXd a = identity - solve_matrix * symmetrize(total_measurement_information);
+  posterior_covariance = symmetrize(a * prior * a.transpose() +
+      solve_matrix * symmetrize(measurement_noise_information) * solve_matrix.transpose());
   if (!posterior_covariance.array().isFinite().all())
   {
     error = "posterior covariance contains non-finite values";

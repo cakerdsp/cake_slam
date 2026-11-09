@@ -216,8 +216,8 @@ public:
   std::string memory_stats_output_dir;
   std::unique_ptr<memory_stats::Reporter> memory_stats_reporter_;
   bool directional_update_en = false;
-  double directional_drop_variance_reduction = 0.05;
-  double directional_full_variance_reduction = 0.50;
+  double directional_boost_strength = 1.0;
+  double directional_weak_variance_reduction = 0.50;
   int lidar_en = 1;
   bool is_first_frame = false;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;

@@ -202,19 +202,23 @@ struct Update
   Eigen::MatrixXd covariance;
 };
 
-// H' R^-1 H and H' R^-1 (z-h) are supplied in full state coordinates.
+// Information, information vector and its noise covariance are supplied in
+// full state coordinates. Directional weights affect the first two linearly
+// and the noise covariance quadratically; the original prior is retained.
 // Zero gain rows freeze means, while Joseph's formula still updates both
 // cross-covariance blocks. Restoring old rows/columns is not a Schmidt update.
 template <int Dimension>
 inline Update updateImpl(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &information,
                          const Eigen::VectorXd &information_vector,
-                         const Eigen::VectorXd &prior_delta, const std::vector<int> &active)
+                         const Eigen::VectorXd &prior_delta, const std::vector<int> &active,
+                         const Eigen::MatrixXd &noise_information)
 {
   using Matrix = Eigen::Matrix<double, Dimension, Dimension>;
   using Vector = Eigen::Matrix<double, Dimension, 1>;
   const int n = static_cast<int>(prior.rows());
   const Matrix p = symmetric(Matrix(prior));
   const Matrix info = symmetric(Matrix(information));
+  const Matrix noise = symmetric(Matrix(noise_information));
   const Matrix identity = Matrix::Identity(n, n);
   const Eigen::LLT<Matrix> prior_llt(p);
   if (prior_llt.info() != Eigen::Success) throw std::runtime_error("full prior covariance is not positive definite");
@@ -234,7 +238,7 @@ inline Update updateImpl(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &in
   const Vector delta = prior_delta;
   const Vector correction = selected_b * rhs + selected_prior - gain_times_jacobian * delta;
   const Matrix a = identity - gain_times_jacobian;
-  const Matrix covariance = symmetric(a * p * a.transpose() + selected_b * info * selected_b.transpose());
+  const Matrix covariance = symmetric(a * p * a.transpose() + selected_b * noise * selected_b.transpose());
   if (!correction.allFinite() || !covariance.allFinite() ||
       Eigen::LLT<Matrix>(covariance).info() != Eigen::Success)
     throw std::runtime_error("invalid full posterior covariance");
@@ -247,7 +251,8 @@ inline Update updateImpl(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &in
 
 inline Update update(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &information,
                      const Eigen::VectorXd &information_vector,
-                     const Eigen::VectorXd &prior_delta, const std::vector<int> &active)
+                     const Eigen::VectorXd &prior_delta, const std::vector<int> &active,
+                     const Eigen::MatrixXd &noise_information)
 {
   const int n = static_cast<int>(prior.rows());
   if (prior.cols() != n || information.rows() != n || information.cols() != n ||
@@ -257,11 +262,19 @@ inline Update update(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &inform
     throw std::runtime_error("invalid covariance update input");
   switch (n)
   {
-    case 19: return updateImpl<19>(prior, information, information_vector, prior_delta, active);
-    case 20: return updateImpl<20>(prior, information, information_vector, prior_delta, active);
-    case 21: return updateImpl<21>(prior, information, information_vector, prior_delta, active);
-    default: return updateImpl<Eigen::Dynamic>(prior, information, information_vector, prior_delta, active);
+    case 19: return updateImpl<19>(prior, information, information_vector, prior_delta, active, noise_information);
+    case 20: return updateImpl<20>(prior, information, information_vector, prior_delta, active, noise_information);
+    case 21: return updateImpl<21>(prior, information, information_vector, prior_delta, active, noise_information);
+    default: return updateImpl<Eigen::Dynamic>(prior, information, information_vector, prior_delta, active, noise_information);
   }
+}
+
+// Unweighted observations have Cov(H' R^-1 v) = H' R^-1 H.
+inline Update update(const Eigen::MatrixXd &prior, const Eigen::MatrixXd &information,
+                     const Eigen::VectorXd &information_vector,
+                     const Eigen::VectorXd &prior_delta, const std::vector<int> &active)
+{
+  return update(prior, information, information_vector, prior_delta, active, information);
 }
 
 // Covariance upper bound for a sum of vectors whose cross-correlations are

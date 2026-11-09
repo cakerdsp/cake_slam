@@ -533,8 +533,8 @@ public:
   bool cross_camera_reference_en = false;
   bool cross_camera_current_residual_en = false;
   bool directional_update_en = false;
-  double directional_drop_variance_reduction = 0.05;
-  double directional_full_variance_reduction = 0.50;
+  double directional_boost_strength = 1.0;
+  double directional_weak_variance_reduction = 0.50;
   bool online_extrinsic_en = false;
   bool online_extrinsic_rot_en = true;
   bool online_extrinsic_trans_en = true;
