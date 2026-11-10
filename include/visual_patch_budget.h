@@ -50,7 +50,7 @@ inline RuntimeSettings resolveSettings(bool enabled, const std::string &mode, co
   out.score = parseScore(score);
   out.points = module_points;
   out.log_enabled = log_enabled;
-  out.geometry_enabled = out.score == Score::LidarDirectional;
+  out.geometry_enabled = out.score != Score::ShiTomasi;
   return out;
 }
 

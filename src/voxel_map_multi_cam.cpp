@@ -455,6 +455,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   Eigen::Matrix<double, BASE_STATE_DIM, BASE_STATE_DIM> H_T_H =
       Eigen::Matrix<double, BASE_STATE_DIM, BASE_STATE_DIM>::Zero();
   directional_update::Result final_directional_result;
+  visual_patch_score::GeometrySummary pending_visual_geometry;
   Eigen::MatrixXd final_posterior_covariance;
 
   // Keep scratch allocations across ICP iterations; dimensions and values are
@@ -489,10 +490,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
     // double t1 = omp_get_wtime();
 
-    if (visual_patch_geometry_en && iterCount == 0)
-      BuildResidualListWithVisualPatchGeometry(pv_list_, ptpl_list_);
-    else
-      BuildResidualListOMP(pv_list_, ptpl_list_);
+    BuildResidualListOMP(pv_list_, ptpl_list_);
 
     // build_residual_time += omp_get_wtime() - t1;
 
@@ -516,6 +514,11 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     meas_vec.resize(effct_feat_num_);
     meas_vec.setZero();
     const M3D r_wl = state_.rot_end * extR_;
+    if (visual_patch_geometry_en)
+    {
+      pending_visual_geometry.displacement_metric.setZero();
+      pending_visual_geometry.weight_sum = 0.0;
+    }
     for (int i = 0; i < effct_feat_num_; i++)
     {
       auto &ptpl = ptpl_list_[i];
@@ -546,6 +549,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       V3D A(point_crossmat * state_.rot_end.transpose() * ptpl_list_[i].normal_);
       Hsub.row(i) << VEC_FROM_ARRAY(A), ptpl_list_[i].normal_[0], ptpl_list_[i].normal_[1], ptpl_list_[i].normal_[2];
       Hsub_T_R_inv.col(i) = Hsub.row(i).transpose() / variance;
+      if (visual_patch_geometry_en)
+        visual_patch_score::accumulateDisplacementMetric(pending_visual_geometry, point_this, state_.rot_end, 1.0 / variance);
       meas_vec(i) = -ptpl_list_[i].dis_to_plane_;
     }
     EKF_stop_flg = false;
@@ -556,6 +561,16 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     // fout_dbg<<"HTz: "<<HTz<<endl;
     if (config_setting_.directional_update_en) H_T_H.setZero();
     H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
+    if (visual_patch_geometry_en)
+    {
+      pending_visual_geometry.information = H_T_H.block<6, 6>(0, 0);
+      pending_visual_geometry.world_from_body = state_.rot_end;
+      pending_visual_geometry.body_position = state_.pos_end;
+      pending_visual_geometry.count = effct_feat_num_;
+      pending_visual_geometry.valid = effct_feat_num_ >= 30 && pending_visual_geometry.information.allFinite() &&
+          pending_visual_geometry.displacement_metric.allFinite() && std::isfinite(pending_visual_geometry.weight_sum) &&
+          pending_visual_geometry.weight_sum > 0.0;
+    }
     // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
     information_vector.setZero();
     information_vector.head<6>() = HTz;
@@ -631,6 +646,9 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
                   << " dim=" << lio_state_dim << std::endl;
       }
       state_.cov = final_posterior_covariance;
+      // Publish only after a successful update. Early returns leave the
+      // summary invalid, including failures after an earlier ICP iteration.
+      if (visual_patch_geometry_en) visual_patch_geometry = pending_visual_geometry;
       // total_distance += (_state.pos_end - position_last).norm();
       position_last_ = state_.pos_end;
       geoQuat_ = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));
@@ -1107,5 +1125,3 @@ void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const i
   std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" root voxels"<<RESET<<"\n";
   // std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" voxels using "<<delete_time<<" s"<<RESET<<"\n";
 }
-
-#include "voxel_patch_budget_geometry.inc"

@@ -13,9 +13,10 @@
 | | `sequential` | 原相机顺序，失败也扣预算，严格限制候选尝试数 |
 | | `global` | 所有相机先收集和评分，再用保底/上限约束分配全局名额 |
 | `vio.patch_score_mode` | `shi_tomasi` | 原角点评分 |
-| | `isotropic` | 平移光度敏感度，方向矩阵为单位阵 |
-| | `lidar_directional` | 使用 LiDAR 平面法向量形成方向权重 |
+| | `isotropic` | 使用相同点位移度量，归一化后的六个方向均等权 |
+| | `lidar_directional` | 使用 LiDAR 六维位姿测量信息形成方向权重，包含旋转、平移及其耦合 |
 | `vio.patch_budget_log_en` | `false/true` | 输出逐帧预算、几何有效性和耗时 |
+| `vio.patch_score_regularization_ratio` | 默认 `0.1` | 正则项与最大广义特征值之比 |
 
 参数分别保存在各数据集原有 YAML 的 `vio` 段：自测使用 `config/mid360_mei_multi_cam.yaml`，HILTI22 使用 `config/HILTI22_multi_cam.yaml`，M2DGR 使用 `config/M2DGR_multi_cam.yaml`。各自原有 launch 直接加载本数据集 YAML 和相机 YAML。
 
@@ -32,7 +33,9 @@ vio:
 
 三套 YAML 各自配置为 `false + global + lidar_directional + 400`，可以分别调整。关闭后，新模式、400 配额和新增日志选项均不生效，继续使用数据集原来的 `max_total_points` 及其预算语义。地图管理、跨相机残差、相机标定和原预算值继续使用各自原配置。
 
-原始路径与 `patch_budget_mode: legacy` 有明确区别：总开关关闭时调用保留的原始 VIO 函数，跳过候选准备/处理拆分、全局调度和新增日志；LiDAR 调用原始残差函数，不收集方向统计，地图点 ID 也保留原行为。`legacy` 则是开启模块时可选的旧预算规则，用于对照实验。原始函数保存在 `src/vio_patch_budget_baseline.inc`，新增 LiDAR 统计放在 `src/voxel_patch_budget_geometry.inc`；两者由对应 cpp 包含，提交代码时需一并包含。
+原始路径与 `patch_budget_mode: legacy` 有明确区别：总开关关闭时调用保留的原始 VIO 函数，跳过候选准备/处理拆分、全局调度和新增日志；LiDAR 调用原始残差函数，不保存方向统计，地图点 ID 也保留原行为。`legacy` 则是开启模块时可选的旧预算规则，用于对照实验。原始 VIO 函数保存在 `src/vio_patch_budget_baseline.inc`。六自由度版本直接复用 LiDAR 已计算的原始信息矩阵，已移除旧版额外遍历法向量的 `voxel_patch_budget_geometry.inc`。
+
+已移除手设的旋转／平移尺度 D。上一版的 `patch_score_rotation_scale` 和 `patch_score_translation_scale` 不再读取，若曾手工加入 YAML，可删除。仅保留软权重参数 `patch_score_regularization_ratio`，代码默认 0.1，无须补充 YAML；只在开启时读取，默认值未经数据集调优。
 
 在所用 YAML 中将 `patch_budget_en` 设为 `true` 后，继续使用对应的原启动文件。以下是三个入口，选择当前数据集的一条：
 
@@ -56,23 +59,45 @@ roslaunch cake_slam mapping_m2dgr_multi_cam.launch
 
 ## 数学对象与开销
 
-每个候选复用原 Shi–Tomasi 的 8×8 中心差分扫描，得到 `G = mean(g g^T)`；在 patch 中心使用相机解析投影 Jacobian。分数为：
+每个候选复用原 Shi–Tomasi 的 8×8 中心差分扫描，得到 `G = mean(g g^T)`；在 patch 中心使用相机解析投影 Jacobian，以及现有外参和相机采集时刻的位姿导数。旋转采用机体右扰动，平移采用世界坐标增量：
 
 ```text
+J_pose = J_projection * [skew(point_c) * Jdphi_dR - Jdp_dR, -Jdp_dt]
 s = inverse_exposure² / fixed_image_noise_variance
-    * trace(G * J_projection * R_cw * W * R_cw^T * J_projection^T)
+    * trace(G * J_pose * Q * J_pose^T)
 ```
 
-它是局部平移光度敏感度，未建模成功概率、旋转消元、观测相关性或真实后验信息增益。所有相机沿用当前曝光模型及统一基础图像噪声尺度，没有读取状态协方差 P，也没有按各相机平均分重新归一化。
+它衡量候选的六自由度光度敏感度，并以 LiDAR 薄弱方向加权；没有将评分解释为真实后验信息增益。所有相机沿用当前曝光模型及统一基础图像噪声尺度，没有按各相机平均分重新归一化。相机时间偏移和外参杆臂由既有位姿导数处理。
 
-LiDAR 方向统计只在第一轮几何关联中均匀抽取至多 1024 个点，在原主体素遍历期间、协方差门控之前收集最近的有效平面法向量。固定点到面距离阈值为 0.3 m；不收集依赖协方差门控结果触发的相邻体素搜索。法向量不少于 30 个时计算：
+LiDAR 更新成功后保存最后一次线性化的原始信息矩阵及其姿态、位置。在原残差循环中同步累计点位移度量，采用完全相同的有效点和权重 `w_i = 1 / variance_i`，不新增点云关联或额外遍历。令 `B_i = [-R skew(p_i), I3]` 为世界系点位移对机体右旋转／世界平移的雅可比，则：
 
 ```text
-H = mean(n n^T)
-W = 0.1 * inverse(H + 0.1 I)
+H_sum = H_L^T R_L^-1 H_L = sum_i w_i B_i^T n_i n_i^T B_i
+M_sum = sum_i w_i B_i^T B_i
+weight_sum = sum_i w_i
 ```
 
-统计不足、无效或时间差不在 [-0.05, 0.5] 秒时，当帧回退到单位方向权重，日志 `geometry_fresh=0`。这不意味着整个估计器不使用 P，只意味着给定姿态与地图时，选择器不读取 P。
+信息矩阵取自后端方向加权之前，不包含先验信息矩阵。视觉帧到来时，两种二次型一起转换到当前机体原点和姿态，并除以总权重：
+
+```text
+A = [R_snapshot^T R_current,                    0;
+     skew(p_current - p_snapshot) R_current,   I3]
+H = A^T H_sum A / weight_sum
+M = A^T M_sum A / weight_sum
+C^T M C = I6
+N = C^T H C = U diag(lambda_k) U^T
+alpha = regularization_ratio * lambda_max(N)
+f_k = alpha / (lambda_k + alpha)
+Q = C U diag(f_k) U^T C^T
+```
+
+这等价于求解 `H v_k = lambda_k M v_k`。广义特征值位于 [0,1]，表示对应运动的点位移中，被点到面残差感知的加权平方比例。`A` 转换运动坐标与旋转中心，不重新建立几何关联；`C` 由实际点集度量得到，不是指定角度和距离的换算比例。所有特征值为零时采用 `f_k=1`。`isotropic` 同样采用 M，但将所有 `f_k` 设为 1，因此 `Q=M^-1`。
+
+利用 M 的平移块为单位阵这一结构，先通过 Schur 补得到点集关于加权中心的旋转惯性矩阵，再对这个 3×3 矩阵分解并构造完整的 C。旋转与平移耦合完整保留；这不是将 H 的旋转／平移解耦判定，也没有设置特征长度。除以总权重后，统一重复观测或整体缩放噪声权重不会改变评分。坐标原点改变时，物理评分保持一致；长度单位改变时，特征值保持一致，分数仅按长度平方的倒数整体缩放，不改变同帧候选排序。评分不读取 P；有效残差集合仍经过 LIO 原有的协方差门控。
+
+有效残差不足 30 个、信息无效、LiDAR 更新失败、时间差不在 [-0.05, 0.5] 秒，或点集关于加权中心的旋转惯性矩阵最小／最大特征值比不大于 `1e-10` 时，整帧回退到既有 Shi–Tomasi 评分，继续执行预算分配。回退时 `geometry_fresh=0`、`score_dof=0`，`metric_status` 给出原因。该阈值只用于点位移度量的数值可逆性检查，不是 LiDAR 退化判据；不向 M 添加任意单位阵。共面非共线点集仍可给出正定 M，共线／近共线点集会触发上述检查。原 LiDAR 更新公式及后端方向增强逻辑未修改。
+
+点位移度量与广义谱的参考：Brégier 等的 [rigid-object pose metric](https://arxiv.org/abs/1612.04631)，以及 [Degenerate in Whose Frame?](https://arxiv.org/html/2608.15532v1) 的点位移度量。这里将同权重度量接入当前 AVA 连续视觉评分；参考文献不构成当前系统运行效果的验证。
 
 每台相机以地图点分组，同一点只计算一次评分，主参考和备用参考随组保留，不分别参与排序。全局模式每台相机最多缓存 `points_per_camera_max` 个点组的元数据及其参考索引，不预先生成 support。先给每台相机保留配额，再根据各相机的下一点组评分分配剩余配额；相机 ID 与地图点 ID 用于确定同分顺序。
 
@@ -87,6 +112,8 @@ W = 0.1 * inverse(H + 0.1 I)
 每帧在应用地图退休前清空上一帧的相机对引用；零观测帧即使跳过联合更新，也不会保留上一帧相机对的地图指针。
 
 ## 建议对照
+
+若按论文当前方案只评估 AVA、不使用原方向性增强，应将 `common.directional_update_en` 设为 `false`。本次六自由度扩展没有改动数据集 YAML；当前自采 `mid360_mei_multi_cam.yaml` 中该项仍为 `true`，M2DGR 和 HILTI22 为 `false`。
 
 保持 bag、播放速率、日志和其他配置一致，仅按表改变策略及预算，每次启动独立进程。若评估地图管理开启的系统，各组均应保持 `visual_map_manage_en: true` 和相同的管理子选项：
 
@@ -107,13 +134,15 @@ W = 0.1 * inverse(H + 0.1 I)
 - `cameras_quota_attempted_accepted` 展示每台相机的配额、尝试数、有效数。
 - `prepare_ms` 包含候选收集、评分及排序；`sort_ms` 是其中的排序子阶段，不能再次相加。
 - `allocate_ms` 是全局标量分配与截取；`vio_ms` 是整个 VIO 阶段，已经包含前述工作。
-- `geometry_aggregate_us` 只包含法向量汇总和 3×3 分解，不包含关联时的收集开销。几何收集的全部开销在既有 LIO 阶段计时内。
+- `score_dof=6` 表示正在使用六自由度评分；Shi–Tomasi 或几何失效回退为 0。`geometry_lambda_min/max` 和 `geometry_alpha` 对应广义特征值和软权重正则项。
+- `metric=point_displacement` 标识新度量；`metric_status=ok` 表示成功。`stale_or_missing` 为摘要过期或不可用，`insufficient_geometry` 为有效残差不足，`invalid_metric/singular_metric` 为点位移度量无效／病态，`invalid_spectrum` 为广义谱检查失败。`metric_rcond` 为点集关于加权中心的旋转惯性矩阵最小／最大特征值比，只作为数值诊断。
+- `geometry_aggregate_us` 包含视觉帧开始时的摘要转换、度量白化及一次 3×3、一次 6×6 特征分解，已包含在 `vio_ms` 中。LiDAR 残差循环累计 M 的开销计入原 LIO 时间，没有新增点云搜索或额外点云遍历。实际增量耗时尚未在 NUC 测量。
 - `pair_observations` 是进入当前相机配对的观测数；`pair_bound` 是由该数量及相机数计算出的理论数量上界，不是另一个配置预算。
 - `pair_attempted`/`pair_accepted` 分别统计实际开始处理及通过门限的当前相机对；它们单独统计，不混入历史参考的 `attempted`。原相机对计算与权重规则保留。
 
 先核对实际配额和上限，再比较公共时间段的 LIO+VIO 耗时、有效点数和共同真值时间戳上的 ATE。ROS 回放相位或线程调度可能造成波动，建议至少重复两次。新增调度开销平均 0.2 ms 是目标，不是已验证结果。
 
-## 本地数学测试
+## NUC 上的独立数学测试
 
 不依赖 ROS，使用 Eigen 的独立 CMake 测试：
 
@@ -124,8 +153,12 @@ cmake --build /tmp/cake-patch-budget-tests \
 ctest --test-dir /tmp/cake-patch-budget-tests -R visual_patch --output-on-failure
 ```
 
-测试包括 2000 组小规模穷举最优值对照、相机置换和同分不变性、缺失候选、配额边界、显式 64 像素 Jacobian 能量对照、亮度/曝光尺度不变性、世界坐标旋转一致性与几何失效回退。纯分配器计时不包含图像扫描、候选排序或 ROS 运行时，不能当成完整系统开销。
+测试包括 2000 组小规模穷举最优值对照、相机置换和同分不变性、缺失候选、配额边界、含外参与时间偏移的六维投影导数有限差分、旋转/平移耦合弱模态、显式 64 像素 Jacobian 能量对照、亮度/曝光尺度不变性、线性化原点转换、世界坐标变换一致性与几何失效回退。点位移版本还检查 H/M 同步转换、软权重闭式解、度量各向同性对照、长度单位变化、共面可用与共线拒绝。纯分配器计时不包含图像扫描、候选排序或 ROS 运行时，不能当成完整系统开销。
 
 总开关测试检查 false 时忽略新模式、配额与日志设置，包括无效实验配置；原函数源码检查使用原提交的固定指纹，验证关闭路径的两个 VIO 与两个 LiDAR 函数保持原始函数体，以及 launch 配额参数隔离。源码一致性不代表编译后的二进制、每次回放轨迹或耗时逐位一致。
 
 最初版本完成过 4 项独立检查及 YAML/launch 解析。之后的地图管理、跨相机残差兼容修改，以及恢复各数据集独立参数配置，均按用户要求只做简单静态检查：阅读差异、XML 结构与加载路径检查、git diff --check；没有编译、运行测试、离线实验或连接远端。既往检查结果不覆盖这些后续改动，完整编译和运行效果尚未验证。
+
+六自由度扩展已更新独立 C++ 数学测试源码；本地不编译、不运行 SLAM。另用 Python 数值计算核对六维导数、坐标转换及评分公式，并运行原始关闭路径的源码指纹检查；这些检查不代替 NUC 上的 C++ 编译与回放验证。
+
+点位移版本追加通过 150 组独立 Python 随机数值检查，包括广义谱、闭式软权重、单位／原点转换、六维投影导数及共面／共线边界；C++ 测试源码已更新但未在本地编译执行。

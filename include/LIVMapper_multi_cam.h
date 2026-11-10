@@ -232,6 +232,7 @@ public:
   std::string patch_budget_mode = "global";
   std::string patch_score_mode = "lidar_directional";
   bool patch_budget_log_en = false;
+  visual_patch_score::Settings patch_score_settings;
   int max_total_points = 150;
   int points_per_camera_min = 50;
   int points_per_camera_max = 150;

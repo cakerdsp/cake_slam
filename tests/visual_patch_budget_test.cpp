@@ -49,7 +49,7 @@ int main()
   require(enabled.mode == visual_patch_budget::Mode::Global && enabled.score == visual_patch_budget::Score::LidarDirectional &&
           enabled.points == 400 && enabled.log_enabled && enabled.geometry_enabled, "enabled settings not applied");
   const auto isotropic = visual_patch_budget::resolveSettings(true, "global", "isotropic", 500, 400, false);
-  require(!isotropic.geometry_enabled, "isotropic ablation must not collect LiDAR geometry");
+  require(isotropic.geometry_enabled, "isotropic ablation must use the same displacement metric");
   std::mt19937 random(12345);
   for (int trial = 0; trial < 2000; ++trial)
   {

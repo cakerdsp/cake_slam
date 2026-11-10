@@ -5866,12 +5866,9 @@ void VIOManager::prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
           cv::Point2f(static_cast<float>(raw_px[0]), static_cast<float>(raw_px[1])), reason);
     }
   };
-  M3D weight_camera = M3D::Identity();
-  if (patch_score != visual_patch_budget::Score::ShiTomasi)
-    weight_camera = ctx.Rcw * patch_budget_frame_weight_ * ctx.Rcw.transpose();
   auto computeShiTomasiCandidateScore = [&](const V2D &raw_px, const V3D &point_c) {
     ++ctx.budget_scored;
-    if (patch_score == visual_patch_budget::Score::ShiTomasi)
+    if (patch_score == visual_patch_budget::Score::ShiTomasi || !patch_budget_frame_geometry_.valid)
     {
       const float score = maskedShiTomasiScore(ctx, img, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]));
       return std::isfinite(score) ? (patch_budget_mode == visual_patch_budget::Mode::Legacy
@@ -5881,7 +5878,9 @@ void VIOManager::prepareVirtualCandidates(PerCameraData &ctx, const cv::Mat &img
         img.data, img.step[0], img.cols, img.rows, static_cast<int>(raw_px[0]), static_cast<int>(raw_px[1]));
     MD(2, 3) projection;
     if (!computeCameraModelProjectionJacobianForContext(ctx, point_c, projection)) return 0.0;
-    return visual_patch_score::sensitivity(tensor, projection, weight_camera,
+    const auto pose_projection = visual_patch_score::poseProjection(
+        projection, point_c, ctx.Jdphi_dR, ctx.Jdp_dR, ctx.Jdp_dt);
+    return visual_patch_score::sensitivity(tensor, pose_projection, patch_budget_frame_geometry_.weight,
                                           state->inv_expo_time[ctx.camera_id], photometricNoiseCovariance());
   };
 
@@ -13829,10 +13828,20 @@ void VIOManager::processMultiCameraFrameWithPatchBudget(const MeasureGroup &meas
     throw std::runtime_error("MultiCameraFrame image count does not match VIOManager camera count");
 
   const double frame_start = omp_get_wtime();
-  patch_budget_frame_weight_.setIdentity();
-  patch_budget_geometry_fresh_ = patch_score == visual_patch_budget::Score::LidarDirectional &&
+  const double geometry_start = omp_get_wtime();
+  patch_budget_frame_geometry_ = visual_patch_score::DirectionalWeight();
+  patch_budget_geometry_fresh_ = patch_score != visual_patch_budget::Score::ShiTomasi &&
                                  visual_patch_score::fresh(patch_budget_geometry, mf.timestamp);
-  if (patch_budget_geometry_fresh_) patch_budget_frame_weight_ = patch_budget_geometry.weight;
+  if (patch_budget_geometry_fresh_)
+  {
+    patch_budget_frame_geometry_ = visual_patch_score::directionalWeight(
+        patch_budget_geometry, state->rot_end, state->pos_end, patch_score_settings,
+        patch_score == visual_patch_budget::Score::LidarDirectional);
+    patch_budget_geometry_fresh_ = patch_budget_frame_geometry_.valid;
+  }
+  else
+    patch_budget_frame_geometry_.status = patch_score == visual_patch_budget::Score::ShiTomasi ? "not_requested" : "stale_or_missing";
+  patch_budget_geometry_seconds_ = omp_get_wtime() - geometry_start;
   patch_budget_sort_seconds_ = 0.0;
   patch_budget_pair_observations_ = patch_budget_pair_bound_ = 0;
   patch_budget_pair_attempted_ = patch_budget_pair_accepted_ = 0;
@@ -14053,13 +14062,18 @@ void VIOManager::processMultiCameraFrameWithPatchBudget(const MeasureGroup &meas
     }
     printf("[PATCH_BUDGET] frame=%d t=%.9f mode=%d score=%d limit=%d scored=%d attempted=%d accepted=%d "
            "prepare_ms=%.6f sort_ms=%.6f allocate_ms=%.6f vio_ms=%.6f geometry_count=%d geometry_fresh=%d "
-           "geometry_aggregate_us=%.6f cameras_quota_attempted_accepted={%s} "
+           "geometry_aggregate_us=%.6f score_dof=%d geometry_lambda_min=%.6g geometry_lambda_max=%.6g "
+           "geometry_alpha=%.6g metric=point_displacement metric_rcond=%.6g metric_status=%s "
+           "cameras_quota_attempted_accepted={%s} "
            "pair_observations=%lld pair_bound=%lld pair_attempted=%lld pair_accepted=%lld\n",
            mf.frame_id, mf.timestamp, static_cast<int>(patch_budget_mode), static_cast<int>(patch_score),
            max_total_points, scored, attempted, accepted, 1000.0 * budget_prepare_seconds,
            1000.0 * patch_budget_sort_seconds_, 1000.0 * budget_allocate_seconds, 1000.0 * elapsed,
            patch_budget_geometry.count, patch_budget_geometry_fresh_ ? 1 : 0,
-           1.0e6 * patch_budget_geometry.aggregate_seconds, camera_counts.c_str(),
+           1.0e6 * patch_budget_geometry_seconds_, patch_budget_frame_geometry_.valid ? 6 : 0,
+           patch_budget_frame_geometry_.lambda_min,
+           patch_budget_frame_geometry_.lambda_max, patch_budget_frame_geometry_.alpha,
+           patch_budget_frame_geometry_.metric_rcond, patch_budget_frame_geometry_.status, camera_counts.c_str(),
            static_cast<long long>(patch_budget_pair_observations_), static_cast<long long>(patch_budget_pair_bound_),
            static_cast<long long>(patch_budget_pair_attempted_), static_cast<long long>(patch_budget_pair_accepted_));
   }

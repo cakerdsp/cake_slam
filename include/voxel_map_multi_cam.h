@@ -249,11 +249,6 @@ public:
 
   void build_single_residual(pointWithVar &pv, const VoxelOctoTree *current_octo, const int current_layer, bool &is_sucess, double &prob,
                              PointToPlane &single_ptpl);
-  void BuildResidualListWithVisualPatchGeometry(std::vector<pointWithVar> &pv_list,
-                                               std::vector<PointToPlane> &ptpl_list);
-  void build_single_residual_with_geometry(pointWithVar &pv, const VoxelOctoTree *current_octo,
-                                          int current_layer, bool &is_sucess, double &prob,
-                                          PointToPlane &single_ptpl, visual_patch_score::GeometrySample *geometry_sample);
 
   void pubVoxelMap();
 

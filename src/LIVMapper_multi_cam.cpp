@@ -420,6 +420,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   try_declare.template operator()<std::string>("vio.patch_budget_mode", "global");
   try_declare.template operator()<std::string>("vio.patch_score_mode", "lidar_directional");
   try_declare.template operator()<bool>("vio.patch_budget_log_en", false);
+  try_declare.template operator()<double>("vio.patch_score_regularization_ratio", 0.1);
   try_declare.template operator()<int>("vio.max_total_points", 150);
   try_declare.template operator()<int>("vio.points_per_camera_min", 50);
   try_declare.template operator()<int>("vio.points_per_camera_max", 150);
@@ -694,6 +695,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   getRosParam(this->node, "vio.patch_budget_mode", patch_budget_mode);
   getRosParam(this->node, "vio.patch_score_mode", patch_score_mode);
   getRosParam(this->node, "vio.patch_budget_log_en", patch_budget_log_en);
+  if (patch_budget_en)
+  {
+    getRosParam(this->node, "vio.patch_score_regularization_ratio", patch_score_settings.regularization_ratio);
+  }
   getRosParam(this->node, "vio.max_total_points", max_total_points);
   getRosParam(this->node, "vio.points_per_camera_min", points_per_camera_min);
   getRosParam(this->node, "vio.points_per_camera_max", points_per_camera_max);
@@ -894,6 +899,8 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
     // Validate runtime capabilities, never dataset names. List every offending
     // setting so a shared error cannot disguise unrelated configuration issues.
     std::ostringstream errors;
+    if (budget_settings.score != visual_patch_budget::Score::ShiTomasi && !patch_score_settings.valid())
+      errors << "\n - vio.patch_score_regularization_ratio must be finite and positive";
     if (frontend_mode != 0)
       errors << "\n - vio.frontend_mode=" << frontend_mode << "; requires 0 (direct frontend)";
     if (!virtual_fisheye_patch_en)
@@ -930,6 +937,9 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
                     << " map_retirement=" << visual_map_retirement_apply_en
                     << " current_cross_camera_residual=" << cross_camera_current_residual_en
                     << "; current pairs reuse selected observations and are counted separately");
+    if (budget_settings.score != visual_patch_budget::Score::ShiTomasi)
+      ROS_INFO_STREAM("[visual_patch_budget] score_dof=6 metric=point_displacement"
+                      << " regularization_ratio=" << patch_score_settings.regularization_ratio);
   }
   if (usage_stats_window <= 0) throw std::runtime_error("vio.usage_stats_window must be positive");
 
@@ -1099,6 +1109,7 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->patch_budget_mode = budget_settings.mode;
   vio_manager->patch_score = budget_settings.score;
   vio_manager->patch_budget_log_en = budget_settings.log_enabled;
+  vio_manager->patch_score_settings = patch_score_settings;
   voxelmap_manager->visual_patch_geometry_en = budget_settings.geometry_enabled;
   vio_manager->max_total_points = budget_settings.points;
   vio_manager->points_per_camera_min = points_per_camera_min;

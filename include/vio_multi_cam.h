@@ -612,7 +612,9 @@ public:
   visual_patch_budget::Score patch_score = visual_patch_budget::Score::ShiTomasi;
   bool patch_budget_log_en = false;
   visual_patch_score::GeometrySummary patch_budget_geometry;
-  M3D patch_budget_frame_weight_ = M3D::Identity();
+  visual_patch_score::Settings patch_score_settings;
+  visual_patch_score::DirectionalWeight patch_budget_frame_geometry_;
+  double patch_budget_geometry_seconds_ = 0.0;
   bool patch_budget_geometry_fresh_ = false;
   double patch_budget_sort_seconds_ = 0.0;
   // Separate from the historical reference-attempt budget. All current-camera
